@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cron-loop 任务中心</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2f3a;
+    --text: #e6e9ef; --muted: #8b93a3; --accent: #4d9fff;
+    --ok: #3fb96f; --err: #e5534b; --run: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 17px; margin: 0; }
+  header .spacer { flex: 1; }
+  header button { background: var(--accent); border: 0; color: #fff; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 18px 20px 60px; }
+  section { margin-bottom: 26px; }
+  h2 { font-size: 15px; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; background: rgba(255,255,255,0.02); }
+  tr:last-child td { border-bottom: 0; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+  .pill.ok { background: rgba(63,185,111,.15); color: var(--ok); }
+  .pill.error { background: rgba(229,83,75,.15); color: var(--err); }
+  .pill.running { background: rgba(210,153,34,.15); color: var(--run); }
+  .pill.off { background: rgba(139,147,163,.15); color: var(--muted); }
+  .cwd { color: var(--muted); font-size: 12px; }
+  .actions button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 3px 8px; margin-right: 5px; cursor: pointer; font-size: 12px; }
+  .actions button:hover { border-color: var(--accent); color: var(--accent); }
+  .actions button.danger:hover { border-color: var(--err); color: var(--err); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: 460px; max-width: 92vw; }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog h3 { margin: 0 0 14px; font-size: 15px; }
+  dialog label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
+  dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 9px; font: inherit; }
+  dialog textarea { min-height: 72px; resize: vertical; }
+  dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+  dialog .row button { padding: 6px 16px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; }
+  dialog .row button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .empty { color: var(--muted); padding: 26px; text-align: center; background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; }
+  .err-text { color: var(--err); font-size: 12px; max-width: 340px; overflow-wrap: anywhere; }
+  .summary { color: var(--muted); font-size: 12px; max-width: 380px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  a { color: var(--accent); text-decoration: none; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⏰ cron-loop 任务中心</h1>
+  <span class="cwd" id="headInfo"></span>
+  <div class="spacer"></div>
+  <button id="btnNew">＋ 新建任务</button>
+</header>
+<main>
+  <section>
+    <h2>定时任务</h2>
+    <div id="jobsWrap"><div class="empty">加载中…</div></div>
+  </section>
+  <section>
+    <h2>最近执行历史</h2>
+    <div id="runsWrap"><div class="empty">加载中…</div></div>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <h3 id="dlgTitle">新建任务</h3>
+  <label>任务名称（可选）</label>
+  <input id="fName" placeholder="留空自动取 prompt 前 24 字">
+  <label>项目目录（cwd，绝对路径）</label>
+  <input id="fCwd" placeholder="/Users/you/projects/demo">
+  <label>cron 表达式（5 段：分 时 日 月 周）</label>
+  <input id="fCron" placeholder="0 9 * * 1-5">
+  <label>任务 prompt（到期后注入会话执行）</label>
+  <textarea id="fPrompt" placeholder="总结本项目昨天的 git 提交，输出要点列表"></textarea>
+  <div class="row">
+    <button id="btnCancel">取消</button>
+    <button id="btnSave" class="primary">保存</button>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id)
+let editingId = null
+
+function toast(text) {
+  const t = $('toast')
+  t.textContent = text
+  t.classList.add('show')
+  setTimeout(() => t.classList.remove('show'), 2200)
+}
+
+async function api(path, options) {
+  const res = await fetch(path, options)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status))
+  return data
+}
+
+const STATUS_PILL = { ok: 'ok', error: 'error', running: 'running' }
+
+function renderJobs(jobs) {
+  if (!jobs.length) {
+    $('jobsWrap').innerHTML = '<div class="empty">暂无任务。点右上角「新建任务」，或在任意会话里用 /cron 或 /loop 命令创建。</div>'
+    return
+  }
+  const rows = jobs.map((job) => {
+    const status = job.enabled
+      ? (job.lastStatus ? `<span class="pill ${STATUS_PILL[job.lastStatus] || 'off'}">${job.lastStatus}</span>` : '<span class="pill off">待触发</span>')
+      : '<span class="pill off">已暂停</span>'
+    const next = job.nextRunAtView ? new Date(job.nextRunAtView).toLocaleString() : '—'
+    const last = job.lastRunAt ? new Date(job.lastRunAt).toLocaleString() : '—'
+    return `<tr data-id="${job.id}">
+      <td><b>${esc(job.id)}</b><br><span class="cwd">${esc(job.name)}</span></td>
+      <td>${status}</td>
+      <td><code>${esc(job.cron)}</code></td>
+      <td>${esc(next)}<br><span class="cwd">上次: ${esc(last)}</span></td>
+      <td class="cwd">${esc(job.cwd)}</td>
+      <td class="summary" title="${esc(job.prompt)}">${esc(job.prompt)}</td>
+      <td class="actions">
+        <button data-act="edit">编辑</button>
+        <button data-act="toggle">${job.enabled ? '暂停' : '恢复'}</button>
+        <button data-act="trigger">立即跑</button>
+        <button data-act="remove" class="danger">删除</button>
+      </td>
+    </tr>`
+  })
+  $('jobsWrap').innerHTML = `<table>
+    <thead><tr><th>任务</th><th>状态</th><th>cron</th><th>下次触发</th><th>项目目录</th><th>prompt</th><th>操作</th></tr></thead>
+    <tbody>${rows.join('')}</tbody></table>`
+}
+
+function renderRuns(runs) {
+  if (!runs.length) {
+    $('runsWrap').innerHTML = '<div class="empty">暂无执行历史</div>'
+    return
+  }
+  const rows = runs.map((run) => {
+    const at = new Date(run.startedAt).toLocaleString()
+    const dur = run.finishedAt ? Math.round((run.finishedAt - run.startedAt) / 1000) + 's' : '…'
+    const detail = run.error !== undefined
+      ? `<div class="err-text">${esc(run.error)}</div>`
+      : `<div class="summary" title="${esc(run.summary || '')}">${esc(run.summary || '')}</div>`
+    const session = run.sessionId ? `<a href="/?session=${encodeURIComponent(run.sessionId)}">${esc(run.sessionId.slice(0, 12))}…</a>` : ''
+    return `<tr>
+      <td>${esc(at)}<br><span class="cwd">${esc(dur)}</span></td>
+      <td><span class="pill ${STATUS_PILL[run.status] || 'off'}">${run.status}</span></td>
+      <td><b>${esc(run.jobName)}</b><br><span class="cwd">${esc(run.jobId)}</span></td>
+      <td>${detail}</td>
+      <td>${session}</td>
+    </tr>`
+  })
+  $('runsWrap').innerHTML = `<table>
+    <thead><tr><th>时间 / 耗时</th><th>状态</th><th>任务</th><th>结果</th><th>会话</th></tr></thead>
+    <tbody>${rows.join('')}</tbody></table>`
+}
+
+function esc(text) {
+  return String(text ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+async function refresh() {
+  try {
+    const [jobsData, runsData] = await Promise.all([api('/cron/api/jobs'), api('/cron/api/runs?limit=60')])
+    renderJobs(jobsData.jobs)
+    renderRuns(runsData.runs)
+    $('headInfo').textContent = `${jobsData.jobs.length} 个任务`
+  } catch (error) {
+    $('jobsWrap').innerHTML = `<div class="empty">加载失败: ${esc(error.message)}</div>`
+  }
+}
+
+function openDialog(job) {
+  editingId = job ? job.id : null
+  $('dlgTitle').textContent = job ? `编辑 ${job.id}` : '新建任务'
+  $('fName').value = job ? job.name : ''
+  $('fCwd').value = job ? job.cwd : ''
+  $('fCron').value = job ? job.cron : ''
+  $('fPrompt').value = job ? job.prompt : ''
+  $('dlg').showModal()
+}
+
+$('btnNew').addEventListener('click', () => openDialog(null))
+$('btnCancel').addEventListener('click', () => $('dlg').close())
+$('btnSave').addEventListener('click', () => {
+  const body = {
+    name: $('fName').value.trim() || undefined,
+    cwd: $('fCwd').value.trim(),
+    cron: $('fCron').value.trim(),
+    prompt: $('fPrompt').value.trim(),
+  }
+  const req = editingId === null
+    ? api('/cron/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    : api('/cron/api/jobs/' + editingId, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  req.then(() => { $('dlg').close(); toast('已保存'); refresh() })
+     .catch((error) => toast('保存失败: ' + error.message))
+})
+
+$('jobsWrap').addEventListener('click', (event) => {
+  const btn = event.target.closest('button[data-act]')
+  if (btn === null) return
+  const id = btn.closest('tr').dataset.id
+  const act = btn.dataset.act
+  if (act === 'edit') {
+    api('/cron/api/jobs').then((data) => {
+      const job = data.jobs.find((j) => j.id === id)
+      if (job !== undefined) openDialog(job)
+    })
+    return
+  }
+  if (act === 'toggle') {
+    api('/cron/api/jobs').then((data) => {
+      const job = data.jobs.find((j) => j.id === id)
+      if (job === undefined) return
+      return api('/cron/api/jobs/' + id, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !job.enabled }) })
+        .then(() => { toast(job.enabled ? '已暂停' : '已恢复'); refresh() })
+    }).catch((error) => toast(error.message))
+    return
+  }
+  if (act === 'trigger') {
+    api('/cron/api/jobs/' + id + '/trigger', { method: 'POST' })
+      .then(() => { toast('已触发，稍后刷新查看结果'); setTimeout(refresh, 3000) })
+      .catch((error) => toast(error.message))
+    return
+  }
+  if (act === 'remove') {
+    if (!confirm('删除任务 ' + id + ' 及其全部历史？')) return
+    api('/cron/api/jobs/' + id, { method: 'DELETE' })
+      .then(() => { toast('已删除'); refresh() })
+      .catch((error) => toast(error.message))
+  }
+})
+
+refresh()
+setInterval(refresh, 15000)
+</script>
+</body>
+</html>
