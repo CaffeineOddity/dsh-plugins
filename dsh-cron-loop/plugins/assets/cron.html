@@ -216,7 +216,8 @@ $('jobsWrap').addEventListener('click', (event) => {
   const btn = event.target.closest('button[data-act]')
   if (btn === null) return
   const id = btn.closest('tr').dataset.id
-  const act = btn.dataset.act  if (act === 'edit') {
+  const act = btn.dataset.act
+  if (act === 'edit') {
     api('/cron/api/jobs').then((data) => {
       const job = data.jobs.find((j) => j.id === id)
       if (job !== undefined) openDialog(job)
