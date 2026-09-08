@@ -18,7 +18,7 @@ import '@deepseek-ai/dsh-agent-default-model' // 激活 Context.agentDefaultMode
 import '@deepseek-ai/dsh-system-prompt' // 激活 Context.systemPrompt 类型扩展
 import '@deepseek-ai/dsh-sandbox-policy' // 激活 setSandboxMode / SessionEventMap 扩展
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import { computeNextRun, parseCron } from './lib/cron-core.ts'
+import { computeNextRun, matches, parseCron } from './lib/cron-core.ts'
 import { summarizeOwnedInterval, waitIdleOrTimeout } from './lib/agent-run.ts'
 import type { CronJobRecord, CronRunRecord } from './cron-store.ts'
 import { normalizeCwd } from './cron-store.ts'
@@ -93,17 +93,19 @@ async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promi
   })
 }
 
-/** 确保目标会话有 live agent：已 live 直接取，否则按磁盘状态 resume/create。 */
-async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string): Promise<Agent> {
+/** 确保目标会话有 live agent：已 live 直接取，否则按磁盘状态 resume/create。
+ * 首次执行时 sid 为 runJob 生成的随机 UUID，create 时作为会话身份传入；
+ * 之后每次复用该 id resume。返回值含最终使用的 sessionId。 */
+async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string): Promise<{ agent: Agent; sessionId: string }> {
   const live = ctx.agents.get(sid)
-  if (live !== undefined) return live
-  // 只在会话已 live 且 cwd 匹配时 resume；否则 create（保证会话落在正确项目分组）。
+  if (live !== undefined) return { agent: live, sessionId: String(sid) }
+  // 只在会话已 live 且 cwd 匹配时 resume；否则 create（首次执行）。
   // 用 ctx.sessions.get 而非 persistence.list：live session 的 header.cwd 是权威值。
   const persistedSession = ctx.sessions.get(sid)
   const shouldResume = persistedSession !== undefined && persistedSession.header.cwd === cwd
   const selection = ctx.agentDefaultModel.currentSelection()
   if (selection.provider === '' || selection.model === '') {
-    throw new Error(`cron-scheduler: no default model for job ${jobId} — set agent-default-model in ~/.dsh/settings.yaml`)
+    throw new Error(`cron-scheduler: no default model for job ${jobId} - set agent-default-model in ~/.dsh/settings.yaml`)
   }
   const opts = {
     agentOptions: { provider: selection.provider, model: selection.model },
@@ -111,31 +113,34 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
       await setupAgent(ctx, agentCtx, jobId)
     },
   }
-  const handle = shouldResume
-    ? await ctx.agents.resume({ resumeSessionId: sid, ...opts })
-    : await ctx.agents.create({ sessionId: sid, meta: { cwd }, ...opts })
-  const key = String(sid)
+  let handle: AgentHandle
+  let finalSid: string
+  if (shouldResume) {
+    handle = await ctx.agents.resume({ resumeSessionId: sid, ...opts })
+    finalSid = String(sid)
+  } else {
+    // create 要求调用方提供会话身份（agent id 须等于 session id），故用 runJob 传入的 sid。
+    handle = await ctx.agents.create({ sessionId: sid, meta: { cwd }, ...opts })
+    finalSid = String(sid)
+  }
+  const key = finalSid
   const previous = handles.get(key)
   handles.set(key, handle)
   if (previous !== undefined && previous !== handle) {
     void previous.dispose()
   }
-  return handle.agent
+  return { agent: handle.agent, sessionId: finalSid }
 }
 
 /** 执行一个到期任务：写 running run → agent 回合 → 收口写结果 run。 */
 async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   const store = ctx.cronLoopStore
-  // 每个任务绑定一个固定会话：首次执行生成随机 id 并存入 job 记录，之后复用。
+  // 每个任务绑定一个固定会话：首次执行生成随机 UUID 作为会话身份并存入 job 记录，
+  // 之后每次复用该 id resume；进程重启后靠 persistence 恢复。
   const sessionStr = job.sessionId ?? randomUUID()
   const sid = SessionId(sessionStr)
-  // 首次执行时把 sessionId 写入 job 记录；后续行用更新后的 job 避免覆盖丢失。
-  const jobWithSession = job.sessionId === undefined
-    ? { ...job, sessionId: sessionStr }
-    : job
-  if (job.sessionId === undefined) {
-    await store.putJob(jobWithSession)
-  }
+  // 首次执行时 jobWithSession 暂不设 sessionId，待 ensureAgent 返回后再回写。
+  const jobWithSession = job
   const runId = `run-${job.id}-${Date.now()}`
   const startedAt = Date.now()
   const running: CronRunRecord = {
@@ -149,7 +154,9 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   await store.jobs.put(job.id, { ...jobWithSession, lastRunAt: startedAt, lastStatus: 'running' })
   ctx.logger?.info?.(`cron-scheduler: job ${job.id} (${job.name}) fired`)
   try {
-    const agent = await ensureAgent(ctx, sid, job.id, job.cwd)
+    const { agent, sessionId: actualSid } = await ensureAgent(ctx, sid, job.id, job.cwd)
+    // 首次执行把会话身份回写到 job 记录，之后每次复用该 id resume。
+    await store.putJob({ ...jobWithSession, sessionId: actualSid })
     // 首个 whenIdle 同样加安全阀：会话 hang 死时不至于永久占住 inFlight。
     const pre = await waitIdleOrTimeout(agent.whenIdle(), RUN_TIMEOUT_MS)
     if (pre === 'timeout') throw new Error(`cron-scheduler: job ${job.id} agent not idle within ${RUN_TIMEOUT_MS}ms (pre-turn)`)
@@ -166,12 +173,12 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
       ? text.slice(0, 500)
       : (wait === 'timeout' ? '执行超时，未产生最终文本' : '执行完成（无文本输出）')
     await store.putRun({ ...running, finishedAt, status: 'ok', sessionId: String(sid), summary })
-    await store.jobs.put(job.id, { ...jobWithSession, lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
+    await store.jobs.put(job.id, { ...jobWithSession, sessionId: String(sid), lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
     ctx.logger?.info?.(`cron-scheduler: job ${job.id} finished ok in ${finishedAt - startedAt}ms`)
   } catch (error: unknown) {
     const finishedAt = Date.now()
     const message = error instanceof Error ? error.message : String(error)
-    await store.putRun({ ...running, finishedAt, status: 'error', sessionId: String(sid), error: message })
+    await store.putRun({ ...running, finishedAt, status: 'error', sessionId: String(sid) !== '' ? String(sid) : undefined, error: message })
     await store.jobs.put(job.id, { ...jobWithSession, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
     ctx.logger?.error?.(`cron-scheduler: job ${job.id} failed: ${message}`)
   } finally {
@@ -198,12 +205,14 @@ async function tick(ctx: Context): Promise<void> {
       ctx.logger?.error?.(`cron-scheduler: job ${job.id} has invalid cron "${job.cron}": ${reason}`)
       continue
     }
-    // 下次触发时间以「当前时刻」为锚点；到期即触发（错过多次只补一次，latest-only）。
+    // nextRunAt 仅用于展示「下次触发时间」，取严格晚于当前时刻的下次匹配。
     const next = computeNextRun(plan, new Date(now))
     if (job.nextRunAt !== next.getTime()) {
       await store.jobs.put(job.id, { ...job, nextRunAt: next.getTime() })
     }
-    if (next.getTime() <= now && !inFlight.has(job.id)) {
+    // 触发判定：当前分钟是否命中 cron 计划。tick 每 30s 扫一次，同一分钟内
+    // 可能命中两次，但 inFlight 标记保证一个 job 同时至多一个在途执行。
+    if (matches(plan, new Date(now)) && !inFlight.has(job.id)) {
       inFlight.add(job.id)
       const current = store.jobs.get(job.id)
       void runJob(ctx, current ?? { ...job, nextRunAt: next.getTime() })
@@ -268,7 +277,7 @@ export async function createJob(
 
 /** cron_job 工具的入参（defineTool 按参数 schema 收窄后与此一致）。 */
 interface CronToolArgs {
-  action: 'add' | 'list' | 'update' | 'remove' | 'pause' | 'resume' | 'runs'
+  action: 'add' | 'list' | 'update' | 'remove' | 'pause' | 'resume' | 'runs' | 'clear_runs'
   id?: string
   cron?: string
   prompt?: string
@@ -313,9 +322,10 @@ export function apply(ctx: Context): void {
       '- remove: 删除任务及其历史（id 必填）',
       '- pause / resume: 停用 / 启用任务（id 必填）',
       '- runs: 查看任务最近执行历史（id 必填）',
+      '- clear_runs: 删除任务执行历史（id 必填；不指定 id 则删除全部历史）',
     ].join('\n'),
     parameters: {
-      action: { type: 'string', enum: ['add', 'list', 'update', 'remove', 'pause', 'resume', 'runs'], required: true, description: '要执行的动作' },
+      action: { type: 'string', enum: ['add', 'list', 'update', 'remove', 'pause', 'resume', 'runs', 'clear_runs'], required: true, description: '要执行的动作' },
       id: { type: 'string', description: '任务 id（add 之外必填）' },
       cron: { type: 'string', description: '5 段 cron 表达式' },
       prompt: { type: 'string', description: '任务说明' },
@@ -405,6 +415,16 @@ export function apply(ctx: Context): void {
             return `${at} | ${run.status}${tail}`
           })
           return textResult(lines.join('\n'))
+        }
+        case 'clear_runs': {
+          if (args.id === undefined || args.id === '') {
+            const count = await store.deleteAllRuns()
+            return textResult(`已删除全部执行历史（${count} 条）`)
+          }
+          const job = store.jobs.get(args.id)
+          if (job === undefined) throw new Error(`cron_job clear_runs: job ${args.id} not found`)
+          const count = await store.deleteRunsByJob(args.id)
+          return textResult(`已删除 ${args.id} 的执行历史（${count} 条）`)
         }
       }
     },

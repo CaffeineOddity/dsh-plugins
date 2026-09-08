@@ -62,7 +62,10 @@
     <div id="jobsWrap"><div class="empty">加载中…</div></div>
   </section>
   <section>
-    <h2>最近执行历史</h2>
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <h2 style="margin:0 0 10px">最近执行历史</h2>
+      <button id="btnClearRuns" style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">清除历史</button>
+    </div>
     <div id="runsWrap"><div class="empty">加载中…</div></div>
   </section>
 </main>
@@ -148,16 +151,17 @@ function renderRuns(runs) {
       ? `<div class="err-text">${esc(run.error)}</div>`
       : `<div class="summary" title="${esc(run.summary || '')}">${esc(run.summary || '')}</div>`
     const session = run.sessionId ? `<a href="/?session=${encodeURIComponent(run.sessionId)}">${esc(run.sessionId.slice(0, 12))}…</a>` : ''
-    return `<tr>
+    return `<tr data-runid="${esc(run.id)}">
       <td>${esc(at)}<br><span class="cwd">${esc(dur)}</span></td>
       <td><span class="pill ${STATUS_PILL[run.status] || 'off'}">${run.status}</span></td>
       <td><b>${esc(run.jobName)}</b><br><span class="cwd">${esc(run.jobId)}</span></td>
       <td>${detail}</td>
       <td>${session}</td>
+      <td class="actions"><button data-runact="del" class="danger">删除</button></td>
     </tr>`
   })
   $('runsWrap').innerHTML = `<table>
-    <thead><tr><th>时间 / 耗时</th><th>状态</th><th>任务</th><th>结果</th><th>会话</th></tr></thead>
+    <thead><tr><th>时间 / 耗时</th><th>状态</th><th>任务</th><th>结果</th><th>会话</th><th>操作</th></tr></thead>
     <tbody>${rows.join('')}</tbody></table>`
 }
 
@@ -188,6 +192,12 @@ function openDialog(job) {
 
 $('btnNew').addEventListener('click', () => openDialog(null))
 $('btnCancel').addEventListener('click', () => $('dlg').close())
+$('btnClearRuns').addEventListener('click', () => {
+  if (!confirm('删除全部执行历史？此操作不可撤销。')) return
+  api('/cron/api/runs', { method: 'DELETE' })
+    .then((data) => { toast('已删除 ' + (data.deleted || 0) + ' 条历史'); refresh() })
+    .catch((error) => toast('清除失败: ' + error.message))
+})
 $('btnSave').addEventListener('click', () => {
   const body = {
     name: $('fName').value.trim() || undefined,
@@ -206,8 +216,7 @@ $('jobsWrap').addEventListener('click', (event) => {
   const btn = event.target.closest('button[data-act]')
   if (btn === null) return
   const id = btn.closest('tr').dataset.id
-  const act = btn.dataset.act
-  if (act === 'edit') {
+  const act = btn.dataset.act  if (act === 'edit') {
     api('/cron/api/jobs').then((data) => {
       const job = data.jobs.find((j) => j.id === id)
       if (job !== undefined) openDialog(job)
@@ -234,6 +243,19 @@ $('jobsWrap').addEventListener('click', (event) => {
     api('/cron/api/jobs/' + id, { method: 'DELETE' })
       .then(() => { toast('已删除'); refresh() })
       .catch((error) => toast(error.message))
+  }
+})
+
+$('runsWrap').addEventListener('click', (event) => {
+  const btn = event.target.closest('button[data-runact]')
+  if (btn === null) return
+  const runId = btn.closest('tr').dataset.runid
+  const act = btn.dataset.runact
+  if (act === 'del') {
+    if (!confirm('删除这条历史记录？')) return
+    api('/cron/api/runs/' + encodeURIComponent(runId), { method: 'DELETE' })
+      .then(() => { toast('已删除'); refresh() })
+      .catch((error) => toast('删除失败: ' + error.message))
   }
 })
 

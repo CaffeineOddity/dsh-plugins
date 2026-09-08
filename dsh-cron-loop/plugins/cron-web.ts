@@ -188,19 +188,61 @@ export function apply(ctx: Context): void {
     },
   })
 
-  // 执行历史：?jobId=&limit=
+  // 执行历史：GET 列表 / DELETE 清空（?jobId= 限定）
   web.register({
     kind: 'exact',
     path: '/cron/api/runs',
     handler: (req, res) => {
+      const method = req.method ?? 'GET'
       const url = new URL(req.url ?? '/', 'http://x')
       const jobId = url.searchParams.get('jobId')
+      if (method === 'DELETE') {
+        void (async () => {
+          try {
+            const count = jobId !== null && jobId !== ''
+              ? await store().deleteRunsByJob(jobId)
+              : await store().deleteAllRuns()
+            json(res, 200, { ok: true, deleted: count })
+          } catch (error: unknown) {
+            json(res, 400, { error: error instanceof Error ? error.message : String(error) })
+          }
+        })()
+        return
+      }
       const limitRaw = url.searchParams.get('limit')
       const limit = limitRaw !== null && limitRaw !== '' ? Number(limitRaw) : 100
       const runs = jobId !== null && jobId !== ''
         ? store().listRunsByJob(jobId, Number.isFinite(limit) ? limit : 100)
         : store().listAllRuns(Number.isFinite(limit) ? limit : 100)
       json(res, 200, { runs })
+    },
+  })
+
+  // 单条执行历史：DELETE /cron/api/runs/<runId>
+  web.register({
+    kind: 'prefix',
+    path: '/cron/api/runs',
+    handler: (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://x')
+      const runId = url.pathname.slice('/cron/api/runs/'.length)
+      const method = req.method ?? 'GET'
+      if (runId === '' || runId.includes('/')) {
+        json(res, 404, { error: 'run id required' })
+        return
+      }
+      if (method === 'DELETE') {
+        void (async () => {
+          try {
+            const removed = await store().deleteRunById(runId)
+            if (!removed) throw new Error(`run ${runId} not found`)
+            json(res, 200, { ok: true })
+          } catch (error: unknown) {
+            json(res, 400, { error: error instanceof Error ? error.message : String(error) })
+          }
+        })()
+        return
+      }
+      json(res, 405, { error: 'method not allowed' })
     },
   })
 }

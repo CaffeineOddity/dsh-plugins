@@ -348,6 +348,46 @@ export class CronStore {
     await rm(join(cronsRoot(), jobKey, `${runId}.json`), { force: true })
   }
 
+  /** 删除某任务的全部执行历史（磁盘 + 内存）。 */
+  async deleteRunsByJob(jobId: string): Promise<number> {
+    let count = 0
+    for (const [jobKey, runMap] of this.runsByProject) {
+      const toDelete: string[] = []
+      for (const run of runMap.values()) {
+        if (run.jobId === jobId) toDelete.push(run.id)
+      }
+      for (const runId of toDelete) {
+        await this.deleteRun(runId, jobKey)
+        count++
+      }
+    }
+    return count
+  }
+
+  /** 删除单条执行历史（磁盘 + 内存）；不存在返回 false。 */
+  async deleteRunById(runId: string): Promise<boolean> {
+    for (const [jobKey, runMap] of this.runsByProject) {
+      if (runMap.has(runId)) {
+        await this.deleteRun(runId, jobKey)
+        return true
+      }
+    }
+    return false
+  }
+
+  /** 删除全部执行历史（磁盘 + 内存）。 */
+  async deleteAllRuns(): Promise<number> {
+    let count = 0
+    for (const [jobKey, runMap] of this.runsByProject) {
+      const ids = [...runMap.keys()]
+      for (const runId of ids) {
+        await this.deleteRun(runId, jobKey)
+        count++
+      }
+    }
+    return count
+  }
+
   /** 删除任务及其全部历史。 */
   async deleteJobCascade(jobId: string): Promise<boolean> {
     const jobKey = this.projectKeyOf(jobId)
