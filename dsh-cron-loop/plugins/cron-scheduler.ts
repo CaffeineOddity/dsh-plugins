@@ -99,10 +99,9 @@ async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promi
 async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string): Promise<{ agent: Agent; sessionId: string }> {
   const live = ctx.agents.get(sid)
   if (live !== undefined) return { agent: live, sessionId: String(sid) }
-  // 只在会话已 live 且 cwd 匹配时 resume；否则 create（首次执行）。
-  // 用 ctx.sessions.get 而非 persistence.list：live session 的 header.cwd 是权威值。
-  const persistedSession = ctx.sessions.get(sid)
-  const shouldResume = persistedSession !== undefined && persistedSession.header.cwd === cwd
+  // 磁盘上已有该会话 -> resume（进程重启后靠 sessionPersistence.list 恢复）；否则 create。
+  const persisted = await findPersisted(ctx, sid)
+  const shouldResume = persisted !== undefined
   const selection = ctx.agentDefaultModel.currentSelection()
   if (selection.provider === '' || selection.model === '') {
     throw new Error(`cron-scheduler: no default model for job ${jobId} - set agent-default-model in ~/.dsh/settings.yaml`)
@@ -120,7 +119,17 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
     finalSid = String(sid)
   } else {
     // create 要求调用方提供会话身份（agent id 须等于 session id），故用 runJob 传入的 sid。
-    handle = await ctx.agents.create({ sessionId: sid, meta: { cwd }, ...opts })
+    // 若 create 因磁盘已有同 id 会话而报 collision，退回 resume（进程重启后 findPersisted 未命中时的安全阀）。
+    try {
+      handle = await ctx.agents.create({ sessionId: sid, meta: { cwd }, ...opts })
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error)
+      if (msg.includes('collision') || msg.includes('already has a persisted')) {
+        handle = await ctx.agents.resume({ resumeSessionId: sid, ...opts })
+      } else {
+        throw error
+      }
+    }
     finalSid = String(sid)
   }
   const key = finalSid
@@ -293,7 +302,7 @@ function textResult(text: string): string {
 
 /** cron-scheduler 插件：调度循环 + cron_job 模型工具。 */
 export const name = 'cron-scheduler'
-export const inject = ['tools', 'timer', 'agents', 'sessions', 'agentPresets', 'agentDefaultModel', 'systemPrompt', 'cronLoopStore']
+export const inject = ['tools', 'timer', 'agents', 'sessions', 'agentPresets', 'agentDefaultModel', 'systemPrompt', 'cronLoopStore', 'sessionPersistence']
 
 export function apply(ctx: Context): void {
   // 对外暴露 trigger 服务：调用方拿到的 ctx 是 scheduler 自己的 fiber ctx，
