@@ -1,12 +1,13 @@
-// cron-loop 调度器：30s tick 扫描到期任务，创建/续接 cron 会话执行任务 prompt。
+// cron-loop 调度器：30s tick 扫描到期任务，创建/续接会话执行任务 prompt。
 // 同时注册模型工具 `cron_job`（add/list/update/remove/pause/resume/runs）。
 //
-// 执行模型对齐 ruliu-bridge / 官方 headless：
-//   live agent → 复用；磁盘已有 id → resume；否则 create（会话 id = `cron-<jobId>`）。
-//   whenIdle → followup(prompt) → whenIdle → flush → 取本轮最后一条 assistant 文本。
+// 会话模型：每个 job 首次执行时生成随机 session id 并存入 job 记录，
+// 之后每次执行都在该固定会话里 resume；进程重启后靠 persistence 恢复。
+//   whenIdle -> followup(prompt) -> whenIdle -> flush -> 取本轮最后一条 assistant 文本。
 
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { randomUUID } from 'node:crypto'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -36,15 +37,18 @@ const inFlight = new Set<string>()
 
 /** persistence.list() 的最小形状（宿主 web profile 必有该服务）。 */
 interface PersistenceList {
-  list(): Promise<Array<{ id: string }>>
+  list(): Promise<Array<{ id: string; cwd?: string }>>
 }
 
-/** 磁盘（persistence.list）是否已有该会话；无 persistence 服务时退回内存 store。 */
-async function isPersisted(ctx: Context, sid: SessionId): Promise<boolean> {
+/** 磁盘上是否已有该会话；有则返回其 header（含 cwd），无则 undefined。 */
+async function findPersisted(ctx: Context, sid: SessionId): Promise<{ id: string; cwd?: string } | undefined> {
   const persistence = ctx.get('sessionPersistence') as PersistenceList | undefined
-  if (persistence === undefined) return ctx.sessions.get(sid) !== undefined
+  if (persistence === undefined) {
+    const live = ctx.sessions.get(sid)
+    return live !== undefined ? { id: String(sid), cwd: live.header.cwd } : undefined
+  }
   const headers = await persistence.list()
-  return headers.some((header) => header.id === sid)
+  return headers.find((header) => header.id === sid)
 }
 
 /**
@@ -122,7 +126,16 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
 /** 执行一个到期任务：写 running run → agent 回合 → 收口写结果 run。 */
 async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   const store = ctx.cronLoopStore
-  const sid = SessionId(`cron-${job.id}`)
+  // 每个任务绑定一个固定会话：首次执行生成随机 id 并存入 job 记录，之后复用。
+  const sessionStr = job.sessionId ?? randomUUID()
+  const sid = SessionId(sessionStr)
+  // 首次执行时把 sessionId 写入 job 记录；后续行用更新后的 job 避免覆盖丢失。
+  const jobWithSession = job.sessionId === undefined
+    ? { ...job, sessionId: sessionStr }
+    : job
+  if (job.sessionId === undefined) {
+    await store.putJob(jobWithSession)
+  }
   const runId = `run-${job.id}-${Date.now()}`
   const startedAt = Date.now()
   const running: CronRunRecord = {
@@ -133,7 +146,7 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
     status: 'running',
   }
   await store.putRun(running)
-  await store.jobs.put(job.id, { ...job, lastRunAt: startedAt, lastStatus: 'running' })
+  await store.jobs.put(job.id, { ...jobWithSession, lastRunAt: startedAt, lastStatus: 'running' })
   ctx.logger?.info?.(`cron-scheduler: job ${job.id} (${job.name}) fired`)
   try {
     const agent = await ensureAgent(ctx, sid, job.id, job.cwd)
@@ -153,13 +166,13 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
       ? text.slice(0, 500)
       : (wait === 'timeout' ? '执行超时，未产生最终文本' : '执行完成（无文本输出）')
     await store.putRun({ ...running, finishedAt, status: 'ok', sessionId: String(sid), summary })
-    await store.jobs.put(job.id, { ...job, lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
+    await store.jobs.put(job.id, { ...jobWithSession, lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
     ctx.logger?.info?.(`cron-scheduler: job ${job.id} finished ok in ${finishedAt - startedAt}ms`)
   } catch (error: unknown) {
     const finishedAt = Date.now()
     const message = error instanceof Error ? error.message : String(error)
     await store.putRun({ ...running, finishedAt, status: 'error', sessionId: String(sid), error: message })
-    await store.jobs.put(job.id, { ...job, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+    await store.jobs.put(job.id, { ...jobWithSession, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
     ctx.logger?.error?.(`cron-scheduler: job ${job.id} failed: ${message}`)
   } finally {
     inFlight.delete(job.id)
