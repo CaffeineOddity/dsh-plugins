@@ -140,12 +140,18 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
     // create：首次执行或会话被归档后重建。
     try {
       handle = await ctx.agents.create({ sessionId: sid, meta: { cwd }, ...opts })
-      // 注册 workspace 让 webUI 侧边栏把会话归到正确分组（否则会落"未分组"）。
-      const registry = ctx.get('workspaceRegistry') as { create(path: string): Promise<unknown> } | undefined
+      // 把新会话注册到 workspace，让 webUI 侧边栏归到正确项目分组。
+      // create(cwd) 创建/复用 workspace，attachSession 把 session 加入 sessionIds。
+      const registry = ctx.get('workspaceRegistry') as {
+        create(path: string): Promise<{ attachSession(sessionId: string): Promise<void> }>
+      } | undefined
       if (registry !== undefined) {
-        await registry.create(cwd).catch((e: unknown) => {
-          ctx.logger?.warn?.(`cron-scheduler: workspaceRegistry.create(${cwd}) failed: ${e instanceof Error ? e.message : String(e)}`)
-        })
+        try {
+          const ws = await registry.create(cwd)
+          await ws.attachSession(String(sid))
+        } catch (e: unknown) {
+          ctx.logger?.warn?.(`cron-scheduler: workspaceRegistry create+attach(${cwd}, ${sid}) failed: ${e instanceof Error ? e.message : String(e)}`)
+        }
       }
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error)
