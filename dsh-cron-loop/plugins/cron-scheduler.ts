@@ -95,7 +95,8 @@ async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promi
 
 /** 确保目标会话有 live agent：已 live 直接取，否则按磁盘状态 resume/create。
  * 首次执行时 sid 为 runJob 生成的随机 UUID，create 时作为会话身份传入；
- * 之后每次复用该 id resume。返回值含最终使用的 sessionId。 */
+ * 之后每次复用该 id resume。返回值含最终使用的 sessionId（可能因自愈而变化）。
+ * 自愈：resume 失败（会话损坏等）时自动生成新 UUID 并 create 新会话。 */
 async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string): Promise<{ agent: Agent; sessionId: string }> {
   const live = ctx.agents.get(sid)
   if (live !== undefined) return { agent: live, sessionId: String(sid) }
@@ -113,13 +114,25 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
     },
   }
   let handle: AgentHandle
-  let finalSid: string
+  let finalSid: string = String(sid)
   if (shouldResume) {
-    handle = await ctx.agents.resume({ resumeSessionId: sid, ...opts })
-    finalSid = String(sid)
+    try {
+      handle = await ctx.agents.resume({ resumeSessionId: sid, ...opts })
+    } catch (error: unknown) {
+      // 会话损坏（seq gap、corrupt log 等）-> 生成新 UUID 重建会话。
+      // runJob 会把返回的 finalSid 回写到 job 记录，无需在此手动存。
+      const msg = error instanceof Error ? error.message : String(error)
+      if (msg.includes('corrupt') || msg.includes('seq gap') || msg.includes('collision') || msg.includes('does not match')) {
+        ctx.logger?.warn?.(`cron-scheduler: session ${sid} unusable (${msg.slice(0, 80)}), creating new session for job ${jobId}`)
+        finalSid = randomUUID()
+        handle = await ctx.agents.create({ sessionId: SessionId(finalSid), meta: { cwd }, ...opts })
+      } else {
+        throw error
+      }
+    }
   } else {
     // create 要求调用方提供会话身份（agent id 须等于 session id），故用 runJob 传入的 sid。
-    // 若 create 因磁盘已有同 id 会话而报 collision，退回 resume（进程重启后 findPersisted 未命中时的安全阀）。
+    // 若 create 因磁盘已有同 id 会话而报 collision，退回 resume（findPersisted 未命中时的安全阀）。
     try {
       handle = await ctx.agents.create({ sessionId: sid, meta: { cwd }, ...opts })
     } catch (error: unknown) {
@@ -130,7 +143,6 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
         throw error
       }
     }
-    finalSid = String(sid)
   }
   const key = finalSid
   const previous = handles.get(key)
