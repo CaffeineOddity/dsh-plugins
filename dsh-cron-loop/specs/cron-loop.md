@@ -30,7 +30,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 数据结构与之前一致：
 
 - `CronJobRecord`：`id`, `name`, `cwd`（绝对路径）, `cron`, `prompt`, `enabled`,
-  `timezone`, `createdAt`, `updatedAt`, `lastRunAt?`, `lastStatus?`, `nextRunAt?`
+  `timezone`, `sessionId?`, `createdAt`, `updatedAt`, `lastRunAt?`, `lastStatus?`, `nextRunAt?`
 - `CronRunRecord`：`id`, `jobId`, `jobName`, `startedAt`, `finishedAt?`,
   `status`, `sessionId?`, `summary?`, `error?`
 - 每 job 保留最近 50 条 run（写入新 run 时裁剪旧 run）。
@@ -41,14 +41,20 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
   1. 遍历 enabled job，用 `computeNextRun`（`cron-core.ts` 纯函数，本地时区）算 `nextRunAt`；
   2. `nextRunAt <= now` 的 job 进入执行：先置 `lastStatus: 'running'` 并写 running run 记录，
      防重入（同一 job 同时至多一个在途执行）。
-- 执行：`ctx.agents` create/resume（会话 id = job.sessionId，首次执行时随机生成 UUID）。
-  resume 条件：磁盘上已有该 sessionId（靠 `sessionPersistence.list` 查找）；否则 create
-  新会话并写入 job.sessionId。进程重启后靠 persistence 恢复固定会话。
-  setup 阶段 `agentPresets.mount(agentCtx, 'standard')` + `installModelSelection`
-  + `setSandboxMode(session, 'danger-full-access')`（无人值守，需完整文件/bash 权限），
-  `agent.followup(createUserMessage(...))`，等待 idle->followup->idle 或 10 分钟安全阀超时，
-  `sessions.flush` 后取本轮 assistant 文本写 run 记录。
-  sandbox 策略靠 `session.header.cwd` 定 workspace root，cwd 正确即项目级隔离。
+- 执行：`ctx.agents` create/resume，对齐 ruliu-bridge 的 `ensureAgent` 三态模型。
+  - lifecycle 判定：`agents.get(sid)` 在内存 -> live；`isPersisted`（`sessionPersistence.list`
+    扫磁盘）-> resume；都没有 -> create。
+  - 每个任务首次执行时生成随机 UUID 作为 session id，存入 job.sessionId；之后每次复用该 id resume。
+  - 归档检测：`runJob` 前检查 `workspaceRegistry.archivedSessionIds`，若 job.sessionId 已被归档
+    则生成新 UUID 重建会话（对齐 ruliu-bridge 的 `resolveSessionId` 模式）。
+  - 自愈：resume 抛 corrupt/seq-gap/collision 时，生成新 UUID 并 create 新会话，回写 job.sessionId。
+  - create 后调 `workspaceRegistry.create(cwd)` + `workspace.attachSession(sid)`，
+    让 webUI 侧边栏把会话归到正确项目分组（否则落"未分组"）。
+  - setup 阶段 `agentPresets.mount(agentCtx, 'standard')` + `installModelSelection`
+    + `setSandboxMode(session, 'danger-full-access')`（无人值守，需完整文件/bash 权限），
+    `agent.followup(createUserMessage(...))`，等待 idle->followup->idle 或 10 分钟安全阀超时，
+    `sessions.flush` 后取本轮 assistant 文本写 run 记录。
+    sandbox 策略靠 `session.header.cwd` 定 workspace root，cwd 正确即项目级隔离。
 - catch-up 策略：latest-only--错过多次只补跑最新一次；job 停用/暂停期间不补跑。
 
 ### 模型工具（`cron-scheduler.ts` 内 `harness.registerTool`）
@@ -74,7 +80,11 @@ add/update 的 `cwd` 缺省取当前 agent 会话的 `session.header.cwd`（项�
 - `POST /cron/api/jobs` → 新建（body: name/cwd/cron/prompt）。
 - `PUT /cron/api/jobs/:id` → 更新（cron/prompt/enabled/name）。
 - `DELETE /cron/api/jobs/:id` → 删除。
-- `GET /cron/api/runs?jobId=&limit=` → 执行历史（默认 100 条，新→旧）。
+- `GET /cron/api/runs?jobId=&limit=` -> 执行历史（默认 100 条，新->旧）。
+- `DELETE /cron/api/runs` -> 清空全部（或 `?jobId=` 限定某 job）。
+- `DELETE /cron/api/runs/:runId` -> 删除单条执行历史。
+- 路由策略：`/cron/api/runs` 统一为 prefix 路由，根路径（空 runId）= 列表/清空，
+  子路径（有 runId）= 单条删除。
 
 ## 行为约定
 
@@ -83,8 +93,11 @@ add/update 的 `cwd` 缺省取当前 agent 会话的 `session.header.cwd`（项�
 - 时区：一律用系统本地时区（`Date` 语义），v1 不做 IANA 时区参数。
 - 执行历史与 job 记录持久化在 `~/.dsh/storages/crons/<project-basename>/` 文件树下。
 - 重启后：running 状态的 run 标记为 error（进程中断），调度从 next-run 重算，不补积压。
-- 会话命名：每 job 首次执行时生成随机 UUID 作为 session id，存入 job.sessionId；
+- 会话绑定：每 job 首次执行时生成随机 UUID 作为 session id，存入 job.sessionId；
   之后每次执行都 resume 该固定会话，在 DSH 会话列表中可见可续聊。
+  会话被归档（`workspaceRegistry.archivedSessionIds`）后生成新 UUID 重建；
+  会话损坏（corrupt/seq-gap）时自愈重建。create 后调 `workspaceRegistry.create(cwd)`
+  + `attachSession` 确保会话出现在 webUI 正确项目分组下。
 
 ## 验收标准
 
