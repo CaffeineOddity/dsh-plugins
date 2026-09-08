@@ -13,7 +13,7 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
   header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border); }
-  header h1 { font-size: 17px; margin: 0; }
+  header h1 { font-size: 17px; margin: 0; cursor: pointer; }
   header .spacer { flex: 1; }
   header button { background: var(--accent); border: 0; color: #fff; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   main { max-width: 1100px; margin: 0 auto; padding: 18px 20px 60px; }
@@ -36,7 +36,7 @@
   dialog::backdrop { background: rgba(0,0,0,.55); }
   dialog h3 { margin: 0 0 14px; font-size: 15px; }
   dialog label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
-  dialog input, dialog textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 9px; font: inherit; }
+  dialog input, dialog textarea, dialog select { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 9px; font: inherit; }
   dialog textarea { min-height: 72px; resize: vertical; }
   dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
   dialog .row button { padding: 6px 16px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; }
@@ -47,27 +47,33 @@
   a { color: var(--accent); text-decoration: none; }
   #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
   #toast.show { opacity: 1; }
+  /* 项目列表 */
+  .proj-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; cursor: pointer; transition: border-color .15s; }
+  .proj-card:hover { border-color: var(--accent); }
+  .proj-card .proj-name { font-size: 15px; font-weight: 600; }
+  .proj-card .proj-path { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .proj-card .proj-stats { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .proj-card .proj-stats span { display: flex; align-items: center; gap: 4px; }
+  /* 标签页 */
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .tab { padding: 8px 20px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-size: 14px; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab:hover { color: var(--text); }
+  /* 面包屑 */
+  .crumb { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+  .crumb a { cursor: pointer; }
+  .crumb .sep { margin: 0 6px; }
+  .crumb .cur { color: var(--text); }
 </style>
 </head>
 <body>
 <header>
-  <h1>⏰ cron-loop 任务中心</h1>
+  <h1 id="logo">⏰ cron-loop 任务中心</h1>
   <span class="cwd" id="headInfo"></span>
   <div class="spacer"></div>
   <button id="btnNew">＋ 新建任务</button>
 </header>
-<main>
-  <section>
-    <h2>定时任务</h2>
-    <div id="jobsWrap"><div class="empty">加载中…</div></div>
-  </section>
-  <section>
-    <div style="display:flex;align-items:center;justify-content:space-between">
-      <h2 style="margin:0 0 10px">最近执行历史</h2>
-      <button id="btnClearRuns" style="background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">清除历史</button>
-    </div>
-    <div id="runsWrap"><div class="empty">加载中…</div></div>
-  </section>
+<main id="app">
 </main>
 
 <dialog id="dlg">
@@ -97,6 +103,10 @@
 <script>
 const $ = (id) => document.getElementById(id)
 let editingId = null
+let allJobs = []
+let allRuns = []
+let currentCwd = null  // null = 项目列表视图; 否则 = 项目详情视图
+let currentTab = 'crons'  // 'crons' | 'runs'
 
 function toast(text) {
   const t = $('toast')
@@ -115,23 +125,103 @@ async function api(path, options) {
 const STATUS_PILL = { ok: 'ok', error: 'error', running: 'running' }
 const PERM_LABEL = { 'read-only': '仅可查看', 'workspace-write': '工作区内修改', 'danger-full-access': '完全权限' }
 
-function renderJobs(jobs) {
-  if (!jobs.length) {
-    $('jobsWrap').innerHTML = '<div class="empty">暂无任务。点右上角「新建任务」，或在任意会话里用 /cron 命令创建。</div>'
+function esc(text) {
+  return String(text ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+function basename(path) {
+  return path.split('/').filter(Boolean).pop() || path
+}
+
+/** 按项目目录分组 */
+function groupByProject(jobs) {
+  const map = new Map()
+  for (const job of jobs) {
+    if (!map.has(job.cwd)) map.set(job.cwd, [])
+    map.get(job.cwd).push(job)
+  }
+  return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+}
+
+/** 渲染项目列表视图 */
+function renderProjectList() {
+  const groups = groupByProject(allJobs)
+  if (groups.length === 0) {
+    $('app').innerHTML = '<section><div class="empty">暂无任务。点右上角「新建任务」，或在任意会话里用 /cron 命令创建。</div></section>'
     return
+  }
+  const cards = groups.map(([cwd, jobs]) => {
+    const runs = allRuns.filter((r) => jobs.some((j) => j.id === r.jobId))
+    const enabled = jobs.filter((j) => j.enabled).length
+    const lastRun = runs.length > 0 ? new Date(runs[0].startedAt).toLocaleString() : '无'
+    return `<div class="proj-card" data-cwd="${esc(cwd)}">
+      <div class="proj-name">${esc(basename(cwd))}</div>
+      <div class="proj-path">${esc(cwd)}</div>
+      <div class="proj-stats">
+        <span>📋 ${jobs.length} 个任务（${enabled} 启用）</span>
+        <span>📊 ${runs.length} 条历史</span>
+        <span>🕐 上次: ${esc(lastRun)}</span>
+      </div>
+    </div>`
+  })
+  $('app').innerHTML = `<section><h2>项目列表</h2>${cards.join('')}</section>`
+  // 绑定点击进入项目详情
+  $('app').querySelectorAll('.proj-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      currentCwd = card.dataset.cwd
+      currentTab = 'crons'
+      renderDetail()
+    })
+  })
+}
+
+/** 渲染项目详情视图（含两个 tab） */
+function renderDetail() {
+  const cwd = currentCwd
+  const projJobs = allJobs.filter((j) => j.cwd === cwd)
+  const projRuns = allRuns.filter((r) => projJobs.some((j) => j.id === r.jobId))
+  const projName = basename(cwd)
+  const crumb = `<div class="crumb"><a id="crumbHome">⏰ 全部项目</a><span class="sep">/</span><span class="cur">${esc(projName)}</span></div>`
+  const tabs = `<div class="tabs">
+    <div class="tab ${currentTab === 'crons' ? 'active' : ''}" data-tab="crons">定时任务 (${projJobs.length})</div>
+    <div class="tab ${currentTab === 'runs' ? 'active' : ''}" data-tab="runs">最近执行历史 (${projRuns.length})</div>
+  </div>`
+
+  let content = ''
+  if (currentTab === 'crons') {
+    content = renderJobsTable(projJobs)
+  } else {
+    content = renderRunsTable(projRuns)
+  }
+
+  $('app').innerHTML = crumb + tabs + `<section><div id="tabContent">${content}</div></section>`
+
+  // 面包屑回首页
+  $('crumbHome').addEventListener('click', () => { currentCwd = null; renderProjectList() })
+  // tab 切换
+  $('app').querySelectorAll('.tab').forEach((tab) => {
+    tab.addEventListener('click', () => { currentTab = tab.dataset.tab; renderDetail() })
+  })
+  // 绑定操作按钮
+  bindActions()
+}
+
+/** 渲染任务表格 HTML */
+function renderJobsTable(jobs) {
+  if (!jobs.length) {
+    return '<div class="empty">该项目暂无任务。点右上角「新建任务」创建。</div>'
   }
   const rows = jobs.map((job) => {
     const status = job.enabled
       ? (job.lastStatus ? `<span class="pill ${STATUS_PILL[job.lastStatus] || 'off'}">${job.lastStatus}</span>` : '<span class="pill off">待触发</span>')
       : '<span class="pill off">已暂停</span>'
-    const next = job.nextRunAtView ? new Date(job.nextRunAtView).toLocaleString() : '—'
-    const last = job.lastRunAt ? new Date(job.lastRunAt).toLocaleString() : '—'
+    const next = job.nextRunAtView ? new Date(job.nextRunAtView).toLocaleString() : '-'
+    const last = job.lastRunAt ? new Date(job.lastRunAt).toLocaleString() : '-'
     return `<tr data-id="${job.id}">
       <td><b>${esc(job.id)}</b><br><span class="cwd">${esc(job.name)}</span></td>
       <td>${status}</td>
       <td><code>${esc(job.cron)}</code></td>
       <td>${esc(next)}<br><span class="cwd">上次: ${esc(last)}</span></td>
-      <td class="cwd">${esc(job.cwd)}</td>
       <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}</td>
       <td class="summary" title="${esc(job.prompt)}">${esc(job.prompt)}</td>
       <td class="actions">
@@ -142,15 +232,15 @@ function renderJobs(jobs) {
       </td>
     </tr>`
   })
-  $('jobsWrap').innerHTML = `<table>
-    <thead><tr><th>任务</th><th>状态</th><th>cron</th><th>下次触发</th><th>项目目录</th><th>权限</th><th>prompt</th><th>操作</th></tr></thead>
+  return `<table>
+    <thead><tr><th>任务</th><th>状态</th><th>cron</th><th>下次触发</th><th>权限</th><th>prompt</th><th>操作</th></tr></thead>
     <tbody>${rows.join('')}</tbody></table>`
 }
 
-function renderRuns(runs) {
+/** 渲染执行历史表格 HTML */
+function renderRunsTable(runs) {
   if (!runs.length) {
-    $('runsWrap').innerHTML = '<div class="empty">暂无执行历史</div>'
-    return
+    return '<div class="empty">暂无执行历史</div>'
   }
   const rows = runs.map((run) => {
     const at = new Date(run.startedAt).toLocaleString()
@@ -168,23 +258,81 @@ function renderRuns(runs) {
       <td class="actions"><button data-runact="del" class="danger">删除</button></td>
     </tr>`
   })
-  $('runsWrap').innerHTML = `<table>
+  return `<table>
     <thead><tr><th>时间 / 耗时</th><th>状态</th><th>任务</th><th>结果</th><th>会话</th><th>操作</th></tr></thead>
     <tbody>${rows.join('')}</tbody></table>`
 }
 
-function esc(text) {
-  return String(text ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+/** 绑定任务操作和运行历史操作 */
+function bindActions() {
+  const content = $('tabContent')
+  if (content === null) return
+  // 任务操作
+  content.querySelectorAll('button[data-act]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.closest('tr').dataset.id
+      const act = btn.dataset.act
+      if (act === 'edit') {
+        const job = allJobs.find((j) => j.id === id)
+        if (job !== undefined) openDialog(job)
+        return
+      }
+      if (act === 'toggle') {
+        const job = allJobs.find((j) => j.id === id)
+        if (job === undefined) return
+        api('/cron/api/jobs/' + id, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !job.enabled }) })
+          .then(() => { toast(job.enabled ? '已暂停' : '已恢复'); refresh() })
+          .catch((error) => toast(error.message))
+        return
+      }
+      if (act === 'trigger') {
+        api('/cron/api/jobs/' + id + '/trigger', { method: 'POST' })
+          .then(() => { toast('已触发，稍后刷新查看结果'); setTimeout(refresh, 3000) })
+          .catch((error) => toast(error.message))
+        return
+      }
+      if (act === 'remove') {
+        if (!confirm('删除任务 ' + id + ' 及其全部历史？')) return
+        api('/cron/api/jobs/' + id, { method: 'DELETE' })
+          .then(() => { toast('已删除'); refresh() })
+          .catch((error) => toast(error.message))
+      }
+    })
+  })
+  // 运行历史删除
+  content.querySelectorAll('button[data-runact]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const runId = btn.closest('tr').dataset.runid
+      const act = btn.dataset.runact
+      if (act === 'del') {
+        if (!confirm('删除这条历史记录？')) return
+        api('/cron/api/runs/' + encodeURIComponent(runId), { method: 'DELETE' })
+          .then(() => { toast('已删除'); refresh() })
+          .catch((error) => toast('删除失败: ' + error.message))
+      }
+    })
+  })
 }
 
 async function refresh() {
   try {
-    const [jobsData, runsData] = await Promise.all([api('/cron/api/jobs'), api('/cron/api/runs?limit=60')])
-    renderJobs(jobsData.jobs)
-    renderRuns(runsData.runs)
-    $('headInfo').textContent = `${jobsData.jobs.length} 个任务`
+    const [jobsData, runsData] = await Promise.all([api('/cron/api/jobs'), api('/cron/api/runs?limit=200')])
+    allJobs = jobsData.jobs
+    allRuns = runsData.runs
+    $('headInfo').textContent = `${allJobs.length} 个任务`
+    if (currentCwd === null) {
+      renderProjectList()
+    } else {
+      // 如果当前选中的项目已不存在，回到列表
+      if (!allJobs.some((j) => j.cwd === currentCwd)) {
+        currentCwd = null
+        renderProjectList()
+      } else {
+        renderDetail()
+      }
+    }
   } catch (error) {
-    $('jobsWrap').innerHTML = `<div class="empty">加载失败: ${esc(error.message)}</div>`
+    $('app').innerHTML = `<section><div class="empty">加载失败: ${esc(error.message)}</div></section>`
   }
 }
 
@@ -192,21 +340,16 @@ function openDialog(job) {
   editingId = job ? job.id : null
   $('dlgTitle').textContent = job ? `编辑 ${job.id}` : '新建任务'
   $('fName').value = job ? job.name : ''
-  $('fCwd').value = job ? job.cwd : ''
+  $('fCwd').value = job ? job.cwd : (currentCwd || '')
   $('fCron').value = job ? job.cron : ''
   $('fPrompt').value = job ? job.prompt : ''
   $('fPerm').value = job?.permissionMode || 'danger-full-access'
   $('dlg').showModal()
 }
 
+$('logo').addEventListener('click', () => { currentCwd = null; renderProjectList() })
 $('btnNew').addEventListener('click', () => openDialog(null))
 $('btnCancel').addEventListener('click', () => $('dlg').close())
-$('btnClearRuns').addEventListener('click', () => {
-  if (!confirm('删除全部执行历史？此操作不可撤销。')) return
-  api('/cron/api/runs', { method: 'DELETE' })
-    .then((data) => { toast('已删除 ' + (data.deleted || 0) + ' 条历史'); refresh() })
-    .catch((error) => toast('清除失败: ' + error.message))
-})
 $('btnSave').addEventListener('click', () => {
   const body = {
     name: $('fName').value.trim() || undefined,
@@ -220,54 +363,6 @@ $('btnSave').addEventListener('click', () => {
     : api('/cron/api/jobs/' + editingId, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
   req.then(() => { $('dlg').close(); toast('已保存'); refresh() })
      .catch((error) => toast('保存失败: ' + error.message))
-})
-
-$('jobsWrap').addEventListener('click', (event) => {
-  const btn = event.target.closest('button[data-act]')
-  if (btn === null) return
-  const id = btn.closest('tr').dataset.id
-  const act = btn.dataset.act
-  if (act === 'edit') {
-    api('/cron/api/jobs').then((data) => {
-      const job = data.jobs.find((j) => j.id === id)
-      if (job !== undefined) openDialog(job)
-    })
-    return
-  }
-  if (act === 'toggle') {
-    api('/cron/api/jobs').then((data) => {
-      const job = data.jobs.find((j) => j.id === id)
-      if (job === undefined) return
-      return api('/cron/api/jobs/' + id, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !job.enabled }) })
-        .then(() => { toast(job.enabled ? '已暂停' : '已恢复'); refresh() })
-    }).catch((error) => toast(error.message))
-    return
-  }
-  if (act === 'trigger') {
-    api('/cron/api/jobs/' + id + '/trigger', { method: 'POST' })
-      .then(() => { toast('已触发，稍后刷新查看结果'); setTimeout(refresh, 3000) })
-      .catch((error) => toast(error.message))
-    return
-  }
-  if (act === 'remove') {
-    if (!confirm('删除任务 ' + id + ' 及其全部历史？')) return
-    api('/cron/api/jobs/' + id, { method: 'DELETE' })
-      .then(() => { toast('已删除'); refresh() })
-      .catch((error) => toast(error.message))
-  }
-})
-
-$('runsWrap').addEventListener('click', (event) => {
-  const btn = event.target.closest('button[data-runact]')
-  if (btn === null) return
-  const runId = btn.closest('tr').dataset.runid
-  const act = btn.dataset.runact
-  if (act === 'del') {
-    if (!confirm('删除这条历史记录？')) return
-    api('/cron/api/runs/' + encodeURIComponent(runId), { method: 'DELETE' })
-      .then(() => { toast('已删除'); refresh() })
-      .catch((error) => toast('删除失败: ' + error.message))
-  }
 })
 
 refresh()
