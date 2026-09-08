@@ -84,11 +84,18 @@ function installSelection(ctx: Context, agentCtx: Context): void {
 async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promise<void> {
   await ctx.agentPresets.mount(agentCtx, 'standard')
   installSelection(ctx, agentCtx)
-  // cron 任务无人值守，给 danger-full-access 让 agent 能自由执行 bash/fs 操作。
-  // sandbox 策略靠 session.header.cwd 定 workspace root，cwd 正确即项目级隔离。
+  // cron 任务无人值守，设为"完全权限"preset（danger-full-access + approval: never）。
+  // 需写三个事件（permission/preset + sandbox/mode + approval/policy）让 webUI 显示为
+  // "完全权限"而非"Custom"--webUI 用 sandbox + approval 双字段匹配 preset。
   const agent = agentCtx.agent
   if (agent !== undefined) {
-    setSandboxMode(agent.session, 'danger-full-access')
+    const session = agent.session
+    setSandboxMode(session, 'danger-full-access')
+    // approval/policy 和 permission/preset 是 dsh-client-connection 扩展的事件类型，
+    // 不在 SessionEventMap 的 .d.ts 里，用 as 绕过类型检查；运行时 session.append 支持任意 type 字符串。
+    const s = session as { append(type: string, data: Record<string, unknown>): unknown }
+    s.append('permission/preset', { preset: 'danger-full-access' })
+    s.append('approval/policy', { policy: 'never' })
   }
   agentCtx.systemPrompt.section({
     name: 'cron-loop:job',
