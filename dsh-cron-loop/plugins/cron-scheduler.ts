@@ -18,6 +18,7 @@ import '@deepseek-ai/dsh-system-prompt' // 激活 Context.systemPrompt 类型扩
 import { computeNextRun, parseCron } from './lib/cron-core.ts'
 import { summarizeOwnedInterval, waitIdleOrTimeout } from './lib/agent-run.ts'
 import type { CronJobRecord, CronRunRecord } from './cron-store.ts'
+import { normalizeCwd } from './cron-store.ts'
 
 /** 调度 tick 间隔（ms）：分钟级任务的最大触发延迟。 */
 const TICK_MS = 30_000
@@ -215,6 +216,10 @@ export async function createJob(
   input: { name?: string; cwd: string; cron: string; prompt: string; enabled?: boolean },
 ): Promise<CronJobRecord> {
   parseCron(input.cron) // 非法即抛 CronParseError
+  const cwd = normalizeCwd(input.cwd)
+  if (cwd === '' || !cwd.startsWith('/')) {
+    throw new Error(`cron-scheduler: cwd must be an absolute path (after ~ expansion), got "${input.cwd}"`)
+  }
   const store = ctx.cronLoopStore
   const existing = store.listJobs().map((job) => job.id)
   let index = 1
@@ -224,7 +229,7 @@ export async function createJob(
   const job: CronJobRecord = {
     id: `cron-${index}`,
     name: input.name !== undefined && input.name !== '' ? input.name : fallbackName,
-    cwd: input.cwd,
+    cwd,
     cron: input.cron,
     prompt: input.prompt,
     enabled: input.enabled ?? true,
@@ -305,10 +310,12 @@ export function apply(ctx: Context): void {
       switch (args.action) {
         case 'add': {
           if (args.prompt === undefined || args.prompt === '') throw new Error('cron_job add: prompt is required')
-          const cwd = args.cwd ?? sessionCwd
-          if (cwd === undefined || cwd === '') {
+          // cwd 优先用参数，缺省用当前会话 cwd；两者都必须是真实存在的目录。
+          const rawCwd = args.cwd ?? sessionCwd
+          if (rawCwd === undefined || rawCwd === '') {
             throw new Error('cron_job add: cwd is required when the current session has no project directory')
           }
+          const cwd = normalizeCwd(rawCwd)
           const job = await createJob(ctx, {
             name: args.name,
             cwd,

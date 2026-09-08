@@ -14,18 +14,25 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 
 ## 接口设计
 
-### 存储（`ctx.cronLoop` 服务，domain 数据表）
+### 存储（`ctx.cronLoopStore` 服务，按项目目录名分组的文件树）
 
-通过 `@deepseek-ai/dsh-storage-domain`（`ctx.storageDomain`）打开 domain
-`cron-loop`（version 1，single layout，backend json，root `~/.dsh/storages`）：
+直接 fs 读写（不依赖 storage-domain，因为 domain name 受 `UNIT_NAME_RE` 约束，
+不支持 `/` 和 `-`，无法表达 `dsh-plugins` 这类项目目录名）。
 
-- 表 `jobs`，key = job id（`cron-<序号>`），value `CronJobRecord`：
-  - `id`, `name`（展示名，默认取 prompt 前 24 字）, `cwd`（绝对路径）,
-    `cron`（5 段 cron 表达式）, `prompt`, `enabled`, `timezone`（保留字段，v1 固定本地时区）,
-    `createdAt`, `updatedAt`, `lastRunAt?`, `lastStatus?`（'ok' | 'error' | 'running'）, `nextRunAt?`
-- 表 `runs`，key = run id（`run-<jobId>-<时间戳>`），value `CronRunRecord`：
-  - `id`, `jobId`, `jobName`, `startedAt`, `finishedAt?`, `status`（'running' | 'ok' | 'error'）,
-    `sessionId?`, `summary?`（最终 assistant 文本，截断 500 字）, `error?`
+布局：`~/.dsh/storages/crons/<project-basename>/<job-id>.json`
+
+- `<project-basename>` = cwd 路径的 basename（如 `/Users/x/YYInc/Me/dsh-plugins` -> `dsh-plugins`）。
+- 每个 job 一个 JSON 文件（`cron-1.json`），每个 run 一个 JSON 文件（`run-cron-1-xxx.json`）。
+- 启动时全量扫描 `crons/` 下所有项目子目录加载到内存缓存；写操作同步刷盘（原子 rename）。
+- cwd 标准化：所有入口（`cron_job` 工具、`/cron` `/loop` 命令、Web API）在落盘前
+  用 `normalizeCwd` 展开 `~` 为绝对路径，防止 AI 或用户传入未展开的 `~` 前缀。
+
+数据结构与之前一致：
+
+- `CronJobRecord`：`id`, `name`, `cwd`（绝对路径）, `cron`, `prompt`, `enabled`,
+  `timezone`, `createdAt`, `updatedAt`, `lastRunAt?`, `lastStatus?`, `nextRunAt?`
+- `CronRunRecord`：`id`, `jobId`, `jobName`, `startedAt`, `finishedAt?`,
+  `status`, `sessionId?`, `summary?`, `error?`
 - 每 job 保留最近 50 条 run（写入新 run 时裁剪旧 run）。
 
 ### 调度（`cron-scheduler.ts`）
@@ -71,7 +78,7 @@ add/update 的 `cwd` 缺省取当前 agent 会话的 `session.header.cwd`（项�
 - cron 表达式：5 段（分 时 日 月 周），支持 `*`、数字、`,`、`-`、`*/n`、星期与月份英文缩写；
   解析失败抛 `CronParseError`（消息含原始表达式与出错字段）。
 - 时区：一律用系统本地时区（`Date` 语义），v1 不做 IANA 时区参数。
-- 执行历史与 job 记录持久化在 `~/.dsh/storages/cron-loop.json`（storage-json single layout）。
+- 执行历史与 job 记录持久化在 `~/.dsh/storages/crons/<project-basename>/` 文件树下。
 - 重启后：running 状态的 run 标记为 error（进程中断），调度从 next-run 重算，不补积压。
 - 会话命名：`cron-<jobId>`，在 DSH 会话列表中可见可续聊。
 
@@ -89,4 +96,4 @@ add/update 的 `cwd` 缺省取当前 agent 会话的 `session.header.cwd`（项�
 - 不做时区参数、秒级精度（tick 粒度 30s）。
 - 不做跨进程分布式锁：单 web 进程持有调度器（多进程同时跑本插件可能重复触发，v1 不处理）。
 - 不做每 job 独立并发键/队列（同 job 串行由防重入标记保证）。
-- 不修改 deepseek-harness 本体，全部能力走公开 Service（webServer/agents/storageDomain/commands）。
+- 不修改 deepseek-harness 本体，全部能力走公开 Service（webServer/agents/commands）+ 直接 fs。

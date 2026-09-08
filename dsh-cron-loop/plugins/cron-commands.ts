@@ -5,6 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import '@deepseek-ai/dsh-commands' // 激活 Context.commands 类型扩展
 import { createJob } from './cron-scheduler.ts'
+import { normalizeCwd } from './cron-store.ts'
 
 /** 成功结果。 */
 function ok(text: string): CommandResult {
@@ -38,9 +39,9 @@ async function handleCron(ctx: Context, agentCwd: string | undefined, raw: strin
   // 无参数 / help：用法 + 当前列表
   if (input === '' || input === 'help' || input === 'ls' || input === 'list') {
     const jobs = agentCwd !== undefined
-      ? store.listJobsByCwd(agentCwd)
+      ? store.listJobsByCwd(normalizeCwd(agentCwd))
       : store.listJobs()
-    const scope = agentCwd !== undefined ? `当前项目 ${agentCwd}` : '全部项目'
+    const scope = agentCwd !== undefined ? `当前项目 ${normalizeCwd(agentCwd)}` : '全部项目'
     const lines = jobs.length === 0
       ? [`（${scope}暂无定时任务）`]
       : jobs.map(jobLine)
@@ -78,7 +79,8 @@ async function handleCron(ctx: Context, agentCwd: string | undefined, raw: strin
     return fail('用法: /cron <cron表达式> <任务prompt>，例如 /cron "0 9 * * 1-5" 总结项目状态')
   }
   try {
-    const job = await createJob(ctx, { cwd: agentCwd, cron: parts.expr, prompt: parts.prompt })
+    const cwd = normalizeCwd(agentCwd)
+    const job = await createJob(ctx, { cwd, cron: parts.expr, prompt: parts.prompt })
     return ok(`已创建定时任务 ${job.id}「${job.name}」\ncron: ${job.cron}\n目录: ${job.cwd}\n管理: http://127.0.0.1:3080/cron`)
   } catch (error: unknown) {
     return fail(`创建失败: ${error instanceof Error ? error.message : String(error)}`)

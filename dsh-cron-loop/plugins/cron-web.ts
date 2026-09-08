@@ -12,6 +12,7 @@ import { parseCron, computeNextRun } from './lib/cron-core.ts'
 import { createJob } from './cron-scheduler.ts'
 import type { CronLoopScheduler } from './cron-scheduler.ts'
 import type { CronJobRecord } from './cron-store.ts'
+import { normalizeCwd } from './cron-store.ts'
 
 /** 插件名。 */
 export const name = 'cron-web'
@@ -100,7 +101,7 @@ export function apply(ctx: Context): void {
             if (body.cron === undefined || body.cron === '') throw new Error('cron is required')
             const job = await createJob(ctx, {
               name: body.name,
-              cwd: body.cwd,
+              cwd: normalizeCwd(body.cwd),
               cron: body.cron,
               prompt: body.prompt,
             })
