@@ -110,7 +110,7 @@ export function normalizeCwd(cwd: string): string {
 
 /**
  * 从 cwd 推导存储子目录名（项目目录 basename）。
- * 例：`/Users/yy.inc/YYInc/Me/dsh-plugins` -> `dsh-plugins`。
+ * 例：`/home/you/projects/my-app` -> `my-app`。
  */
 export function projectKey(cwd: string): string {
   const normalized = normalizeCwd(cwd)

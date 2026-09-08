@@ -21,7 +21,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 
 布局：`~/.dsh/storages/crons/<project-basename>/<job-id>.json`
 
-- `<project-basename>` = cwd 路径的 basename（如 `/Users/x/YYInc/Me/dsh-plugins` -> `dsh-plugins`）。
+- `<project-basename>` = cwd 路径的 basename（如 `/home/you/projects/my-app` -> `my-app`）。
 - 每个 job 一个 JSON 文件（`cron-1.json`），每个 run 一个 JSON 文件（`run-cron-1-xxx.json`）。
 - 启动时全量扫描 `crons/` 下所有项目子目录加载到内存缓存；写操作同步刷盘（原子 rename）。
 - cwd 标准化：所有入口（`cron_job` 工具、`/cron` 命令、Web API）在落盘前
