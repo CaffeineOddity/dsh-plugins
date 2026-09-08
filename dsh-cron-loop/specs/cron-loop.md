@@ -8,7 +8,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 
 - 项目级定时器：每条 job 绑定一个绝对工作目录（cwd），到期后在该目录新开/续接一个
   DSH 会话并注入任务 prompt，由完整 agent loop 执行。
-- Claude Code 风格命令：会话内 `/cron`、`/loop` 管理当前项目（按 agent cwd 归属）的定时任务。
+- Claude Code 风格命令：会话内 `/cron` 管理当前项目（按 agent cwd 归属）的定时任务。
 - 任务中心页面：`http://127.0.0.1:3080/cron` 查看本地所有项目的任务列表、执行历史，
   并可新建/编辑/暂停/删除任务。
 
@@ -24,7 +24,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 - `<project-basename>` = cwd 路径的 basename（如 `/Users/x/YYInc/Me/dsh-plugins` -> `dsh-plugins`）。
 - 每个 job 一个 JSON 文件（`cron-1.json`），每个 run 一个 JSON 文件（`run-cron-1-xxx.json`）。
 - 启动时全量扫描 `crons/` 下所有项目子目录加载到内存缓存；写操作同步刷盘（原子 rename）。
-- cwd 标准化：所有入口（`cron_job` 工具、`/cron` `/loop` 命令、Web API）在落盘前
+- cwd 标准化：所有入口（`cron_job` 工具、`/cron` 命令、Web API）在落盘前
   用 `normalizeCwd` 展开 `~` 为绝对路径，防止 AI 或用户传入未展开的 `~` 前缀。
 
 数据结构与之前一致：
@@ -62,8 +62,7 @@ add/update 的 `cwd` 缺省取当前 agent 会话的 `session.header.cwd`（项�
 
 - `/cron <cron表达式> <任务描述…>`：为当前项目新增任务（cwd = agent session.header.cwd）。
 - `/cron list` / `/cron rm <id>` / `/cron on <id>` / `/cron off <id>`：列表/删除/启停。
-- `/loop <cron表达式> <任务描述…>`：`/cron add` 的别名（对齐 Claude Code 习惯）。
-- `/loop`（无参数）：列出当前项目的任务。
+- `/cron`（无参数 / list）：列出当前项目的任务。
 - 命令结果为 success 文本（CommandResult），不进模型。
 
 ### Web 任务中心（`cron-web.ts` + `assets/cron.html`）

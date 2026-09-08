@@ -107,7 +107,7 @@ const STATUS_PILL = { ok: 'ok', error: 'error', running: 'running' }
 
 function renderJobs(jobs) {
   if (!jobs.length) {
-    $('jobsWrap').innerHTML = '<div class="empty">暂无任务。点右上角「新建任务」，或在任意会话里用 /cron 或 /loop 命令创建。</div>'
+    $('jobsWrap').innerHTML = '<div class="empty">暂无任务。点右上角「新建任务」，或在任意会话里用 /cron 命令创建。</div>'
     return
   }
   const rows = jobs.map((job) => {

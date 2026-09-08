@@ -1,4 +1,4 @@
-// cron-loop 斜杠命令：/cron（Claude Code 风格）与 /loop 别名。
+// cron-loop 斜杠命令：/cron（Claude Code 风格），项目级定时任务管理。
 // 全局注册（纯 ctx 层），任意会话可用；任务归属按 agent 会话的 cwd（项目级）。
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -98,20 +98,6 @@ export function apply(ctx: Context): void {
     async handler(invocation) {
       const cwd = invocation.agent.session.header.cwd
       return handleCron(ctx, cwd, invocation.rawInput)
-    },
-  })
-
-  // /loop：/cron 新建的别名；无参数 = 列表
-  ctx.commands.register({
-    name: 'loop',
-    description: '为当前项目创建循环定时任务（/loop <cron表达式> <prompt>）；无参数列出已有任务',
-    async handler(invocation) {
-      const cwd = invocation.agent.session.header.cwd
-      const raw = invocation.rawInput.trim()
-      if (raw === '') {
-        return handleCron(ctx, cwd, 'list')
-      }
-      return handleCron(ctx, cwd, raw)
     },
   })
 }
