@@ -18,6 +18,7 @@ import '@deepseek-ai/dsh-agent-default-model' // 激活 Context.agentDefaultMode
 import '@deepseek-ai/dsh-system-prompt' // 激活 Context.systemPrompt 类型扩展
 import '@deepseek-ai/dsh-sandbox-policy' // 激活 setSandboxMode / SessionEventMap 扩展
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
+import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { computeNextRun, matches, parseCron } from './lib/cron-core.ts'
 import { summarizeOwnedInterval, waitIdleOrTimeout } from './lib/agent-run.ts'
 import type { CronJobRecord, CronRunRecord } from './cron-store.ts'
@@ -80,22 +81,33 @@ function installSelection(ctx: Context, agentCtx: Context): void {
   installModelSelection(agentCtx, selection)
 }
 
+/** 可选权限模式与 preset 名同名（read-only / workspace-write / danger-full-access）。
+ * 对齐 dsh-base/cordis.patch.yml 里的 preset 表配置。 */
+const PERMISSION_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const
+const PRESET_SPEC: Record<string, { sandbox: string; approval: 'ask' | 'never' }> = {
+  'read-only': { sandbox: 'read-only', approval: 'ask' },
+  'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
+  'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
+}
+
 /** 组装 cron 会话的 scoped world：挂宿主 `standard` preset（完整 agent-loop 工具面）。 */
-async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promise<void> {
+async function setupAgent(ctx: Context, agentCtx: Context, jobId: string, permissionMode: string): Promise<void> {
   await ctx.agentPresets.mount(agentCtx, 'standard')
   installSelection(ctx, agentCtx)
-  // cron 任务无人值守，设为"完全权限"preset（danger-full-access + approval: never）。
-  // 需写三个事件（permission/preset + sandbox/mode + approval/policy）让 webUI 显示为
-  // "完全权限"而非"Custom"--webUI 用 sandbox + approval 双字段匹配 preset。
+  // 按 job 配置的 permissionMode 写完整 preset 三元组（permission/preset + sandbox/mode +
+  // approval/policy），让 webUI 显示对应的 preset 名称而非"Custom"。
+  // 注意：read-only 和 workspace-write 的 approval=ask，无人值守时会卡在审批弹窗上，
+  // 仅适合有人监控的场景；danger-full-access 的 approval=never 才适合真正无人值守。
   const agent = agentCtx.agent
   if (agent !== undefined) {
     const session = agent.session
-    setSandboxMode(session, 'danger-full-access')
-    // approval/policy 和 permission/preset 是 dsh-client-connection 扩展的事件类型，
-    // 不在 SessionEventMap 的 .d.ts 里，用 as 绕过类型检查；运行时 session.append 支持任意 type 字符串。
+    const spec = PRESET_SPEC[permissionMode] ?? PRESET_SPEC['danger-full-access']
+    if (spec === undefined) throw new Error(`cron-scheduler: unknown permissionMode "${permissionMode}" for job ${jobId}`)
+    // permission/preset 不在 SessionEventMap 类型里，用 as 绕过。
     const s = session as { append(type: string, data: Record<string, unknown>): unknown }
-    s.append('permission/preset', { preset: 'danger-full-access' })
-    s.append('approval/policy', { policy: 'never' })
+    s.append('permission/preset', { preset: permissionMode })
+    setSandboxMode(session, spec.sandbox as 'read-only' | 'workspace-write' | 'danger-full-access')
+    setApprovalPolicy(session, spec.approval)
   }
   agentCtx.systemPrompt.section({
     name: 'cron-loop:job',
@@ -107,7 +119,7 @@ async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promi
 /** 确保目标会话有 live agent：已 live 直接取，否则按磁盘状态 resume/create。
  * 对齐 ruliu-bridge 的 ensureAgent 模式（照搬 lifecycle 判定 + 自愈）。
  * 返回值含最终使用的 sessionId（可能因归档/损坏而变化）。 */
-async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string): Promise<{ agent: Agent; sessionId: string }> {
+async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string, permissionMode: string): Promise<{ agent: Agent; sessionId: string }> {
   const live = ctx.agents.get(sid)
   const persisted = await isPersisted(ctx, sid)
   // lifecycle: live 已在内存；resume 磁盘有但内存无；create 都无。
@@ -124,7 +136,7 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
   const opts = {
     agentOptions: { provider: selection.provider, model: selection.model },
     setup: async (agentCtx: Context): Promise<void> => {
-      await setupAgent(ctx, agentCtx, jobId)
+      await setupAgent(ctx, agentCtx, jobId, permissionMode)
     },
   }
   let handle: AgentHandle
@@ -203,7 +215,7 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   await store.jobs.put(job.id, { ...jobWithSession, lastRunAt: startedAt, lastStatus: 'running' })
   ctx.logger?.info?.(`cron-scheduler: job ${job.id} (${job.name}) fired`)
   try {
-    const { agent, sessionId: actualSid } = await ensureAgent(ctx, sid, job.id, job.cwd)
+    const { agent, sessionId: actualSid } = await ensureAgent(ctx, sid, job.id, job.cwd, job.permissionMode ?? 'danger-full-access')
     // 首次执行把会话身份回写到 job 记录，之后每次复用该 id resume。
     await store.putJob({ ...jobWithSession, sessionId: actualSid })
     // 首个 whenIdle 同样加安全阀：会话 hang 死时不至于永久占住 inFlight。
@@ -295,7 +307,7 @@ async function triggerJobNowOn(ctx: Context, jobId: string): Promise<void> {
 /** 新建任务的公共入口（工具/命令/Web 共用）：校验 cron、生成 id、落盘。 */
 export async function createJob(
   ctx: Context,
-  input: { name?: string; cwd: string; cron: string; prompt: string; enabled?: boolean },
+  input: { name?: string; cwd: string; cron: string; prompt: string; enabled?: boolean; permissionMode?: string },
 ): Promise<CronJobRecord> {
   parseCron(input.cron) // 非法即抛 CronParseError
   const cwd = normalizeCwd(input.cwd)
@@ -315,6 +327,7 @@ export async function createJob(
     cron: input.cron,
     prompt: input.prompt,
     enabled: input.enabled ?? true,
+    permissionMode: input.permissionMode ?? 'danger-full-access',
     timezone: 'local',
     createdAt: now,
     updatedAt: now,
@@ -333,6 +346,7 @@ interface CronToolArgs {
   name?: string
   cwd?: string
   enabled?: boolean
+  permissionMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
 }
 
 /** 文本输出（output schema: string，render 原样返回）。 */
@@ -381,6 +395,7 @@ export function apply(ctx: Context): void {
       name: { type: 'string', description: '展示名' },
       cwd: { type: 'string', description: '任务归属目录（add 可选；缺省为当前项目目录）' },
       enabled: { type: 'boolean', description: '启用状态' },
+      permissionMode: { type: 'string', enum: ['read-only', 'workspace-write', 'danger-full-access'], description: '权限模式（缺省 danger-full-access；read-only/workspace-write 会弹审批，不适合无人值守）' },
     },
     output: {
       schema: { type: 'string' },
@@ -404,6 +419,7 @@ export function apply(ctx: Context): void {
             cwd,
             cron: args.cron ?? '* * * * *',
             prompt: args.prompt,
+            permissionMode: args.permissionMode,
           })
           return textResult(`已创建任务 ${job.id}「${job.name}」\ncron: ${job.cron}\n目录: ${job.cwd}\nprompt: ${job.prompt}`)
         }

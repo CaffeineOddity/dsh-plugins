@@ -29,6 +29,7 @@
     "@deepseek-ai/dsh-storage-domain": "0.1.2-rc.1",
     "@deepseek-ai/dsh-subprocess": "0.1.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-user-approval": "0.1.2-rc.1",
     "@deepseek-ai/schemastery": "^3.18.2",
     "zod": "^4.5.4"
   },

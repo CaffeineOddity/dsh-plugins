@@ -80,6 +80,12 @@
   <input id="fCron" placeholder="0 9 * * 1-5">
   <label>任务 prompt（到期后注入会话执行）</label>
   <textarea id="fPrompt" placeholder="总结本项目昨天的 git 提交，输出要点列表"></textarea>
+  <label>权限模式</label>
+  <select id="fPerm">
+    <option value="danger-full-access">完全权限（无人值守推荐）</option>
+    <option value="workspace-write">工作区内修改</option>
+    <option value="read-only">仅可查看</option>
+  </select>
   <div class="row">
     <button id="btnCancel">取消</button>
     <button id="btnSave" class="primary">保存</button>
@@ -107,6 +113,7 @@ async function api(path, options) {
 }
 
 const STATUS_PILL = { ok: 'ok', error: 'error', running: 'running' }
+const PERM_LABEL = { 'read-only': '仅可查看', 'workspace-write': '工作区内修改', 'danger-full-access': '完全权限' }
 
 function renderJobs(jobs) {
   if (!jobs.length) {
@@ -125,6 +132,7 @@ function renderJobs(jobs) {
       <td><code>${esc(job.cron)}</code></td>
       <td>${esc(next)}<br><span class="cwd">上次: ${esc(last)}</span></td>
       <td class="cwd">${esc(job.cwd)}</td>
+      <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}</td>
       <td class="summary" title="${esc(job.prompt)}">${esc(job.prompt)}</td>
       <td class="actions">
         <button data-act="edit">编辑</button>
@@ -135,7 +143,7 @@ function renderJobs(jobs) {
     </tr>`
   })
   $('jobsWrap').innerHTML = `<table>
-    <thead><tr><th>任务</th><th>状态</th><th>cron</th><th>下次触发</th><th>项目目录</th><th>prompt</th><th>操作</th></tr></thead>
+    <thead><tr><th>任务</th><th>状态</th><th>cron</th><th>下次触发</th><th>项目目录</th><th>权限</th><th>prompt</th><th>操作</th></tr></thead>
     <tbody>${rows.join('')}</tbody></table>`
 }
 
@@ -187,6 +195,7 @@ function openDialog(job) {
   $('fCwd').value = job ? job.cwd : ''
   $('fCron').value = job ? job.cron : ''
   $('fPrompt').value = job ? job.prompt : ''
+  $('fPerm').value = job?.permissionMode || 'danger-full-access'
   $('dlg').showModal()
 }
 
@@ -204,6 +213,7 @@ $('btnSave').addEventListener('click', () => {
     cwd: $('fCwd').value.trim(),
     cron: $('fCron').value.trim(),
     prompt: $('fPrompt').value.trim(),
+    permissionMode: $('fPerm').value,
   }
   const req = editingId === null
     ? api('/cron/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })

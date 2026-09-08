@@ -24,6 +24,8 @@ export interface CronJobRecord {
   prompt: string
   /** 是否启用（停用不触发也不补跑）。 */
   enabled: boolean
+  /** 权限模式：read-only / workspace-write / danger-full-access。 */
+  permissionMode?: string
   /** 保留字段：v1 固定本地时区。 */
   timezone: string
   /** 绑定的会话 id（首次执行时生成，之后固定复用）。 */
@@ -74,6 +76,7 @@ const jobSchema = z.object({
   prompt: z.string().min(1),
   enabled: z.boolean(),
   timezone: z.string(),
+  permissionMode: z.string().optional(),
   sessionId: z.string().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),

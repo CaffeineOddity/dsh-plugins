@@ -30,6 +30,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 数据结构与之前一致：
 
 - `CronJobRecord`：`id`, `name`, `cwd`（绝对路径）, `cron`, `prompt`, `enabled`,
+  `permissionMode?`（`read-only`/`workspace-write`/`danger-full-access`，缺省 `danger-full-access`）,
   `timezone`, `sessionId?`, `createdAt`, `updatedAt`, `lastRunAt?`, `lastStatus?`, `nextRunAt?`
 - `CronRunRecord`：`id`, `jobId`, `jobName`, `startedAt`, `finishedAt?`,
   `status`, `sessionId?`, `summary?`, `error?`
@@ -51,7 +52,12 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
   - create 后调 `workspaceRegistry.create(cwd)` + `workspace.attachSession(sid)`，
     让 webUI 侧边栏把会话归到正确项目分组（否则落"未分组"）。
   - setup 阶段 `agentPresets.mount(agentCtx, 'standard')` + `installModelSelection`
-    + `setSandboxMode(session, 'danger-full-access')`（无人值守，需完整文件/bash 权限），
+    + 按 `job.permissionMode` 写完整 preset 三元组（`permission/preset` + `sandbox/mode` +
+    `approval/policy`），让 webUI 显示对应 preset 名称而非"Custom"。
+    权限映射：`read-only`→sandbox=read-only,approval=ask；`workspace-write`→sandbox=workspace-write,approval=ask；
+    `danger-full-access`→sandbox=danger-full-access,approval=never。
+    **注意**：`read-only` 和 `workspace-write` 的 approval=ask 会弹审批，无人值守时任务会卡住，
+    仅适合有人监控的场景；`danger-full-access` 的 approval=never 才适合真正无人值守。
     `agent.followup(createUserMessage(...))`，等待 idle->followup->idle 或 10 分钟安全阀超时，
     `sessions.flush` 后取本轮 assistant 文本写 run 记录。
     sandbox 策略靠 `session.header.cwd` 定 workspace root，cwd 正确即项目级隔离。
@@ -62,6 +68,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 `cron_job`（单工具多 action，避免枚举一堆相似工具）：
 `action: 'add'|'list'|'update'|'remove'|'pause'|'resume'|'runs'`。
 add/update 的 `cwd` 缺省取当前 agent 会话的 `session.header.cwd`（项目级归属的落点）；
+add 的 `permissionMode` 缺省 `danger-full-access`（可选 `read-only`/`workspace-write`/`danger-full-access`）；
 `cron` 参数必须通过 `parseCron` 校验，非法即抛错。
 
 ### 斜杠命令（`cron-commands.ts`，`ctx.commands.register`）
