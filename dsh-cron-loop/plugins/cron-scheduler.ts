@@ -15,6 +15,8 @@ import '@deepseek-ai/cordis-plugin-timer' // 激活 Context.timer 类型扩展
 import '@deepseek-ai/dsh-agent-presets' // 激活 Context.agentPresets 类型扩展
 import '@deepseek-ai/dsh-agent-default-model' // 激活 Context.agentDefaultModel 类型扩展
 import '@deepseek-ai/dsh-system-prompt' // 激活 Context.systemPrompt 类型扩展
+import '@deepseek-ai/dsh-sandbox-policy' // 激活 setSandboxMode / SessionEventMap 扩展
+import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { computeNextRun, parseCron } from './lib/cron-core.ts'
 import { summarizeOwnedInterval, waitIdleOrTimeout } from './lib/agent-run.ts'
 import type { CronJobRecord, CronRunRecord } from './cron-store.ts'
@@ -74,6 +76,12 @@ function installSelection(ctx: Context, agentCtx: Context): void {
 async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promise<void> {
   await ctx.agentPresets.mount(agentCtx, 'standard')
   installSelection(ctx, agentCtx)
+  // cron 任务无人值守，给 danger-full-access 让 agent 能自由执行 bash/fs 操作。
+  // sandbox 策略靠 session.header.cwd 定 workspace root，cwd 正确即项目级隔离。
+  const agent = agentCtx.agent
+  if (agent !== undefined) {
+    setSandboxMode(agent.session, 'danger-full-access')
+  }
   agentCtx.systemPrompt.section({
     name: 'cron-loop:job',
     order: 1,
@@ -85,7 +93,10 @@ async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promi
 async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string): Promise<Agent> {
   const live = ctx.agents.get(sid)
   if (live !== undefined) return live
-  const persisted = await isPersisted(ctx, sid)
+  // 只在会话已 live 且 cwd 匹配时 resume；否则 create（保证会话落在正确项目分组）。
+  // 用 ctx.sessions.get 而非 persistence.list：live session 的 header.cwd 是权威值。
+  const persistedSession = ctx.sessions.get(sid)
+  const shouldResume = persistedSession !== undefined && persistedSession.header.cwd === cwd
   const selection = ctx.agentDefaultModel.currentSelection()
   if (selection.provider === '' || selection.model === '') {
     throw new Error(`cron-scheduler: no default model for job ${jobId} — set agent-default-model in ~/.dsh/settings.yaml`)
@@ -96,7 +107,7 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
       await setupAgent(ctx, agentCtx, jobId)
     },
   }
-  const handle = persisted
+  const handle = shouldResume
     ? await ctx.agents.resume({ resumeSessionId: sid, ...opts })
     : await ctx.agents.create({ sessionId: sid, meta: { cwd }, ...opts })
   const key = String(sid)

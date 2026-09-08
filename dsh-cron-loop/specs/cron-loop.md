@@ -41,11 +41,15 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
   1. 遍历 enabled job，用 `computeNextRun`（`cron-core.ts` 纯函数，本地时区）算 `nextRunAt`；
   2. `nextRunAt <= now` 的 job 进入执行：先置 `lastStatus: 'running'` 并写 running run 记录，
      防重入（同一 job 同时至多一个在途执行）。
-- 执行：`ctx.agents` create/resume（会话 id = `cron-<jobId>`，稳定复用同一会话），
-  `agentPresets.mount(agentCtx, 'standard')` + `installModelSelection`（照抄 ruliu-bridge），
-  `agent.followup(createUserMessage(...))`，等待 idle→followup→idle 或 10 分钟安全阀超时，
+- 执行：`ctx.agents` create/resume（会话 id = `cron-<jobId>`）。
+  resume 条件：会话已 live 且 `session.header.cwd` 与 job.cwd 一致；否则 create
+  （保证会话落在正确项目分组，不复用旧 cwd 的残留会话）。
+  setup 阶段 `agentPresets.mount(agentCtx, 'standard')` + `installModelSelection`
+  + `setSandboxMode(session, 'danger-full-access')`（无人值守，需完整文件/bash 权限），
+  `agent.followup(createUserMessage(...))`，等待 idle->followup->idle 或 10 分钟安全阀超时，
   `sessions.flush` 后取本轮 assistant 文本写 run 记录。
-- catch-up 策略：latest-only——错过多次只补跑最新一次；job 停用/暂停期间不补跑。
+  sandbox 策略靠 `session.header.cwd` 定 workspace root，cwd 正确即项目级隔离。
+- catch-up 策略：latest-only--错过多次只补跑最新一次；job 停用/暂停期间不补跑。
 
 ### 模型工具（`cron-scheduler.ts` 内 `harness.registerTool`）
 
