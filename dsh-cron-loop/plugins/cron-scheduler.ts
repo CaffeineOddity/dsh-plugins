@@ -40,15 +40,19 @@ interface PersistenceList {
   list(): Promise<Array<{ id: string; cwd?: string }>>
 }
 
-/** 磁盘上是否已有该会话；有则返回其 header（含 cwd），无则 undefined。 */
-async function findPersisted(ctx: Context, sid: SessionId): Promise<{ id: string; cwd?: string } | undefined> {
+/** 判断会话是否已被归档（web UI 从分组视图隐藏）。无 workspaceRegistry 时保守视为未归档。 */
+function isArchived(ctx: Context, sessionId: string): boolean {
+  const registry = ctx.get('workspaceRegistry') as { archivedSessionIds?: readonly string[] } | undefined
+  if (registry?.archivedSessionIds === undefined) return false
+  return registry.archivedSessionIds.includes(sessionId)
+}
+
+/** 磁盘（persistence.list）是否已有该会话；无 persistence 服务时退回内存 store。 */
+async function isPersisted(ctx: Context, sid: SessionId): Promise<boolean> {
   const persistence = ctx.get('sessionPersistence') as PersistenceList | undefined
-  if (persistence === undefined) {
-    const live = ctx.sessions.get(sid)
-    return live !== undefined ? { id: String(sid), cwd: live.header.cwd } : undefined
-  }
+  if (persistence === undefined) return ctx.sessions.get(sid) !== undefined
   const headers = await persistence.list()
-  return headers.find((header) => header.id === sid)
+  return headers.some((header) => header.id === sid)
 }
 
 /**
@@ -94,15 +98,18 @@ async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promi
 }
 
 /** 确保目标会话有 live agent：已 live 直接取，否则按磁盘状态 resume/create。
- * 首次执行时 sid 为 runJob 生成的随机 UUID，create 时作为会话身份传入；
- * 之后每次复用该 id resume。返回值含最终使用的 sessionId（可能因自愈而变化）。
- * 自愈：resume 失败（会话损坏等）时自动生成新 UUID 并 create 新会话。 */
+ * 对齐 ruliu-bridge 的 ensureAgent 模式（照搬 lifecycle 判定 + 自愈）。
+ * 返回值含最终使用的 sessionId（可能因归档/损坏而变化）。 */
 async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string): Promise<{ agent: Agent; sessionId: string }> {
   const live = ctx.agents.get(sid)
-  if (live !== undefined) return { agent: live, sessionId: String(sid) }
-  // 磁盘上已有该会话 -> resume（进程重启后靠 sessionPersistence.list 恢复）；否则 create。
-  const persisted = await findPersisted(ctx, sid)
-  const shouldResume = persisted !== undefined
+  const persisted = await isPersisted(ctx, sid)
+  // lifecycle: live 已在内存；resume 磁盘有但内存无；create 都无。
+  const lifecycle = live !== undefined ? 'live' : persisted ? 'resume' : 'create'
+  ctx.logger?.info?.(`cron-scheduler: ensureAgent job=${jobId} sid=${String(sid)} lifecycle=${lifecycle} cwd=${cwd}`)
+  if (lifecycle === 'live') {
+    if (live === undefined) throw new Error(`cron-scheduler: session ${sid} resolved live but agents.get returned undefined`)
+    return { agent: live, sessionId: String(sid) }
+  }
   const selection = ctx.agentDefaultModel.currentSelection()
   if (selection.provider === '' || selection.model === '') {
     throw new Error(`cron-scheduler: no default model for job ${jobId} - set agent-default-model in ~/.dsh/settings.yaml`)
@@ -115,12 +122,11 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
   }
   let handle: AgentHandle
   let finalSid: string = String(sid)
-  if (shouldResume) {
+  if (lifecycle === 'resume') {
     try {
       handle = await ctx.agents.resume({ resumeSessionId: sid, ...opts })
     } catch (error: unknown) {
       // 会话损坏（seq gap、corrupt log 等）-> 生成新 UUID 重建会话。
-      // runJob 会把返回的 finalSid 回写到 job 记录，无需在此手动存。
       const msg = error instanceof Error ? error.message : String(error)
       if (msg.includes('corrupt') || msg.includes('seq gap') || msg.includes('collision') || msg.includes('does not match')) {
         ctx.logger?.warn?.(`cron-scheduler: session ${sid} unusable (${msg.slice(0, 80)}), creating new session for job ${jobId}`)
@@ -131,10 +137,16 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
       }
     }
   } else {
-    // create 要求调用方提供会话身份（agent id 须等于 session id），故用 runJob 传入的 sid。
-    // 若 create 因磁盘已有同 id 会话而报 collision，退回 resume（findPersisted 未命中时的安全阀）。
+    // create：首次执行或会话被归档后重建。
     try {
       handle = await ctx.agents.create({ sessionId: sid, meta: { cwd }, ...opts })
+      // 注册 workspace 让 webUI 侧边栏把会话归到正确分组（否则会落"未分组"）。
+      const registry = ctx.get('workspaceRegistry') as { create(path: string): Promise<unknown> } | undefined
+      if (registry !== undefined) {
+        await registry.create(cwd).catch((e: unknown) => {
+          ctx.logger?.warn?.(`cron-scheduler: workspaceRegistry.create(${cwd}) failed: ${e instanceof Error ? e.message : String(e)}`)
+        })
+      }
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error)
       if (msg.includes('collision') || msg.includes('already has a persisted')) {
@@ -156,11 +168,14 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
 /** 执行一个到期任务：写 running run → agent 回合 → 收口写结果 run。 */
 async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   const store = ctx.cronLoopStore
-  // 每个任务绑定一个固定会话：首次执行生成随机 UUID 作为会话身份并存入 job 记录，
-  // 之后每次复用该 id resume；进程重启后靠 persistence 恢复。
-  const sessionStr = job.sessionId ?? randomUUID()
+  // 每个任务绑定一个固定会话：首次执行生成随机 UUID 并存入 job.sessionId，之后复用。
+  // 会话被归档（web UI 隐藏）后，生成新 UUID 重建，对齐 ruliu-bridge 的 resolveSessionId 模式。
+  let sessionStr = job.sessionId ?? randomUUID()
+  if (job.sessionId !== undefined && isArchived(ctx, job.sessionId)) {
+    ctx.logger?.info?.(`cron-scheduler: job ${job.id} 会话 ${job.sessionId} 已归档，新建会话`)
+    sessionStr = randomUUID()
+  }
   const sid = SessionId(sessionStr)
-  // 首次执行时 jobWithSession 暂不设 sessionId，待 ensureAgent 返回后再回写。
   const jobWithSession = job
   const runId = `run-${job.id}-${Date.now()}`
   const startedAt = Date.now()
@@ -314,7 +329,7 @@ function textResult(text: string): string {
 
 /** cron-scheduler 插件：调度循环 + cron_job 模型工具。 */
 export const name = 'cron-scheduler'
-export const inject = ['tools', 'timer', 'agents', 'sessions', 'agentPresets', 'agentDefaultModel', 'systemPrompt', 'cronLoopStore', 'sessionPersistence']
+export const inject = ['tools', 'timer', 'agents', 'sessions', 'agentPresets', 'agentDefaultModel', 'systemPrompt', 'cronLoopStore', 'sessionPersistence', 'workspaceRegistry']
 
 export function apply(ctx: Context): void {
   // 对外暴露 trigger 服务：调用方拿到的 ctx 是 scheduler 自己的 fiber ctx，
