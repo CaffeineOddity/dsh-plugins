@@ -202,6 +202,11 @@ async function mergeJobUpdate(store: { jobs: { get(id: string): CronJobRecord | 
 /** 执行一个到期任务：写 running run → agent 回合 → 收口写结果 run。 */
 async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   const store = ctx.cronLoopStore
+  // 防御：job 在 tick -> runJob 间隙被删除时直接跳过，不写 run 也不 crash。
+  if (store.jobs.get(job.id) === undefined) {
+    ctx.logger?.warn?.(`cron-scheduler: job ${job.id} no longer in store, skipping runJob`)
+    return
+  }
   // 每个任务绑定一个固定会话：首次执行生成随机 UUID 并存入 job.sessionId，之后复用。
   // 会话被归档（web UI 隐藏）后，生成新 UUID 重建，对齐 ruliu-bridge 的 resolveSessionId 模式。
   let sessionStr = job.sessionId ?? randomUUID()

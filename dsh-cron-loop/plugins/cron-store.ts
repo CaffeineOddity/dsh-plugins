@@ -325,13 +325,12 @@ export class CronStore {
     return all.sort((a, b) => b.startedAt - a.startedAt).slice(0, limit)
   }
 
-  /** 写入一条 run 并裁剪该任务超量的历史。 */
+  /** 写入一条 run 并裁剪该任务超量的历史。
+   * job 已被删除时静默跳过（不抛错），避免 runJob 收口阶段因 job 删除而 crash 进程。 */
   async putRun(run: CronRunRecord): Promise<void> {
     // run 需要写入 job 所属的项目目录（靠 jobId 反查 project key）。
     const jobKey = this.projectKeyOf(run.jobId)
-    if (jobKey === undefined) {
-      throw new Error(`cron-store: cannot find project for run jobId=${run.jobId} (job may have been deleted)`)
-    }
+    if (jobKey === undefined) return
     const dir = join(cronsRoot(), jobKey)
     const map = this.runsByProject.get(jobKey) ?? new Map<string, CronRunRecord>()
     this.runsByProject.set(jobKey, map)
