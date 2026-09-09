@@ -69,34 +69,23 @@ flowchart LR
    pnpm typecheck
    ```
 
-3. **修正 patch 中的插件路径**
+3. **把插件作为 bundle 安装进 web profile**
 
-   [cordis.patch.yml](./cordis.patch.yml) 用绝对路径引用插件源码（patch 的相对路径相对 `~/.dsh/profiles/web` 解析）。将其中的路径替换为你的实际克隆路径：
-
-   ```yaml
-   # cordis.patch.yml
-   - insert:
-       - id: cron-store
-         name: '/你/的/路径/dsh-plugins/dsh-cron-loop/plugins/cron-store.ts'
-       - id: cron-scheduler
-         name: '/你/的/路径/dsh-plugins/dsh-cron-loop/plugins/cron-scheduler.ts'
-       - id: cron-web
-         name: '/你/的/路径/dsh-plugins/dsh-cron-loop/plugins/cron-web.ts'
-       - id: cron-commands
-         name: '/你/的/路径/dsh-plugins/dsh-cron-loop/plugins/cron-commands.ts'
+   ```bash
+   dsh plugin --profile web add link:$(pwd)
    ```
+
+   这会在 `~/.dsh/profiles/web` 里建立指向本目录的软链依赖，并把 `dsh-cron-loop` 自动登记到 `dsh.profile.bundles`。之后每次 `dsh web` 启动都会自动加载本插件，无需再传 `--patch`。
 
 4. **启动**
 
    ```bash
-   # 方式一：用插件的 dev 脚本（已带 --no-open）
-   pnpm dev
-
-   # 方式二：手动指定 patch
-   dsh web --patch ./cordis.patch.yml
+   dsh web
    ```
 
    启动后浏览器访问 `http://127.0.0.1:3080/cron` 即可看到任务中心。
+
+> 说明：[cordis.patch.yml](./cordis.patch.yml) 中的 `name` 相对本文件所在目录解析（`./plugins/...`），与机器路径无关，无需手工修改。
 
 ## 使用
 

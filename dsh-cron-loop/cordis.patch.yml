@@ -1,14 +1,14 @@
-# dsh-cron-loop 的 Cordis 叠加层（overlay over web profile）
-# `dsh web --patch ./cordis.patch.yml` 应用本文件，插入 cron-loop 插件组。
-# 插件路径用绝对路径，因为 patch 的相对路径相对 profile 目录(~/.dsh/profiles/web)解析。
-# ⚠️ 部署前请把下方 /your/path/dsh-plugins 替换为本仓库在你机器上的实际绝对路径。
+# dsh-cron-loop 的 Cordis 叠加层（bundle layer）
+# 经 `dsh plugin --profile web add <本目录>` 安装后，dsh 读取 profile node_modules 软链
+# 指向的本文件并应用。name 相对本文件所在目录（即 bundle 根目录）解析，
+# 因此 ./plugins/... 与机器路径无关，无需手工改路径。
 
 - insert:
     - id: cron-store
-      name: '/your/path/dsh-plugins/dsh-cron-loop/plugins/cron-store.ts'
+      name: ./plugins/cron-store.ts
     - id: cron-scheduler
-      name: '/your/path/dsh-plugins/dsh-cron-loop/plugins/cron-scheduler.ts'
+      name: ./plugins/cron-scheduler.ts
     - id: cron-web
-      name: '/your/path/dsh-plugins/dsh-cron-loop/plugins/cron-web.ts'
+      name: ./plugins/cron-web.ts
     - id: cron-commands
-      name: '/your/path/dsh-plugins/dsh-cron-loop/plugins/cron-commands.ts'
+      name: ./plugins/cron-commands.ts

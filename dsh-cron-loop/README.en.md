@@ -69,34 +69,23 @@ flowchart LR
    pnpm typecheck
    ```
 
-3. **Fix plugin paths in the patch**
+3. **Install the plugin as a bundle into the web profile**
 
-   [cordis.patch.yml](./cordis.patch.yml) references plugin sources by absolute path (patch relative paths resolve against `~/.dsh/profiles/web`). Replace the paths with your actual clone location:
-
-   ```yaml
-   # cordis.patch.yml
-   - insert:
-       - id: cron-store
-         name: '/your/path/dsh-plugins/dsh-cron-loop/plugins/cron-store.ts'
-       - id: cron-scheduler
-         name: '/your/path/dsh-plugins/dsh-cron-loop/plugins/cron-scheduler.ts'
-       - id: cron-web
-         name: '/your/path/dsh-plugins/dsh-cron-loop/plugins/cron-web.ts'
-       - id: cron-commands
-         name: '/your/path/dsh-plugins/dsh-cron-loop/plugins/cron-commands.ts'
+   ```bash
+   dsh plugin --profile web add link:$(pwd)
    ```
+
+   This creates a symlink dependency in `~/.dsh/profiles/web` pointing at this directory and registers `dsh-cron-loop` in `dsh.profile.bundles` automatically. Every subsequent `dsh web` boot loads the plugin — no `--patch` needed.
 
 4. **Start**
 
    ```bash
-   # Option A: the plugin's dev script (includes --no-open)
-   pnpm dev
-
-   # Option B: point the patch manually
-   dsh web --patch ./cordis.patch.yml
+   dsh web
    ```
 
    After startup, open `http://127.0.0.1:3080/cron` in a browser to see the task center.
+
+> Note: the `name` entries in [cordis.patch.yml](./cordis.patch.yml) resolve relative to the file's own directory (`./plugins/...`), so they are machine-path-independent and need no manual editing.
 
 ## Usage
 
