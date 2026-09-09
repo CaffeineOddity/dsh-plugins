@@ -23,12 +23,14 @@ function jobLine(job: { id: string; enabled: boolean; cron: string; name: string
   return `${job.id} | ${job.enabled ? '✅' : '⏸'} | ${job.cron} | 下次: ${next} | ${job.name} | ${job.cwd}`
 }
 
-/** 解析 `/cron <expr> <prompt>` 的首段表达式与剩余 prompt。 */
+/**
+ * 解析 `/cron <5段cron> <prompt…>`：按空白分割，前 5 段为 cron 表达式，剩余为 prompt。
+ * cron 表达式本身含 4 个空格，不能用首段分割。至少需 6 段（5 段 cron + prompt）。
+ */
 function splitExprAndPrompt(raw: string): { expr: string; prompt: string } | undefined {
-  const trimmed = raw.trim()
-  const spaceAt = trimmed.search(/\s/)
-  if (spaceAt < 0) return undefined
-  return { expr: trimmed.slice(0, spaceAt), prompt: trimmed.slice(spaceAt).trim() }
+  const parts = raw.trim().split(/\s+/)
+  if (parts.length < 6) return undefined
+  return { expr: parts.slice(0, 5).join(' '), prompt: parts.slice(5).join(' ') }
 }
 
 /** /cron 子命令处理（rawInput 为命令名后的原文）。 */
@@ -76,7 +78,7 @@ async function handleCron(ctx: Context, agentCwd: string | undefined, raw: strin
   }
   const parts = splitExprAndPrompt(input)
   if (parts === undefined || parts.prompt === '') {
-    return fail('用法: /cron <cron表达式> <任务prompt>，例如 /cron "0 9 * * 1-5" 总结项目状态')
+    return fail('用法: /cron <cron表达式> <任务prompt>，例如 /cron 0 9 * * 1-5 总结项目状态')
   }
   try {
     const cwd = normalizeCwd(agentCwd)

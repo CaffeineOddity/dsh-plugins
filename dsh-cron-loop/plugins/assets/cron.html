@@ -64,6 +64,10 @@
   .crumb a { cursor: pointer; }
   .crumb .sep { margin: 0 6px; }
   .crumb .cur { color: var(--text); }
+  /* 执行历史工具条 */
+  .runs-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .runs-toolbar button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+  .runs-toolbar button.danger:hover { border-color: var(--err); color: var(--err); }
 </style>
 </head>
 <body>
@@ -220,7 +224,7 @@ function renderJobsTable(jobs) {
     return `<tr data-id="${job.id}">
       <td><b>${esc(job.id)}</b><br><span class="cwd">${esc(job.name)}</span></td>
       <td>${status}</td>
-      <td><code>${esc(job.cron)}</code></td>
+      <td><b>${esc(job.cronHuman || job.cron)}</b><br><code>${esc(job.cron)}</code></td>
       <td>${esc(next)}<br><span class="cwd">上次: ${esc(last)}</span></td>
       <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}</td>
       <td class="summary" title="${esc(job.prompt)}">${esc(job.prompt)}</td>
@@ -258,7 +262,8 @@ function renderRunsTable(runs) {
       <td class="actions"><button data-runact="del" class="danger">删除</button></td>
     </tr>`
   })
-  return `<table>
+  return `<div class="runs-toolbar"><span class="cwd">${runs.length} 条记录</span><div class="spacer" style="flex:1"></div><button data-runact="clearall" class="danger">清空所有执行记录</button></div>
+  <table>
     <thead><tr><th>时间 / 耗时</th><th>状态</th><th>任务</th><th>结果</th><th>会话</th><th>操作</th></tr></thead>
     <tbody>${rows.join('')}</tbody></table>`
 }
@@ -299,16 +304,24 @@ function bindActions() {
       }
     })
   })
-  // 运行历史删除
+  // 运行历史删除 + 清空全部
   content.querySelectorAll('button[data-runact]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const runId = btn.closest('tr').dataset.runid
       const act = btn.dataset.runact
       if (act === 'del') {
+        const runId = btn.closest('tr').dataset.runid
         if (!confirm('删除这条历史记录？')) return
         api('/cron/api/runs/' + encodeURIComponent(runId), { method: 'DELETE' })
           .then(() => { toast('已删除'); refresh() })
           .catch((error) => toast('删除失败: ' + error.message))
+      }
+      if (act === 'clearall') {
+        if (!confirm('清空本项目的全部执行记录？')) return
+        // 按项目内每个 job 清空（后端支持 ?jobId= 限定单个任务）
+        const projJobs = allJobs.filter((j) => j.cwd === currentCwd)
+        Promise.all(projJobs.map((j) => api('/cron/api/runs?jobId=' + encodeURIComponent(j.id), { method: 'DELETE' })))
+          .then(() => { toast('已清空'); refresh() })
+          .catch((error) => toast('清空失败: ' + error.message))
       }
     })
   })

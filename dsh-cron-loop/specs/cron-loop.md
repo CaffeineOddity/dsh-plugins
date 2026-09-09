@@ -62,6 +62,11 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
     `sessions.flush` 后取本轮 assistant 文本写 run 记录。
     sandbox 策略靠 `session.header.cwd` 定 workspace root，cwd 正确即项目级隔离。
 - catch-up 策略：latest-only--错过多次只补跑最新一次；job 停用/暂停期间不补跑。
+- **回写只改运行态字段**：`runJob` 在执行过程中写回 job 记录时只更新
+  `lastRunAt`/`lastStatus`/`sessionId`/`updatedAt` 等运行态字段，
+  用 read-modify-write（先从 store 读最新 job 再合并），不覆盖
+  `prompt`/`name`/`cron`/`enabled`/`permissionMode`/`cwd` 等用户可编辑字段。
+  否则执行期间的 PUT 更新会被旧快照覆盖。
 
 ### 模型工具（`cron-scheduler.ts` 内 `harness.registerTool`）
 
@@ -74,6 +79,8 @@ add 的 `permissionMode` 缺省 `danger-full-access`（可选 `read-only`/`works
 ### 斜杠命令（`cron-commands.ts`，`ctx.commands.register`）
 
 - `/cron <cron表达式> <任务描述…>`：为当前项目新增任务（cwd = agent session.header.cwd）。
+  cron 表达式固定 5 段（按空白分割取前 5 段），剩余部分为任务 prompt。
+  例：`/cron 0 9 * * 1-5 总结项目状态` -> cron=`0 9 * * 1-5`，prompt=`总结项目状态`。
 - `/cron list` / `/cron rm <id>` / `/cron on <id>` / `/cron off <id>`：列表/删除/启停。
 - `/cron`（无参数 / list）：列出当前项目的任务。
 - 命令结果为 success 文本（CommandResult），不进模型。
@@ -83,7 +90,7 @@ add 的 `permissionMode` 缺省 `danger-full-access`（可选 `read-only`/`works
 通过 `ctx.webServer.register`（exact 路由）：
 
 - `GET /cron` → 任务中心页面（内联单文件 HTML+JS，调用下方 JSON API）。
-- `GET /cron/api/jobs` → 全部 job（含 nextRunAt 计算）。
+- `GET /cron/api/jobs` → 全部 job（含 nextRunAt 计算与 cron 可读描述 `cronHuman`）。
 - `POST /cron/api/jobs` → 新建（body: name/cwd/cron/prompt）。
 - `PUT /cron/api/jobs/:id` → 更新（cron/prompt/enabled/name）。
 - `DELETE /cron/api/jobs/:id` → 删除。

@@ -11,7 +11,7 @@
     }
   },
   "scripts": {
-    "dev": "dsh web --patch ./cordis.patch.yml --no-open",
+    "dev": "dsh web --no-open",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

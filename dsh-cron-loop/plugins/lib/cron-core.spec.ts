@@ -1,7 +1,7 @@
 // cron-core 冒烟测试：tsx --test 运行。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseCron, computeNextRun, matches, CronParseError } from './cron-core.ts'
+import { parseCron, computeNextRun, matches, CronParseError, describeCron } from './cron-core.ts'
 
 test('every minute steps past seconds', () => {
   const p = parseCron('* * * * *')
@@ -46,4 +46,17 @@ test('wrong field count throws', () => {
 test('dom/dow restricted OR convention', () => {
   const p = parseCron('0 0 1 1 fri')
   assert.ok(matches(p, new Date(2026, 0, 1, 0, 0)))
+})
+
+test('describeCron common patterns', () => {
+  assert.equal(describeCron('* * * * *'), '每分钟')
+  assert.equal(describeCron('0 9 * * *'), '每天 09:00')
+  assert.equal(describeCron('30 18 * * *'), '每天 18:30')
+  assert.equal(describeCron('0 9 * * 1-5'), '工作日 09:00')
+  assert.equal(describeCron('*/15 * * * *'), '每 15 分钟')
+  assert.equal(describeCron('0 9 1 * *'), '每月 1 号 09:00')
+})
+
+test('describeCron falls back to raw expr', () => {
+  assert.equal(describeCron('bad expr'), 'bad expr')
 })

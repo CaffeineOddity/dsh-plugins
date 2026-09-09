@@ -190,6 +190,15 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
   return { agent: handle.agent, sessionId: finalSid }
 }
 
+/**
+ * read-modify-write：从 store 读最新 job，只合并运行态字段后写回。
+ * 防止 runJob 执行期间用户通过 PUT 更新的 prompt/name/cron 等被旧快照覆盖。
+ */
+async function mergeJobUpdate(store: { jobs: { get(id: string): CronJobRecord | undefined }; putJob(job: CronJobRecord): Promise<void> }, jobId: string, patch: Partial<CronJobRecord>): Promise<void> {
+  const current = store.jobs.get(jobId)
+  if (current === undefined) return // job 已被删除，丢弃更新
+  await store.putJob({ ...current, ...patch })
+}
 /** 执行一个到期任务：写 running run → agent 回合 → 收口写结果 run。 */
 async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   const store = ctx.cronLoopStore
@@ -201,7 +210,6 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
     sessionStr = randomUUID()
   }
   const sid = SessionId(sessionStr)
-  const jobWithSession = job
   const runId = `run-${job.id}-${Date.now()}`
   const startedAt = Date.now()
   const running: CronRunRecord = {
@@ -212,12 +220,13 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
     status: 'running',
   }
   await store.putRun(running)
-  await store.jobs.put(job.id, { ...jobWithSession, lastRunAt: startedAt, lastStatus: 'running' })
+  // read-modify-write：只更新运行态字段，不覆盖执行期间用户 PUT 更新的 prompt/name/cron 等。
+  await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'running' })
   ctx.logger?.info?.(`cron-scheduler: job ${job.id} (${job.name}) fired`)
   try {
     const { agent, sessionId: actualSid } = await ensureAgent(ctx, sid, job.id, job.cwd, job.permissionMode ?? 'danger-full-access')
     // 首次执行把会话身份回写到 job 记录，之后每次复用该 id resume。
-    await store.putJob({ ...jobWithSession, sessionId: actualSid })
+    await mergeJobUpdate(store, job.id, { sessionId: actualSid })
     // 首个 whenIdle 同样加安全阀：会话 hang 死时不至于永久占住 inFlight。
     const pre = await waitIdleOrTimeout(agent.whenIdle(), RUN_TIMEOUT_MS)
     if (pre === 'timeout') throw new Error(`cron-scheduler: job ${job.id} agent not idle within ${RUN_TIMEOUT_MS}ms (pre-turn)`)
@@ -234,13 +243,13 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
       ? text.slice(0, 500)
       : (wait === 'timeout' ? '执行超时，未产生最终文本' : '执行完成（无文本输出）')
     await store.putRun({ ...running, finishedAt, status: 'ok', sessionId: String(sid), summary })
-    await store.jobs.put(job.id, { ...jobWithSession, sessionId: String(sid), lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
+    await mergeJobUpdate(store, job.id, { sessionId: String(sid), lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
     ctx.logger?.info?.(`cron-scheduler: job ${job.id} finished ok in ${finishedAt - startedAt}ms`)
   } catch (error: unknown) {
     const finishedAt = Date.now()
     const message = error instanceof Error ? error.message : String(error)
     await store.putRun({ ...running, finishedAt, status: 'error', sessionId: String(sid) !== '' ? String(sid) : undefined, error: message })
-    await store.jobs.put(job.id, { ...jobWithSession, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+    await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
     ctx.logger?.error?.(`cron-scheduler: job ${job.id} failed: ${message}`)
   } finally {
     inFlight.delete(job.id)

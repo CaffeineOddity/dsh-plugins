@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import '@deepseek-ai/dsh-host-webserver' // 激活 Context.webServer 类型扩展
-import { parseCron, computeNextRun } from './lib/cron-core.ts'
+import { parseCron, computeNextRun, describeCron } from './lib/cron-core.ts'
 import { createJob } from './cron-scheduler.ts'
 import type { CronLoopScheduler } from './cron-scheduler.ts'
 import type { CronJobRecord } from './cron-store.ts'
@@ -50,8 +50,8 @@ function json(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value))
 }
 
-/** job 的对外投影（附加计算好的下次触发时间）。 */
-function jobView(job: CronJobRecord): CronJobRecord & { nextRunAtView: string | null } {
+/** job 的对外投影（附加计算好的下次触发时间与 cron 可读描述）。 */
+function jobView(job: CronJobRecord): CronJobRecord & { nextRunAtView: string | null; cronHuman: string } {
   let nextView: string | null = null
   if (job.enabled) {
     try {
@@ -60,7 +60,7 @@ function jobView(job: CronJobRecord): CronJobRecord & { nextRunAtView: string | 
       nextView = null
     }
   }
-  return { ...job, nextRunAtView: nextView }
+  return { ...job, nextRunAtView: nextView, cronHuman: describeCron(job.cron) }
 }
 
 export function apply(ctx: Context): void {

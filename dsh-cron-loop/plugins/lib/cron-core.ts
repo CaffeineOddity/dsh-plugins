@@ -180,3 +180,74 @@ export function computeNextRun(plan: CronPlan, from: Date): Date {
 export function assertValidCron(expr: string): CronPlan {
   return parseCron(expr)
 }
+
+/**
+ * 把 cron 表达式转为人类可读的中文描述（如「每分钟」「每天 09:00」「工作日 09:00」）。
+ * 仅覆盖常见模式，无法概括时回退原表达式。
+ */
+export function describeCron(expr: string): string {
+  let plan: CronPlan
+  try {
+    plan = parseCron(expr)
+  } catch {
+    return expr
+  }
+  const minutes = [...plan.minutes].sort((a, b) => a - b)
+  const hours = [...plan.hours].sort((a, b) => a - b)
+  const domAll = plan.daysOfMonth === undefined
+  const dowAll = plan.daysOfWeek === undefined
+  const monAll = plan.months.size === 12
+
+  // 每分钟
+  if (minutes.length === 60 && hours.length === 24 && domAll && dowAll && monAll) {
+    return '每分钟'
+  }
+
+  const fmtHour = (h: number): string => `${String(h).padStart(2, '0')}`
+  const fmtMin = (m: number): string => `${String(m).padStart(2, '0')}`
+
+  // 每天 X:XX
+  if (minutes.length === 1 && hours.length === 1 && domAll && dowAll && monAll) {
+    return `每天 ${fmtHour(hours[0]!)}:${fmtMin(minutes[0]!)}`
+  }
+
+  // 每小时 X 分
+  if (minutes.length === 1 && hours.length === 24 && domAll && dowAll && monAll) {
+    return `每小时 ${fmtMin(minutes[0]!)} 分`
+  }
+
+  // 每 N 分钟
+  if (minutes.length > 1 && hours.length === 24 && domAll && dowAll && monAll) {
+    const step = minutes[1]! - minutes[0]!
+    if (step > 1 && minutes.every((m, i) => i === 0 || m - minutes[i - 1]! === step)) {
+      return `每 ${step} 分钟`
+    }
+  }
+
+  // 工作日（周一~周五）
+  const weekday = !dowAll && plan.daysOfWeek !== undefined
+    && [1, 2, 3, 4, 5].every((d) => plan.daysOfWeek!.has(d))
+    && plan.daysOfWeek.size === 5
+
+  if (weekday && domAll && monAll) {
+    if (minutes.length === 1 && hours.length === 1) {
+      return `工作日 ${fmtHour(hours[0]!)}:${fmtMin(minutes[0]!)}`
+    }
+  }
+
+  // 周末
+  const weekend = !dowAll && plan.daysOfWeek !== undefined
+    && [0, 6].every((d) => plan.daysOfWeek!.has(d))
+    && plan.daysOfWeek.size === 2
+  if (weekend && domAll && monAll && minutes.length === 1 && hours.length === 1) {
+    return `周末 ${fmtHour(hours[0]!)}:${fmtMin(minutes[0]!)}`
+  }
+
+  // 每月 X 号
+  if (!domAll && dowAll && monAll && plan.daysOfMonth!.size === 1 && minutes.length === 1 && hours.length === 1) {
+    return `每月 ${plan.daysOfMonth!.values().next().value!} 号 ${fmtHour(hours[0]!)}:${fmtMin(minutes[0]!)}`
+  }
+
+  // 回退：原表达式
+  return expr
+}
