@@ -60,11 +60,7 @@ async function isPersisted(ctx: Context, sid: SessionId): Promise<boolean> {
  * 照搬 web-app（dsh-host-apiproxy）的会话级模型接线：把 agent 的 model-selection
  * 接上 `agentDefaultModel`（settings.yaml 的 `agent-default-model`）。
  */
-function installSelection(ctx: Context, agentCtx: Context): void {
-  const agent = agentCtx.agent as Agent | undefined
-  if (agent === undefined) {
-    throw new Error('cron-scheduler: agent setup has no scoped agent')
-  }
+function installSelection(ctx: Context, agentCtx: Context, agent: Agent): void {
   let picked: { provider: string; model: string } | undefined
   const selection = {
     get current(): { provider: string; model: string } {
@@ -93,7 +89,7 @@ const PRESET_SPEC: Record<string, { sandbox: string; approval: 'ask' | 'never' }
 /** 组装 cron 会话的 scoped world：挂宿主 `standard` preset（完整 agent-loop 工具面）。 */
 async function setupAgent(ctx: Context, agentCtx: Context, agent: Agent, jobId: string, permissionMode: string): Promise<void> {
   await ctx.agentPresets.mount(agentCtx, 'standard')
-  installSelection(ctx, agentCtx)
+  installSelection(ctx, agentCtx, agent)
   // 按 job 配置的 permissionMode 写完整 preset 三元组（permission/preset + sandbox/mode +
   // approval/policy），让 webUI 显示对应的 preset 名称而非"Custom"。
   // 注意：read-only 和 workspace-write 的 approval=ask，无人值守时会卡在审批弹窗上，
