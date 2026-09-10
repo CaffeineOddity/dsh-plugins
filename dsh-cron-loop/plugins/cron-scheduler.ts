@@ -91,24 +91,21 @@ const PRESET_SPEC: Record<string, { sandbox: string; approval: 'ask' | 'never' }
 }
 
 /** 组装 cron 会话的 scoped world：挂宿主 `standard` preset（完整 agent-loop 工具面）。 */
-async function setupAgent(ctx: Context, agentCtx: Context, jobId: string, permissionMode: string): Promise<void> {
+async function setupAgent(ctx: Context, agentCtx: Context, agent: Agent, jobId: string, permissionMode: string): Promise<void> {
   await ctx.agentPresets.mount(agentCtx, 'standard')
   installSelection(ctx, agentCtx)
   // 按 job 配置的 permissionMode 写完整 preset 三元组（permission/preset + sandbox/mode +
   // approval/policy），让 webUI 显示对应的 preset 名称而非"Custom"。
   // 注意：read-only 和 workspace-write 的 approval=ask，无人值守时会卡在审批弹窗上，
   // 仅适合有人监控的场景；danger-full-access 的 approval=never 才适合真正无人值守。
-  const agent = agentCtx.agent
-  if (agent !== undefined) {
-    const session = agent.session
-    const spec = PRESET_SPEC[permissionMode] ?? PRESET_SPEC['danger-full-access']
-    if (spec === undefined) throw new Error(`cron-scheduler: unknown permissionMode "${permissionMode}" for job ${jobId}`)
-    // permission/preset 不在 SessionEventMap 类型里，用 as 绕过。
-    const s = session as { append(type: string, data: Record<string, unknown>): unknown }
-    s.append('permission/preset', { preset: permissionMode })
-    setSandboxMode(session, spec.sandbox as 'read-only' | 'workspace-write' | 'danger-full-access')
-    setApprovalPolicy(session, spec.approval)
-  }
+  const session = agent.session
+  const spec = PRESET_SPEC[permissionMode] ?? PRESET_SPEC['danger-full-access']
+  if (spec === undefined) throw new Error(`cron-scheduler: unknown permissionMode "${permissionMode}" for job ${jobId}`)
+  // permission/preset 不在 SessionEventMap 类型里，用 as 绕过。
+  const s = session as { append(type: string, data: Record<string, unknown>): unknown }
+  s.append('permission/preset', { preset: permissionMode })
+  setSandboxMode(session, spec.sandbox as 'read-only' | 'workspace-write' | 'danger-full-access')
+  setApprovalPolicy(session, spec.approval)
   agentCtx.systemPrompt.section({
     name: 'cron-loop:job',
     order: 1,
@@ -135,8 +132,9 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
   }
   const opts = {
     agentOptions: { provider: selection.provider, model: selection.model },
-    setup: async (agentCtx: Context): Promise<void> => {
-      await setupAgent(ctx, agentCtx, jobId, permissionMode)
+    setup: async (agentCtx: Context, agent?: Agent): Promise<void> => {
+      if (agent === undefined) throw new Error('cron-scheduler: setup callback received no agent')
+      await setupAgent(ctx, agentCtx, agent, jobId, permissionMode)
     },
   }
   let handle: AgentHandle
