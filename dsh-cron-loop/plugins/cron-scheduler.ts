@@ -10,15 +10,11 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import '@deepseek-ai/cordis-plugin-timer' // 激活 Context.timer 类型扩展
 import '@deepseek-ai/dsh-agent-presets' // 激活 Context.agentPresets 类型扩展
 import '@deepseek-ai/dsh-agent-default-model' // 激活 Context.agentDefaultModel 类型扩展
 import '@deepseek-ai/dsh-system-prompt' // 激活 Context.systemPrompt 类型扩展
-import '@deepseek-ai/dsh-sandbox-policy' // 激活 setSandboxMode / SessionEventMap 扩展
-import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { computeNextRun, matches, parseCron } from './lib/cron-core.ts'
 import { summarizeOwnedInterval, waitIdleOrTimeout } from './lib/agent-run.ts'
 import type { CronJobRecord, CronRunRecord } from './cron-store.ts'
@@ -56,26 +52,6 @@ async function isPersisted(ctx: Context, sid: SessionId): Promise<boolean> {
   return headers.some((header) => header.id === sid)
 }
 
-/**
- * 照搬 web-app（dsh-host-apiproxy）的会话级模型接线：把 agent 的 model-selection
- * 接上 `agentDefaultModel`（settings.yaml 的 `agent-default-model`）。
- */
-function installSelection(ctx: Context, agentCtx: Context, agent: Agent): void {
-  let picked: { provider: string; model: string } | undefined
-  const selection = {
-    get current(): { provider: string; model: string } {
-      if (picked !== undefined) return picked
-      const logged = agent.session.requestHeader()?.config
-      if (logged === undefined) return ctx.agentDefaultModel.currentSelection()
-      return { provider: logged.provider, model: logged.model }
-    },
-    set current(next: { provider: string; model: string }) {
-      picked = next
-    },
-    assembled: undefined,
-  }
-  installModelSelection(agentCtx, selection)
-}
 
 /** 可选权限模式与 preset 名同名（read-only / workspace-write / danger-full-access）。
  * 对齐 dsh-base/cordis.patch.yml 里的 preset 表配置。 */
@@ -86,22 +62,23 @@ const PRESET_SPEC: Record<string, { sandbox: string; approval: 'ask' | 'never' }
   'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
 }
 
-/** 组装 cron 会话的 scoped world：挂宿主 `standard` preset（完整 agent-loop 工具面）。 */
-async function setupAgent(ctx: Context, agentCtx: Context, agent: Agent, jobId: string, permissionMode: string): Promise<void> {
-  await ctx.agentPresets.mount(agentCtx, 'standard')
-  installSelection(ctx, agentCtx, agent)
-  // 按 job 配置的 permissionMode 写完整 preset 三元组（permission/preset + sandbox/mode +
-  // approval/policy），让 webUI 显示对应的 preset 名称而非"Custom"。
-  // 注意：read-only 和 workspace-write 的 approval=ask，无人值守时会卡在审批弹窗上，
-  // 仅适合有人监控的场景；danger-full-access 的 approval=never 才适合真正无人值守。
-  const session = agent.session
+/** 给会话写权限 preset 三元组（permission/preset + sandbox/mode + approval/policy）。
+ * 对齐 ruliu-bridge 的 applyFullAccess：通过 handle 的 session 直接 append，
+ * 避免依赖 agentCtx.agent 的注入。 */
+function applyPermission(session: unknown, permissionMode: string): void {
   const spec = PRESET_SPEC[permissionMode] ?? PRESET_SPEC['danger-full-access']
-  if (spec === undefined) throw new Error(`cron-scheduler: unknown permissionMode "${permissionMode}" for job ${jobId}`)
-  // permission/preset 不在 SessionEventMap 类型里，用 as 绕过。
-  const s = session as { append(type: string, data: Record<string, unknown>): unknown }
+  if (spec === undefined) return
+  const s = session as { append(type: string, data: Record<string, unknown>): unknown } | undefined
+  if (s === undefined) return
   s.append('permission/preset', { preset: permissionMode })
-  setSandboxMode(session, spec.sandbox as 'read-only' | 'workspace-write' | 'danger-full-access')
-  setApprovalPolicy(session, spec.approval)
+  s.append('sandbox/mode', { mode: spec.sandbox })
+  s.append('approval/policy', { policy: spec.approval })
+}
+
+/** 组装 cron 会话的 scoped world：挂宿主 `standard` preset + systemPrompt。
+ * 对齐 ruliu-bridge：setup 只组世界，不碰 agent（agent 由 create/resume 返回后通过 handle 访问）。 */
+async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promise<void> {
+  await ctx.agentPresets.mount(agentCtx, 'standard')
   agentCtx.systemPrompt.section({
     name: 'cron-loop:job',
     order: 1,
@@ -128,9 +105,8 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
   }
   const opts = {
     agentOptions: { provider: selection.provider, model: selection.model },
-    setup: async (agentCtx: Context, agent?: Agent): Promise<void> => {
-      if (agent === undefined) throw new Error('cron-scheduler: setup callback received no agent')
-      await setupAgent(ctx, agentCtx, agent, jobId, permissionMode)
+    setup: async (agentCtx: Context): Promise<void> => {
+      await setupAgent(ctx, agentCtx, jobId)
     },
   }
   let handle: AgentHandle
@@ -176,6 +152,9 @@ async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: str
     }
   }
   const key = finalSid
+  // 权限写到 create/resume 之后，通过 handle.agent.session 直接 append，
+  // 避免在 setup 回调里访问 agentCtx.agent（会触发 inject 检查）。
+  applyPermission(handle.agent.session, permissionMode)
   const previous = handles.get(key)
   handles.set(key, handle)
   if (previous !== undefined && previous !== handle) {
