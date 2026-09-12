@@ -5,15 +5,16 @@
 # 产物路径：<plugin>/.dist/<name>-<version>.tgz
 #
 # 用法：
-#   run.sh <plugin> -r <major|minor|patch> [-t] [-i|-u]   发布（bump + pack + push），-t 可选打 git tag
+#   run.sh <plugin> -r [major|minor|patch] [-t] [-i|-u]   发布；传 bump 级别则 bump，不传则用当前版本
 #   run.sh <plugin> -i                                     首次安装到 DSH web profile
 #   run.sh <plugin> -u                                     更新（刷新 profile node_modules）
 #
 # 示例：
-#   run.sh dsh-cron-loop -r patch                 发布 patch（不打 tag）
-#   run.sh dsh-cron-loop -r patch -u              发布后自动更新
-#   run.sh dsh-cron-loop -r minor -t              发布 minor 并打 tag
-#   run.sh dsh-cron-loop -u                       只更新
+#   run.sh dsh-cron-loop -r                 用当前版本打包发布（不 bump）
+#   run.sh dsh-cron-loop -r patch           bump patch 后打包发布
+#   run.sh dsh-cron-loop -r patch -u        发布后自动更新
+#   run.sh dsh-cron-loop -r minor -t        发布 minor 并打 tag
+#   run.sh dsh-cron-loop -u                 只更新
 
 set -euo pipefail
 
@@ -107,16 +108,20 @@ do_release() {
   local level="$1" do_tag="$2"
   local current new_version
   current="$(get_version)"
-  new_version="$(bump_version "$level")"
-  local tag_suffix=""
-  [[ "$do_tag" == "true" ]] && tag_suffix=" +tag"
-  log "发布 $PLUGIN: $current -> $new_version ($level)${tag_suffix}"
+  if [[ "$level" == "keep" ]]; then
+    new_version="$current"
+    log "发布 $PLUGIN: v${new_version} (使用当前版本，不 bump)"
+  else
+    new_version="$(bump_version "$level")"
+    local tag_suffix=""
+    [[ "$do_tag" == "true" ]] && tag_suffix=" +tag"
+    log "发布 $PLUGIN: $current -> $new_version ($level)${tag_suffix}"
+    # 更新 package.json 版本号
+    set_pkg_version "$new_version"
+    log "package.json 版本号已更新为 $new_version"
+  fi
 
-  # 1. 更新 package.json 版本号
-  set_pkg_version "$new_version"
-  log "package.json 版本号已更新为 $new_version"
-
-  # 2. typecheck（有 typecheck 脚本才跑）
+  # typecheck（有 typecheck 脚本才跑）
   if node -e "process.exit(require('$PLUGIN_DIR/package.json').scripts?.typecheck ? 0 : 1)" 2>/dev/null; then
     log "运行 typecheck..."
     (cd "$PLUGIN_DIR" && pnpm typecheck)
@@ -125,18 +130,20 @@ do_release() {
     log "无 typecheck 脚本，跳过"
   fi
 
-  # 3. git add + commit
-  (cd "$SCRIPT_DIR" && git add "$PLUGIN/package.json")
-  (cd "$SCRIPT_DIR" && git commit -m "chore($PLUGIN): release v$new_version")
-  log "git commit 完成"
+  # git add + commit（版本有变才 commit）
+  if [[ "$level" != "keep" ]]; then
+    (cd "$SCRIPT_DIR" && git add "$PLUGIN/package.json")
+    (cd "$SCRIPT_DIR" && git commit -m "chore($PLUGIN): release v$new_version")
+    log "git commit 完成"
+  fi
 
-  # 4. git tag（-t 可选，默认不打）
+  # git tag（-t 可选，默认不打）
   if [[ "$do_tag" == "true" ]]; then
     (cd "$SCRIPT_DIR" && git tag "${PLUGIN}-v$new_version")
     log "git tag ${PLUGIN}-v$new_version 已创建"
   fi
 
-  # 5. pnpm pack 打 tarball 到 .dist/
+  # pnpm pack 打 tarball 到 .dist/
   local dist_dir="$PLUGIN_DIR/.dist"
   rm -rf "$dist_dir"
   mkdir -p "$dist_dir"
@@ -151,7 +158,7 @@ do_release() {
   fi
   log "tarball: $dist_dir/$tarball"
 
-  # 6. git push（commit 必推，tag 有则推）
+  # git push（commit 必推，tag 有则推）
   if [[ "$do_tag" == "true" ]]; then
     log "推送 git commit 和 tag..."
     (cd "$SCRIPT_DIR" && git push origin main && git push origin "${PLUGIN}-v$new_version")
@@ -224,6 +231,7 @@ do_upgrade() {
 # ─── 参数解析 ───
 
 RELEASE_LEVEL=""
+DO_RELEASE=false
 DO_INSTALL=false
 DO_UPGRADE=false
 DO_TAG=false
@@ -231,9 +239,24 @@ DO_TAG=false
 usage() {
   cat << 'USAGE'
 用法：
-  run.sh <plugin> -r <major|minor|patch> [-t] [-i|-u]   发布（bump + pack + push），-t 可选打 git tag
+  run.sh <plugin> -r [major|minor|patch] [-t] [-i|-u]   发布（pack + push）；传 bump 级别则 bump 版本，不传则用当前版本
   run.sh <plugin> -i                                     首次安装到 DSH web profile
   run.sh <plugin> -u                                     更新到当前源码版本
+
+选项：
+  -r [level]   发布。level 可选：major|minor|patch；不传则用 package.json 当前版本打包
+  -t           发布时打 git tag（格式：<plugin>-v<version>），默认不打
+  -i           首次安装到 DSH web profile
+  -u           更新（刷新 profile node_modules）
+  -h           显示帮助
+
+示例：
+  run.sh dsh-cron-loop -r                  用当前版本打包发布
+  run.sh dsh-cron-loop -r patch            bump patch 后打包发布
+  run.sh dsh-cron-loop -r minor -t         bump minor 并打 tag
+  run.sh dsh-cron-loop -r patch -u          发布后自动更新
+  run.sh dsh-cron-loop -i                  首次安装
+  run.sh dsh-cron-loop -u                  更新
 USAGE
   exit 0
 }
@@ -245,15 +268,25 @@ fi
 PLUGIN="$1"
 shift
 
-while getopts ":r:tiuh" opt; do
-  case "$opt" in
-    r) RELEASE_LEVEL="$OPTARG" ;;
-    t) DO_TAG=true ;;
-    i) DO_INSTALL=true ;;
-    u) DO_UPGRADE=true ;;
-    h) usage ;;
-    \?) err "未知选项: -$OPTARG"; usage ;;
-    :) err "-$OPTARG 需要参数"; usage ;;
+# 手动解析（getopts 不支持可选参数，手写更灵活）
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -r)
+      DO_RELEASE=true
+      shift
+      # 检查下一个参数是否是 bump 级别
+      if [[ $# -gt 0 && "$1" =~ ^(major|minor|patch)$ ]]; then
+        RELEASE_LEVEL="$1"
+        shift
+      else
+        RELEASE_LEVEL="keep"
+      fi
+      ;;
+    -t) DO_TAG=true; shift ;;
+    -i) DO_INSTALL=true; shift ;;
+    -u) DO_UPGRADE=true; shift ;;
+    -h|--help) usage ;;
+    *) err "未知选项: $1"; usage ;;
   esac
 done
 
@@ -266,7 +299,7 @@ fi
 init_plugin
 
 # 执行
-if [[ -n "$RELEASE_LEVEL" ]]; then
+if [[ "$DO_RELEASE" == true ]]; then
   do_release "$RELEASE_LEVEL" "$DO_TAG"
 fi
 
@@ -279,6 +312,6 @@ if [[ "$DO_UPGRADE" == true ]]; then
 fi
 
 # 只有插件名没有操作时显示用法
-if [[ -z "$RELEASE_LEVEL" && "$DO_INSTALL" == false && "$DO_UPGRADE" == false ]]; then
+if [[ "$DO_RELEASE" == false && "$DO_INSTALL" == false && "$DO_UPGRADE" == false ]]; then
   usage
 fi

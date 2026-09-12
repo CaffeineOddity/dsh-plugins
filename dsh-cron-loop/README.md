@@ -54,7 +54,25 @@ flowchart LR
 - DSH ≥ `0.1.2-rc.1`（`@deepseek-ai/dsh`），已安装并可用 `dsh web` 启动 Web 服务
 - `~/.dsh/settings.yaml` 已配置 `agent-default-model`（任务执行需要默认模型）
 
-### 步骤
+### 用 run.sh（推荐）
+
+仓库根目录的 `run.sh` 统一管理发布与安装：
+
+```bash
+# 首次安装
+./run.sh dsh-cron-loop -i
+
+# 更新到当前源码版本
+./run.sh dsh-cron-loop -u
+
+# 发布：bump 版本 + 打包到 .dist/ + 推送
+./run.sh dsh-cron-loop -r patch    # bump patch
+./run.sh dsh-cron-loop -r          # 用当前版本打包（不 bump）
+./run.sh dsh-cron-loop -r patch -u # 发布后自动更新
+./run.sh dsh-cron-loop -r minor -t # 发布 minor 并打 git tag
+```
+
+### 手动安装
 
 1. **安装依赖**
 

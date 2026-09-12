@@ -27,11 +27,31 @@ flowchart LR
 
 ## General installation
 
+The repo root provides `run.sh` to manage plugin release and installation:
+
+```bash
+# Install a plugin into the DSH web profile
+./run.sh <plugin> -i          # e.g. ./run.sh dsh-cron-loop -i
+
+# Update to the current source version
+./run.sh <plugin> -u
+
+# Release: bump version + pack + push
+./run.sh <plugin> -r patch    # bump patch
+./run.sh <plugin> -r          # pack with current version (no bump)
+./run.sh <plugin> -r patch -u # release then update
+./run.sh <plugin> -r minor -t # release minor and create a git tag
+```
+
+> Artifact path: `<plugin>/.dist/<name>-<version>.tgz`
+
+### Manual install (without run.sh)
+
 1. Ensure DSH is installed (`npm i -g @deepseek-ai/dsh` or npx), pnpm ≥ 10, and Node.js ≥ 22.
 2. Clone this repo: `git clone https://github.com/CaffeineOddity/dsh-plugins.git`
 3. Enter the target plugin dir and install deps: `cd dsh-<name> && pnpm install`
-4. Edit the plugin's `cordis.patch.yml`, replacing absolute paths with your actual clone path (patch relative paths resolve against `~/.dsh/profiles/web`).
-5. Start: `dsh web --patch ./cordis.patch.yml` (some plugins wrap this as `pnpm dev`).
+4. Add the plugin as a bundle: `dsh plugin --profile web add link:$(pwd)`
+5. Start: `dsh web`
 
 See each plugin's `README.md` for specific usage.
 

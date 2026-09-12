@@ -27,11 +27,31 @@ flowchart LR
 
 ## 通用安装方式
 
+仓库根目录提供 `run.sh` 统一管理插件的发布与安装：
+
+```bash
+# 首次安装插件到 DSH web profile
+./run.sh <plugin> -i          # 例: ./run.sh dsh-cron-loop -i
+
+# 更新到当前源码版本
+./run.sh <plugin> -u
+
+# 发布：bump 版本 + 打包 + 推送
+./run.sh <plugin> -r patch    # bump patch
+./run.sh <plugin> -r          # 用当前版本打包（不 bump）
+./run.sh <plugin> -r patch -u # 发布后自动更新
+./run.sh <plugin> -r minor -t # 发布 minor 并打 git tag
+```
+
+> 产物路径：`<plugin>/.dist/<name>-<version>.tgz`
+
+### 手动安装（不用 run.sh）
+
 1. 确保已安装 DSH（`npm i -g @deepseek-ai/dsh` 或 npx）与 pnpm ≥ 10、Node.js ≥ 22。
 2. 克隆本仓库：`git clone https://github.com/CaffeineOddity/dsh-plugins.git`
 3. 进入目标插件目录安装依赖：`cd dsh-<name> && pnpm install`
-4. 编辑插件的 `cordis.patch.yml`，把绝对路径替换为你的实际克隆路径（patch 的相对路径相对 `~/.dsh/profiles/web` 解析）。
-5. 启动：`dsh web --patch ./cordis.patch.yml`（部分插件提供 `pnpm dev` 封装此命令）。
+4. 把插件作为 bundle 安装进 web profile：`dsh plugin --profile web add link:$(pwd)`
+5. 启动：`dsh web`
 
 各插件的具体用法见其目录内的 `README.md`。
 

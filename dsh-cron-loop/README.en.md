@@ -54,7 +54,25 @@ flowchart LR
 - DSH ≥ `0.1.2-rc.1` (`@deepseek-ai/dsh`), with `dsh web` able to start the Web server
 - `~/.dsh/settings.yaml` has `agent-default-model` configured (jobs need a default model)
 
-### Steps
+### Via run.sh (recommended)
+
+The `run.sh` at the repo root manages release and installation:
+
+```bash
+# First install
+./run.sh dsh-cron-loop -i
+
+# Update to current source version
+./run.sh dsh-cron-loop -u
+
+# Release: bump + pack to .dist/ + push
+./run.sh dsh-cron-loop -r patch    # bump patch
+./run.sh dsh-cron-loop -r          # pack with current version (no bump)
+./run.sh dsh-cron-loop -r patch -u # release then update
+./run.sh dsh-cron-loop -r minor -t # release minor and create a git tag
+```
+
+### Manual install
 
 1. **Install dependencies**
 
@@ -75,7 +93,7 @@ flowchart LR
    dsh plugin --profile web add link:$(pwd)
    ```
 
-   This creates a symlink dependency in `~/.dsh/profiles/web` pointing at this directory and registers `dsh-cron-loop` in `dsh.profile.bundles` automatically. Every subsequent `dsh web` boot loads the plugin — no `--patch` needed.
+   This creates a symlink dependency in `~/.dsh/profiles/web` pointing at this directory and registers `dsh-cron-loop` in `dsh.profile.bundles` automatically. Every subsequent `dsh web` boot loads the plugin - no `--patch` needed.
 
 4. **Start**
 
