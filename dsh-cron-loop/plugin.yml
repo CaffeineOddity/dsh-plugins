@@ -1,5 +1,5 @@
 # dsh-cron-loop 插件 manifest
 # run.sh 读写此文件的 version 字段管理插件版本（不依赖 git tag）。
 name: dsh-cron-loop
-version: 0.1.6
+version: 0.1.7
 description: 定时任务调度插件，支持 cron 表达式、连续执行、模型池额度切换
