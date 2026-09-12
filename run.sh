@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
-# run.sh - 插件发布与安装管理
+# run.sh - 插件发布与安装管理（通用，适用于仓库内任意插件）
 #
-# 版本管理：读 plugin.yml 的 version 字段（不依赖 git tag，因为本仓库是插件合集）。
+# 版本管理：读 package.json 的 version 字段。
+# 产物路径：<plugin>/.dist/<name>-<version>.tgz
 #
 # 用法：
-#   run.sh -r <major|minor|patch> [-t] [-i|-u]   发布（bump plugin.yml + pack + push），-t 可选打 git tag
-#   run.sh -i                                   首次安装到 DSH web profile
-#   run.sh -u                                   更新（刷新 profile node_modules 到当前源码版本）
+#   run.sh <plugin> -r <major|minor|patch> [-t] [-i|-u]   发布（bump + pack + push），-t 可选打 git tag
+#   run.sh <plugin> -i                                     首次安装到 DSH web profile
+#   run.sh <plugin> -u                                     更新（刷新 profile node_modules）
 #
 # 示例：
-#   run.sh -r patch                 发布 patch 版本（不打 tag）
-#   run.sh -r patch -u              发布后自动更新
-#   run.sh -r minor -t              发布 minor 版本并打 git tag
-#   run.sh -r patch -t -i           发布 + 打 tag + 首次安装
-#   run.sh -u                       只更新
+#   run.sh dsh-cron-loop -r patch                 发布 patch（不打 tag）
+#   run.sh dsh-cron-loop -r patch -u              发布后自动更新
+#   run.sh dsh-cron-loop -r minor -t              发布 minor 并打 tag
+#   run.sh dsh-cron-loop -u                       只更新
 
 set -euo pipefail
 
 # 路径常量
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_DIR="$SCRIPT_DIR/dsh-cron-loop"
-PLUGIN_YML="$PLUGIN_DIR/plugin.yml"
 PROFILE_DIR="$HOME/.dsh/profiles/web"
 DSH_NPX_CACHE="$HOME/.npm/_npx"
 
@@ -34,30 +32,31 @@ log()  { echo -e "${GREEN}[run.sh]${NC} $*"; }
 warn() { echo -e "${YELLOW}[run.sh]${NC} $*"; }
 err()  { echo -e "${RED}[run.sh]${NC} $*" >&2; }
 
-# ─── 版本读写（plugin.yml 为单一事实来源） ───
+# ─── 路径与版本 ───
 
-# 从 plugin.yml 读 version（简单 grep，不依赖 YAML 解析器）
-get_version() {
-  local v
-  v="$(grep '^version:' "$PLUGIN_YML" 2>/dev/null | head -1 | awk '{print $2}')"
-  if [[ -z "$v" ]]; then
-    err "plugin.yml 中未找到 version 字段"
+PLUGIN=""
+PLUGIN_DIR=""
+
+init_plugin() {
+  PLUGIN_DIR="$SCRIPT_DIR/$PLUGIN"
+  if [[ ! -d "$PLUGIN_DIR" ]]; then
+    err "插件目录不存在: $PLUGIN_DIR"
     exit 1
   fi
-  echo "$v"
-}
-
-# 从 plugin.yml 读 name
-get_name() {
-  local n
-  n="$(grep '^name:' "$PLUGIN_YML" 2>/dev/null | head -1 | awk '{print $2}')"
-  if [[ -z "$n" ]]; then
-    n="dsh-cron-loop"
+  if [[ ! -f "$PLUGIN_DIR/package.json" ]]; then
+    err "未找到 $PLUGIN/package.json"
+    exit 1
   fi
-  echo "$n"
 }
 
-# bump 版本号
+get_version() {
+  node -e "console.log(require('$PLUGIN_DIR/package.json').version)"
+}
+
+get_name() {
+  node -e "console.log(require('$PLUGIN_DIR/package.json').name)"
+}
+
 bump_version() {
   local level="$1" current
   current="$(get_version)"
@@ -72,14 +71,6 @@ bump_version() {
   echo "${major}.${minor}.${patch}"
 }
 
-# 写 version 到 plugin.yml（sed 原地替换 version 行）
-set_yml_version() {
-  local version="$1"
-  sed -i.bak "s/^version: .*/version: $version/" "$PLUGIN_YML"
-  rm -f "$PLUGIN_YML.bak"
-}
-
-# 同步 version 到 package.json
 set_pkg_version() {
   local version="$1"
   node -e "
@@ -119,51 +110,56 @@ do_release() {
   new_version="$(bump_version "$level")"
   local tag_suffix=""
   [[ "$do_tag" == "true" ]] && tag_suffix=" +tag"
-  log "发布: $current -> $new_version ($level)${tag_suffix}"
+  log "发布 $PLUGIN: $current -> $new_version ($level)${tag_suffix}"
 
-  # 1. 更新 plugin.yml + 同步 package.json
-  set_yml_version "$new_version"
+  # 1. 更新 package.json 版本号
   set_pkg_version "$new_version"
-  log "版本号已更新: plugin.yml + package.json = $new_version"
+  log "package.json 版本号已更新为 $new_version"
 
-  # 2. typecheck
-  log "运行 typecheck..."
-  (cd "$PLUGIN_DIR" && pnpm typecheck)
-  log "typecheck 通过"
+  # 2. typecheck（有 typecheck 脚本才跑）
+  if node -e "process.exit(require('$PLUGIN_DIR/package.json').scripts?.typecheck ? 0 : 1)" 2>/dev/null; then
+    log "运行 typecheck..."
+    (cd "$PLUGIN_DIR" && pnpm typecheck)
+    log "typecheck 通过"
+  else
+    log "无 typecheck 脚本，跳过"
+  fi
 
   # 3. git add + commit
-  (cd "$SCRIPT_DIR" && git add "$PLUGIN_DIR/plugin.yml" "$PLUGIN_DIR/package.json")
-  (cd "$SCRIPT_DIR" && git commit -m "chore(cron-loop): release v$new_version")
+  (cd "$SCRIPT_DIR" && git add "$PLUGIN/package.json")
+  (cd "$SCRIPT_DIR" && git commit -m "chore($PLUGIN): release v$new_version")
   log "git commit 完成"
 
   # 4. git tag（-t 可选，默认不打）
   if [[ "$do_tag" == "true" ]]; then
-    (cd "$SCRIPT_DIR" && git tag "v$new_version")
-    log "git tag v$new_version 已创建"
+    (cd "$SCRIPT_DIR" && git tag "${PLUGIN}-v$new_version")
+    log "git tag ${PLUGIN}-v$new_version 已创建"
   fi
 
-  # 5. pnpm pack 打 tarball（先清理旧 tarball）
-  rm -f "$PLUGIN_DIR"/*.tgz
+  # 5. pnpm pack 打 tarball 到 .dist/
+  local dist_dir="$PLUGIN_DIR/.dist"
+  rm -rf "$dist_dir"
+  mkdir -p "$dist_dir"
   log "打包 tarball..."
   local name
   name="$(get_name)"
-  (cd "$PLUGIN_DIR" && pnpm pack >/dev/null 2>&1)
+  (cd "$PLUGIN_DIR" && pnpm pack --pack-destination "$dist_dir" >/dev/null 2>&1)
   local tarball="$name-$new_version.tgz"
-  if [[ ! -f "$PLUGIN_DIR/$tarball" ]]; then
-    err "pnpm pack 未生成 $tarball"
+  if [[ ! -f "$dist_dir/$tarball" ]]; then
+    err "pnpm pack 未生成 $dist_dir/$tarball"
     exit 1
   fi
-  log "tarball: $PLUGIN_DIR/$tarball"
+  log "tarball: $dist_dir/$tarball"
 
   # 6. git push（commit 必推，tag 有则推）
   if [[ "$do_tag" == "true" ]]; then
     log "推送 git commit 和 tag..."
-    (cd "$SCRIPT_DIR" && git push origin main && git push origin "v$new_version")
+    (cd "$SCRIPT_DIR" && git push origin main && git push origin "${PLUGIN}-v$new_version")
   else
     log "推送 git commit..."
     (cd "$SCRIPT_DIR" && git push origin main)
   fi
-  log "发布完成: v$new_version"
+  log "发布完成: $PLUGIN v$new_version"
 
   echo "$new_version"
 }
@@ -192,7 +188,7 @@ do_install() {
 
   log "首次安装 $name 到 DSH web profile..."
   "$dsh_bin" plugin --profile web add "$SCRIPT_DIR"
-  log "安装完成: v$(get_version)"
+  log "安装完成: $name v$(get_version)"
 }
 
 # ─── 更新 ───
@@ -203,7 +199,7 @@ do_upgrade() {
   name="$(get_name)"
   version="$(get_version)"
   log "使用 dsh: $dsh_bin"
-  log "目标版本: ${version} (plugin.yml)"
+  log "目标版本: ${version} ($PLUGIN/package.json)"
 
   # 检查是否已安装
   local installed
@@ -220,9 +216,9 @@ do_upgrade() {
     return
   fi
 
-  log "更新 $name 到 v$version..."
+  log "更新 $name 到 v${version}..."
   "$dsh_bin" plugin --profile web update
-  log "更新完成: v$version"
+  log "更新完成: $name v${version}"
 }
 
 # ─── 参数解析 ───
@@ -235,12 +231,19 @@ DO_TAG=false
 usage() {
   cat << 'USAGE'
 用法：
-  run.sh -r <major|minor|patch> [-t] [-i|-u]   发布（bump plugin.yml + pack + push），-t 可选打 git tag
-  run.sh -i                                   首次安装到 DSH web profile
-  run.sh -u                                   更新到当前源码版本
+  run.sh <plugin> -r <major|minor|patch> [-t] [-i|-u]   发布（bump + pack + push），-t 可选打 git tag
+  run.sh <plugin> -i                                     首次安装到 DSH web profile
+  run.sh <plugin> -u                                     更新到当前源码版本
 USAGE
   exit 0
 }
+
+# 第一个位置参数 = 插件名
+if [[ $# -lt 1 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+PLUGIN="$1"
+shift
 
 while getopts ":r:tiuh" opt; do
   case "$opt" in
@@ -260,6 +263,8 @@ if [[ "$DO_INSTALL" == true && "$DO_UPGRADE" == true ]]; then
   exit 1
 fi
 
+init_plugin
+
 # 执行
 if [[ -n "$RELEASE_LEVEL" ]]; then
   do_release "$RELEASE_LEVEL" "$DO_TAG"
@@ -273,7 +278,7 @@ if [[ "$DO_UPGRADE" == true ]]; then
   do_upgrade
 fi
 
-# 无参数时显示用法
+# 只有插件名没有操作时显示用法
 if [[ -z "$RELEASE_LEVEL" && "$DO_INSTALL" == false && "$DO_UPGRADE" == false ]]; then
   usage
 fi
