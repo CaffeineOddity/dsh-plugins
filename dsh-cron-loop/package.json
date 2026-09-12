@@ -1,6 +1,6 @@
 {
   "name": "dsh-cron-loop",
-  "version": "0.1.12",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
   "description": "项目级 cron 定时任务插件：/cron /loop 命令 + http://127.0.0.1:3080/cron 任务中心",
