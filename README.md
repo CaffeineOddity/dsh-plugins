@@ -27,23 +27,40 @@ flowchart LR
 
 ## 通用安装方式
 
-仓库根目录提供 `run.sh` 统一管理插件的发布与安装：
+仓库根目录提供 `run.sh` 统一管理插件的发布与安装。三种安装模式互斥：
+
+```mermaid
+flowchart LR
+  subgraph "开发模式 -d"
+    DevLink["link 源码目录"] --> DevRestart["重启 dsh web"]
+  end
+  subgraph "部署模式 -i / 升级模式 -u"
+    Pack["-r 打包 tarball"] --> Tarball[".dist/xxx.tgz"]
+    Tarball --> Install["装 tarball 到 profile"]
+    Install --> Restart["重启 dsh web"]
+  end
+```
 
 ```bash
-# 首次安装插件到 DSH web profile
-./run.sh <plugin> -i          # 例: ./run.sh dsh-cron-loop -i
+# 开发模式：link 源码 + 重启（改完代码即生效）
+./run.sh <plugin> -d               # 例: ./run.sh dsh-cron-loop -d
 
-# 更新到当前源码版本
-./run.sh <plugin> -u
+# 部署模式：从 .dist/ tarball 安装 + 重启（版本锁定到打包快照）
+./run.sh <plugin> -i               # 装当前版本 tarball
+./run.sh <plugin> -r patch -i      # 发布 + 装 tarball + 重启
 
-# 发布：bump 版本 + 打包 + 推送
-./run.sh <plugin> -r patch    # bump patch
-./run.sh <plugin> -r          # 用当前版本打包（不 bump）
-./run.sh <plugin> -r patch -u # 发布后自动更新
-./run.sh <plugin> -r minor -t # 发布 minor 并打 git tag
+# 升级模式：从 .dist/ tarball 更新 + 重启
+./run.sh <plugin> -u               # 升级到当前版本 tarball
+./run.sh <plugin> -r patch -u      # 发布 + 升级 tarball + 重启
+
+# 只发布（不安装）
+./run.sh <plugin> -r patch         # bump patch + pack + push
+./run.sh <plugin> -r               # 用当前版本打包（不 bump）
+./run.sh <plugin> -r minor -t      # 发布 minor 并打 git tag
 ```
 
 > 产物路径：`<plugin>/.dist/<name>-<version>.tgz`
+> `-i`/`-u` 按 `package.json` 的 version 匹配对应 tarball，找不到则提示先 `-r` 发布。
 
 ### 手动安装（不用 run.sh）
 

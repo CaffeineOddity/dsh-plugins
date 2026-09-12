@@ -56,20 +56,24 @@ flowchart LR
 
 ### 用 run.sh（推荐）
 
-仓库根目录的 `run.sh` 统一管理发布与安装：
+仓库根目录的 `run.sh` 统一管理发布与安装。三种模式互斥：
 
 ```bash
-# 首次安装
-./run.sh dsh-cron-loop -i
+# 开发模式：link 源码 + 重启 dsh web（改完代码即生效）
+./run.sh dsh-cron-loop -d
 
-# 更新到当前源码版本
-./run.sh dsh-cron-loop -u
+# 部署模式：从 .dist/ tarball 安装 + 重启（版本锁定到打包快照）
+./run.sh dsh-cron-loop -i               # 装当前版本 tarball
+./run.sh dsh-cron-loop -r patch -i       # 发布 + 装 tarball + 重启
 
-# 发布：bump 版本 + 打包到 .dist/ + 推送
-./run.sh dsh-cron-loop -r patch    # bump patch
-./run.sh dsh-cron-loop -r          # 用当前版本打包（不 bump）
-./run.sh dsh-cron-loop -r patch -u # 发布后自动更新
-./run.sh dsh-cron-loop -r minor -t # 发布 minor 并打 git tag
+# 升级模式：从 .dist/ tarball 更新 + 重启
+./run.sh dsh-cron-loop -u               # 升级到当前版本 tarball
+./run.sh dsh-cron-loop -r patch -u       # 发布 + 升级 tarball + 重启
+
+# 只发布（不安装）
+./run.sh dsh-cron-loop -r patch          # bump patch + pack + push
+./run.sh dsh-cron-loop -r               # 用当前版本打包（不 bump）
+./run.sh dsh-cron-loop -r minor -t       # 发布 minor 并打 git tag
 ```
 
 ### 手动安装

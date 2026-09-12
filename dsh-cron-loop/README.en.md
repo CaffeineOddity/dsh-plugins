@@ -56,20 +56,24 @@ flowchart LR
 
 ### Via run.sh (recommended)
 
-The `run.sh` at the repo root manages release and installation:
+The `run.sh` at the repo root manages release and installation. Three mutually exclusive modes:
 
 ```bash
-# First install
-./run.sh dsh-cron-loop -i
+# Dev mode: link source + restart dsh web (changes take effect immediately)
+./run.sh dsh-cron-loop -d
 
-# Update to current source version
-./run.sh dsh-cron-loop -u
+# Deploy mode: install from .dist/ tarball + restart (version locked to snapshot)
+./run.sh dsh-cron-loop -i               # install current version tarball
+./run.sh dsh-cron-loop -r patch -i       # release + install tarball + restart
 
-# Release: bump + pack to .dist/ + push
-./run.sh dsh-cron-loop -r patch    # bump patch
-./run.sh dsh-cron-loop -r          # pack with current version (no bump)
-./run.sh dsh-cron-loop -r patch -u # release then update
-./run.sh dsh-cron-loop -r minor -t # release minor and create a git tag
+# Upgrade mode: update from .dist/ tarball + restart
+./run.sh dsh-cron-loop -u               # upgrade to current version tarball
+./run.sh dsh-cron-loop -r patch -u       # release + upgrade tarball + restart
+
+# Release only (no install)
+./run.sh dsh-cron-loop -r patch          # bump patch + pack + push
+./run.sh dsh-cron-loop -r              # pack with current version (no bump)
+./run.sh dsh-cron-loop -r minor -t       # release minor and create a git tag
 ```
 
 ### Manual install

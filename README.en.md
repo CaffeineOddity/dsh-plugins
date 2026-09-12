@@ -27,30 +27,47 @@ flowchart LR
 
 ## General installation
 
-The repo root provides `run.sh` to manage plugin release and installation:
+The repo root provides `run.sh` to manage plugin release and installation. Three mutually exclusive install modes:
+
+```mermaid
+flowchart LR
+  subgraph "Dev mode -d"
+    DevLink["link source dir"] --> DevRestart["restart dsh web"]
+  end
+  subgraph "Deploy -i / Upgrade -u"
+    Pack["-r pack tarball"] --> Tarball[".dist/xxx.tgz"]
+    Tarball --> Install["install tarball to profile"]
+    Install --> Restart["restart dsh web"]
+  end
+```
 
 ```bash
-# Install a plugin into the DSH web profile
-./run.sh <plugin> -i          # e.g. ./run.sh dsh-cron-loop -i
+# Dev mode: link source + restart (changes take effect immediately)
+./run.sh <plugin> -d               # e.g. ./run.sh dsh-cron-loop -d
 
-# Update to the current source version
-./run.sh <plugin> -u
+# Deploy mode: install from .dist/ tarball + restart (version locked to snapshot)
+./run.sh <plugin> -i               # install current version tarball
+./run.sh <plugin> -r patch -i      # release + install tarball + restart
 
-# Release: bump version + pack + push
-./run.sh <plugin> -r patch    # bump patch
-./run.sh <plugin> -r          # pack with current version (no bump)
-./run.sh <plugin> -r patch -u # release then update
-./run.sh <plugin> -r minor -t # release minor and create a git tag
+# Upgrade mode: update from .dist/ tarball + restart
+./run.sh <plugin> -u               # upgrade to current version tarball
+./run.sh <plugin> -r patch -u      # release + upgrade tarball + restart
+
+# Release only (no install)
+./run.sh <plugin> -r patch         # bump patch + pack + push
+./run.sh <plugin> -r              # pack with current version (no bump)
+./run.sh <plugin> -r minor -t     # release minor and create a git tag
 ```
 
 > Artifact path: `<plugin>/.dist/<name>-<version>.tgz`
+> `-i`/`-u` match the tarball by `package.json` version; if not found, prompts to `-r` first.
 
 ### Manual install (without run.sh)
 
-1. Ensure DSH is installed (`npm i -g @deepseek-ai/dsh` or npx), pnpm ≥ 10, and Node.js ≥ 22.
+1. Ensure DSH is installed (`npm i -g @deepseek-ai/dsh` or npx), pnpm >= 10, and Node.js >= 22.
 2. Clone this repo: `git clone https://github.com/CaffeineOddity/dsh-plugins.git`
 3. Enter the target plugin dir and install deps: `cd dsh-<name> && pnpm install`
-4. Add the plugin as a bundle: `dsh plugin --profile web add link:$(pwd)`
+4. Add the plugin as a bundle: `dsh plugin --profile web add link:/Users/zhuangchubin/learn/dsh-plugins`
 5. Start: `dsh web`
 
 See each plugin's `README.md` for specific usage.
