@@ -5,25 +5,26 @@
 # 产物路径：<plugin>/.dist/<name>-<version>.tgz
 #
 # 三种安装模式（互斥）：
-#   -d    开发模式：link 源码到 profile + 重启 dsh web（改完代码即生效）
-#   -i    部署模式：从 .dist/ tarball 安装（版本锁定到打包时的快照）+ 重启
-#   -u    升级模式：从 .dist/ tarball 更新（同 -i，先移除旧依赖再装）+ 重启
+#   -d          开发模式：link 源码到 profile（改完代码即生效）
+#   -i          部署模式：从 .dist/ tarball 安装（版本锁定到打包时的快照）
+#   -u          升级模式：从 .dist/ tarball 更新（同 -i，先移除旧依赖再装）
+#   --restart   安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/dsh.sh --restart）
 #
 # 用法：
-#   run.sh <plugin> -d                                  开发：link 源码 + 重启
+#   run.sh <plugin> -d [--restart]                        开发：link 源码，可选重启
 #   run.sh <plugin> -r [major|minor|patch] [-t]          发布：bump + pack + push
-#   run.sh <plugin> -r [level] -i                       发布 + 装 tarball + 重启
-#   run.sh <plugin> -r [level] -u                       发布 + 升级 tarball + 重启
-#   run.sh <plugin> -i                                  装 .dist/ tarball + 重启
-#   run.sh <plugin> -u                                  升级 .dist/ tarball + 重启
+#   run.sh <plugin> -r [level] -i [--restart]           发布 + 装 tarball，可选重启
+#   run.sh <plugin> -r [level] -u [--restart]            发布 + 升级 tarball，可选重启
+#   run.sh <plugin> -i [--restart]                       装 .dist/ tarball，可选重启
+#   run.sh <plugin> -u [--restart]                      升级 .dist/ tarball，可选重启
 #
 # 示例：
-#   run.sh dsh-cron-loop -d                 开发：link 源码 + 重启
+#   run.sh dsh-cron-loop -d --restart       开发：link 源码 + 重启
 #   run.sh dsh-cron-loop -r patch           发布：bump + pack + push
-#   run.sh dsh-cron-loop -r patch -u        发布 + 升级 tarball + 重启
-#   run.sh dsh-cron-loop -r patch -t -i     发布 + tag + 装 tarball + 重启
-#   run.sh dsh-cron-loop -i                 装当前版本 tarball + 重启
-#   run.sh dsh-cron-loop -u                 升级当前版本 tarball + 重启
+#   run.sh dsh-cron-loop -r patch -u --restart 发布 + 升级 tarball + 重启
+#   run.sh dsh-cron-loop -r patch -t -i --restart 发布 + tag + 装 tarball + 重启
+#   run.sh dsh-cron-loop -i                 装当前版本 tarball（不重启）
+#   run.sh dsh-cron-loop -u --restart        升级当前版本 tarball + 重启
 
 set -euo pipefail
 
@@ -129,31 +130,17 @@ find_tarball() {
 
 # ─── 重启 dsh web ───
 
+# 委托 ~/.dsh/dsh.sh --restart 重启（杀端口占用 + 启动 dsh web）
 restart_dsh_web() {
-  local dsh_bin
-  dsh_bin="$(find_dsh_bin)" || return 0
-
-  local pid=""
-  pid="$(lsof -ti :3080 2>/dev/null || true)"
-  if [[ -z "$pid" ]]; then
-    pid="$(pgrep -f 'dsh.*web' 2>/dev/null | head -1 || true)"
+  local restart_script="$HOME/.dsh/dsh.sh"
+  if [[ ! -x "$restart_script" ]]; then
+    warn "未找到 $restart_script，跳过重启（请手动重启 dsh web）"
+    return 0
   fi
-
-  if [[ -n "$pid" ]]; then
-    log "8 秒后重启 dsh web (当前 pid: $pid)..."
-    # 延迟 kill，确保当前脚本输出和 agent 响应已发送
-    (
-      sleep 8
-      kill "$pid" 2>/dev/null || true
-      sleep 2
-      nohup "$dsh_bin" web --no-open > /tmp/dsh-web.log 2>&1 &
-    ) &
-    log "重启已调度，日志: /tmp/dsh-web.log"
-  else
-    log "启动 dsh web..."
-    nohup "$dsh_bin" web --no-open > /tmp/dsh-web.log 2>&1 &
-    log "dsh web 已启动，日志: /tmp/dsh-web.log"
-  fi
+  log "重启 dsh web..."
+  # 后台执行，不阻塞当前脚本（dsh.sh restart 会 exec dsh web，前台不退出）
+  nohup sh "$restart_script" --restart > /tmp/dsh-web.log 2>&1 &
+  log "重启已调度，日志: /tmp/dsh-web.log"
 }
 
 # ─── 发布 ───
@@ -236,7 +223,6 @@ do_dev() {
   "$dsh_bin" plugin --profile web remove "$name" 2>/dev/null || true
   "$dsh_bin" plugin --profile web add "link:$PLUGIN_DIR"
   log "已链接源码: $name v${version} (源码)"
-  restart_dsh_web
 }
 
 # ─── 部署模式：装 tarball ───
@@ -253,7 +239,6 @@ do_install() {
   "$dsh_bin" plugin --profile web remove "$name" 2>/dev/null || true
   "$dsh_bin" plugin --profile web add "$tarball"
   log "安装完成: $name v${version} (tarball)"
-  restart_dsh_web
 }
 
 # ─── 升级模式：更新 tarball ───
@@ -270,7 +255,6 @@ do_upgrade() {
   "$dsh_bin" plugin --profile web remove "$name" 2>/dev/null || true
   "$dsh_bin" plugin --profile web add "$tarball"
   log "升级完成: $name v${version} (tarball)"
-  restart_dsh_web
 }
 
 # ─── 参数解析 ───
@@ -281,34 +265,36 @@ DO_DEV=false
 DO_INSTALL=false
 DO_UPGRADE=false
 DO_TAG=false
+DO_RESTART=false
 
 usage() {
   cat << 'USAGE'
 用法：
-  run.sh <plugin> -d                               开发：link 源码 + 重启 dsh web
+  run.sh <plugin> -d [--restart]                   开发：link 源码，可选重启
   run.sh <plugin> -r [major|minor|patch] [-t]      发布：bump + pack + push
-  run.sh <plugin> -r [level] -i                    发布 + 装 tarball + 重启
-  run.sh <plugin> -r [level] -u                    发布 + 升级 tarball + 重启
-  run.sh <plugin> -i                               装当前版本 tarball + 重启
-  run.sh <plugin> -u                               升级当前版本 tarball + 重启
+  run.sh <plugin> -r [level] -i [--restart]        发布 + 装 tarball，可选重启
+  run.sh <plugin> -r [level] -u [--restart]        发布 + 升级 tarball，可选重启
+  run.sh <plugin> -i [--restart]                   装当前版本 tarball，可选重启
+  run.sh <plugin> -u [--restart]                   升级当前版本 tarball，可选重启
 
 选项：
-  -d            开发模式：link 源码到 profile + 重启 dsh web
+  -d            开发模式：link 源码到 profile
   -r [level]    发布。level 可选：major|minor|patch；不传则用当前版本打包
   -t            发布时打 git tag (格式：<plugin>-v<version>)，默认不打
-  -i            从 .dist/ tarball 安装（按 package.json version 匹配）+ 重启
-  -u            从 .dist/ tarball 升级（同 -i，先移除旧依赖）+ 重启
+  -i            从 .dist/ tarball 安装（按 package.json version 匹配）
+  -u            从 .dist/ tarball 升级（同 -i，先移除旧依赖）
+  --restart     安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/dsh.sh --restart）
   -h            显示帮助
 
 互斥：-d / -i / -u 三选一
 
 示例：
-  run.sh dsh-cron-loop -d                 开发：link 源码 + 重启
-  run.sh dsh-cron-loop -r patch           发布：bump + pack + push
-  run.sh dsh-cron-loop -r patch -u        发布 + 升级 tarball + 重启
-  run.sh dsh-cron-loop -r patch -t -i     发布 + tag + 装 tarball + 重启
-  run.sh dsh-cron-loop -i                 装当前版本 tarball + 重启
-  run.sh dsh-cron-loop -u                 升级当前版本 tarball + 重启
+  run.sh dsh-cron-loop -d --restart        开发：link 源码 + 重启
+  run.sh dsh-cron-loop -r patch            发布：bump + pack + push
+  run.sh dsh-cron-loop -r patch -u --restart 发布 + 升级 tarball + 重启
+  run.sh dsh-cron-loop -r patch -t -i --restart 发布 + tag + 装 tarball + 重启
+  run.sh dsh-cron-loop -i                 装当前版本 tarball（不重启）
+  run.sh dsh-cron-loop -u --restart        升级当前版本 tarball + 重启
 USAGE
   exit 0
 }
@@ -337,6 +323,7 @@ while [[ $# -gt 0 ]]; do
     -t) DO_TAG=true; shift ;;
     -i) DO_INSTALL=true; shift ;;
     -u) DO_UPGRADE=true; shift ;;
+    --restart) DO_RESTART=true; shift ;;
     -h|--help) usage ;;
     *) err "未知选项: $1"; usage ;;
   esac
@@ -369,6 +356,10 @@ fi
 
 if [[ "$DO_UPGRADE" == true ]]; then
   do_upgrade
+fi
+
+if [[ "$DO_RESTART" == true ]]; then
+  restart_dsh_web
 fi
 
 # 只有插件名没有操作时显示用法
