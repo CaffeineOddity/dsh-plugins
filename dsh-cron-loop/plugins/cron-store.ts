@@ -26,6 +26,8 @@ export interface CronJobRecord {
   enabled: boolean
   /** 权限模式：read-only / workspace-write / danger-full-access。 */
   permissionMode?: string
+  /** 连续执行：成功后立即续跑下一轮，不等 cron 触发。缺省 false。 */
+  continuous?: boolean
   /** 保留字段：v1 固定本地时区。 */
   timezone: string
   /** 绑定的会话 id（首次执行时生成，之后固定复用）。 */
@@ -77,6 +79,7 @@ const jobSchema = z.object({
   enabled: z.boolean(),
   timezone: z.string(),
   permissionMode: z.string().optional(),
+  continuous: z.boolean().optional(),
   sessionId: z.string().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),

@@ -31,6 +31,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 
 - `CronJobRecord`：`id`, `name`, `cwd`（绝对路径）, `cron`, `prompt`, `enabled`,
   `permissionMode?`（`read-only`/`workspace-write`/`danger-full-access`，缺省 `danger-full-access`）,
+  `continuous?`（缺省 `false`：执行完等下次 cron 触发；`true`：成功后立即续跑下一轮）,
   `timezone`, `sessionId?`, `createdAt`, `updatedAt`, `lastRunAt?`, `lastStatus?`, `nextRunAt?`
 - `CronRunRecord`：`id`, `jobId`, `jobName`, `startedAt`, `finishedAt?`,
   `status`, `sessionId?`, `summary?`, `error?`
@@ -67,6 +68,10 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
   用 read-modify-write（先从 store 读最新 job 再合并），不覆盖
   `prompt`/`name`/`cron`/`enabled`/`permissionMode`/`cwd` 等用户可编辑字段。
   否则执行期间的 PUT 更新会被旧快照覆盖。
+- **连续执行模式**（`continuous: true`，缺省 `false`）：一轮执行成功后立即续跑下一轮，
+  不等 cron 触发。`inFlight` 在续跑期间不释放，tick 的 `matches` 触发被 `inFlight` 挡住，
+  `nextRunAt` 由 tick 正常刷新（即「原定触发时间自动顺延」）。
+  执行失败（`error`）或任务被禁用/删除时不续跑，`inFlight` 释放。
 
 ### 模型工具（`cron-scheduler.ts` 内 `harness.registerTool`）
 
@@ -74,6 +79,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 `action: 'add'|'list'|'update'|'remove'|'pause'|'resume'|'runs'`。
 add/update 的 `cwd` 缺省取当前 agent 会话的 `session.header.cwd`（项目级归属的落点）；
 add 的 `permissionMode` 缺省 `danger-full-access`（可选 `read-only`/`workspace-write`/`danger-full-access`）；
+add 的 `continuous` 缺省 `false`（`true` 时执行完立即续跑下一轮）；
 `cron` 参数必须通过 `parseCron` 校验，非法即抛错。
 
 ### 斜杠命令（`cron-commands.ts`，`ctx.commands.register`）
@@ -91,8 +97,8 @@ add 的 `permissionMode` 缺省 `danger-full-access`（可选 `read-only`/`works
 
 - `GET /cron` → 任务中心页面（内联单文件 HTML+JS，调用下方 JSON API）。
 - `GET /cron/api/jobs` → 全部 job（含 nextRunAt 计算与 cron 可读描述 `cronHuman`）。
-- `POST /cron/api/jobs` → 新建（body: name/cwd/cron/prompt）。
-- `PUT /cron/api/jobs/:id` → 更新（cron/prompt/enabled/name）。
+- `POST /cron/api/jobs` → 新建（body: name/cwd/cron/prompt/permissionMode/continuous）。
+- `PUT /cron/api/jobs/:id` → 更新（cron/prompt/enabled/name/permissionMode/continuous）。
 - `DELETE /cron/api/jobs/:id` → 删除。
 - `GET /cron/api/runs?jobId=&limit=` -> 执行历史（默认 100 条，新->旧）。
 - `DELETE /cron/api/runs` -> 清空全部（或 `?jobId=` 限定某 job）。

@@ -96,6 +96,7 @@ export function apply(ctx: Context): void {
               cron?: string
               prompt?: string
               permissionMode?: string
+              continuous?: boolean
             }
             if (body.cwd === undefined || body.cwd === '') throw new Error('cwd is required')
             if (body.prompt === undefined || body.prompt === '') throw new Error('prompt is required')
@@ -106,6 +107,7 @@ export function apply(ctx: Context): void {
               cron: body.cron,
               prompt: body.prompt,
               permissionMode: body.permissionMode,
+              continuous: body.continuous,
             })
             json(res, 200, { ok: true, job: jobView(job) })
           } catch (error: unknown) {
@@ -157,6 +159,7 @@ export function apply(ctx: Context): void {
               prompt?: string
               enabled?: boolean
               permissionMode?: string
+              continuous?: boolean
             }
             if (body.cron !== undefined) parseCron(body.cron)
             const next: CronJobRecord = {
@@ -166,6 +169,7 @@ export function apply(ctx: Context): void {
               prompt: body.prompt ?? job.prompt,
               enabled: body.enabled ?? job.enabled,
               permissionMode: body.permissionMode ?? job.permissionMode,
+              continuous: body.continuous ?? job.continuous,
               updatedAt: Date.now(),
             }
             await store().putJob(next)

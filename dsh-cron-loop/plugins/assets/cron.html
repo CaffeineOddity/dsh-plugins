@@ -41,6 +41,8 @@
   dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
   dialog .row button { padding: 6px 16px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; }
   dialog .row button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  dialog .checkbox-row { display: flex; align-items: center; gap: 6px; margin: 10px 0 4px; color: var(--text); font-size: 13px; cursor: pointer; }
+  dialog .checkbox-row input { width: auto; margin: 0; }
   .empty { color: var(--muted); padding: 26px; text-align: center; background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; }
   .err-text { color: var(--err); font-size: 12px; max-width: 340px; overflow-wrap: anywhere; }
   .summary { color: var(--muted); font-size: 12px; max-width: 380px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -96,6 +98,7 @@
     <option value="workspace-write">工作区内修改</option>
     <option value="read-only">仅可查看</option>
   </select>
+  <label class="checkbox-row"><input type="checkbox" id="fContinuous"> 连续执行（成功后立即续跑下一轮，不等 cron 触发）</label>
   <div class="row">
     <button id="btnCancel">取消</button>
     <button id="btnSave" class="primary">保存</button>
@@ -226,7 +229,7 @@ function renderJobsTable(jobs) {
       <td>${status}</td>
       <td><b>${esc(job.cronHuman || job.cron)}</b><br><code>${esc(job.cron)}</code></td>
       <td>${esc(next)}<br><span class="cwd">上次: ${esc(last)}</span></td>
-      <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}</td>
+      <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}${job.continuous ? '<br>🔄 连续执行' : ''}</td>
       <td class="summary" title="${esc(job.prompt)}">${esc(job.prompt)}</td>
       <td class="actions">
         <button data-act="edit">编辑</button>
@@ -357,6 +360,7 @@ function openDialog(job) {
   $('fCron').value = job ? job.cron : ''
   $('fPrompt').value = job ? job.prompt : ''
   $('fPerm').value = job?.permissionMode || 'danger-full-access'
+  $('fContinuous').checked = job?.continuous || false
   $('dlg').showModal()
 }
 
@@ -370,6 +374,7 @@ $('btnSave').addEventListener('click', () => {
     cron: $('fCron').value.trim(),
     prompt: $('fPrompt').value.trim(),
     permissionMode: $('fPerm').value,
+    continuous: $('fContinuous').checked,
   }
   const req = editingId === null
     ? api('/cron/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })

@@ -201,6 +201,7 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   // read-modify-write：只更新运行态字段，不覆盖执行期间用户 PUT 更新的 prompt/name/cron 等。
   await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'running' })
   ctx.logger?.info?.(`cron-scheduler: job ${job.id} (${job.name}) fired`)
+  let succeeded = false
   try {
     const { agent, sessionId: actualSid } = await ensureAgent(ctx, sid, job.id, job.cwd, job.permissionMode ?? 'danger-full-access')
     // 首次执行把会话身份回写到 job 记录，之后每次复用该 id resume。
@@ -222,6 +223,7 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
       : (wait === 'timeout' ? '执行超时，未产生最终文本' : '执行完成（无文本输出）')
     await store.putRun({ ...running, finishedAt, status: 'ok', sessionId: String(sid), summary })
     await mergeJobUpdate(store, job.id, { sessionId: String(sid), lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
+    succeeded = true
     ctx.logger?.info?.(`cron-scheduler: job ${job.id} finished ok in ${finishedAt - startedAt}ms`)
   } catch (error: unknown) {
     const finishedAt = Date.now()
@@ -230,7 +232,16 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
     await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
     ctx.logger?.error?.(`cron-scheduler: job ${job.id} failed: ${message}`)
   } finally {
-    inFlight.delete(job.id)
+    // 连续执行模式：成功后且任务仍启用，立即续跑下一轮（inFlight 不释放，
+    // tick 的 matches 触发被 inFlight 挡住，nextRunAt 由 tick 正常刷新即「顺延」）。
+    // 失败/禁用/删除时不续跑，释放 inFlight。
+    const latest = store.jobs.get(job.id)
+    if (succeeded && latest?.continuous === true && latest.enabled === true) {
+      ctx.logger?.info?.(`cron-scheduler: job ${job.id} continuous -> chaining next round`)
+      void runJob(ctx, latest)
+    } else {
+      inFlight.delete(job.id)
+    }
   }
 }
 
@@ -294,7 +305,7 @@ async function triggerJobNowOn(ctx: Context, jobId: string): Promise<void> {
 /** 新建任务的公共入口（工具/命令/Web 共用）：校验 cron、生成 id、落盘。 */
 export async function createJob(
   ctx: Context,
-  input: { name?: string; cwd: string; cron: string; prompt: string; enabled?: boolean; permissionMode?: string },
+  input: { name?: string; cwd: string; cron: string; prompt: string; enabled?: boolean; permissionMode?: string; continuous?: boolean },
 ): Promise<CronJobRecord> {
   parseCron(input.cron) // 非法即抛 CronParseError
   const cwd = normalizeCwd(input.cwd)
@@ -315,6 +326,7 @@ export async function createJob(
     prompt: input.prompt,
     enabled: input.enabled ?? true,
     permissionMode: input.permissionMode ?? 'danger-full-access',
+    continuous: input.continuous ?? false,
     timezone: 'local',
     createdAt: now,
     updatedAt: now,
@@ -334,6 +346,7 @@ interface CronToolArgs {
   cwd?: string
   enabled?: boolean
   permissionMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
+  continuous?: boolean
 }
 
 /** 文本输出（output schema: string，render 原样返回）。 */
@@ -383,6 +396,7 @@ export function apply(ctx: Context): void {
       cwd: { type: 'string', description: '任务归属目录（add 可选；缺省为当前项目目录）' },
       enabled: { type: 'boolean', description: '启用状态' },
       permissionMode: { type: 'string', enum: ['read-only', 'workspace-write', 'danger-full-access'], description: '权限模式（缺省 danger-full-access；read-only/workspace-write 会弹审批，不适合无人值守）' },
+      continuous: { type: 'boolean', description: '连续执行（缺省 false；true 时成功后立即续跑下一轮，不等 cron 触发）' },
     },
     output: {
       schema: { type: 'string' },
@@ -407,6 +421,7 @@ export function apply(ctx: Context): void {
             cron: args.cron ?? '* * * * *',
             prompt: args.prompt,
             permissionMode: args.permissionMode,
+            continuous: args.continuous,
           })
           return textResult(`已创建任务 ${job.id}「${job.name}」\ncron: ${job.cron}\n目录: ${job.cwd}\nprompt: ${job.prompt}`)
         }
@@ -430,10 +445,11 @@ export function apply(ctx: Context): void {
             prompt: args.prompt ?? job.prompt,
             name: args.name ?? job.name,
             enabled: args.enabled ?? job.enabled,
+            continuous: args.continuous ?? job.continuous,
             updatedAt: Date.now(),
           }
           await store.putJob(next)
-          return textResult(`已更新 ${job.id}: cron=${next.cron} enabled=${String(next.enabled)}`)
+          return textResult(`已更新 ${job.id}: cron=${next.cron} enabled=${String(next.enabled)} continuous=${String(next.continuous ?? false)}`)
         }
         case 'remove': {
           if (args.id === undefined) throw new Error('cron_job remove: id is required')
