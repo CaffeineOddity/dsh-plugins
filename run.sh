@@ -107,11 +107,12 @@ set_package_version() {
 
 do_release() {
   local level="$1"
+  local no_tag="$2"
   local current new_version
 
   current="$(get_version)"
   new_version="$(bump_version "$level")"
-  log "发布: $current -> $new_version ($level)"
+  log "发布: $current -> $new_version ($level)${no_tag:+ (跳过 tag)}"
 
   # 1. 更新 package.json 版本号
   set_package_version "$new_version"
@@ -127,9 +128,13 @@ do_release() {
   (cd "$SCRIPT_DIR" && git commit -m "chore(cron-loop): release v$new_version")
   log "git commit 完成"
 
-  # 4. git tag
-  (cd "$SCRIPT_DIR" && git tag "v$new_version")
-  log "git tag v$new_version 已创建"
+  # 4. git tag（-n 跳过）
+  if [[ -z "$no_tag" ]]; then
+    (cd "$SCRIPT_DIR" && git tag "v$new_version")
+    log "git tag v$new_version 已创建"
+  else
+    log "跳过 git tag（-n）"
+  fi
 
   # 5. pnpm pack 打 tarball（先清理旧 tarball）
   rm -f "$PLUGIN_DIR"/*.tgz
@@ -145,10 +150,15 @@ do_release() {
   fi
   log "tarball: $tarball_path"
 
-  # 6. git push + push tags
-  log "推送 git commit 和 tag..."
-  (cd "$SCRIPT_DIR" && git push origin main && git push origin "v$new_version")
-  log "发布完成: v$new_version"
+  # 6. git push（commit 必推，tag 有则推）
+  if [[ -z "$no_tag" ]]; then
+    log "推送 git commit 和 tag..."
+    (cd "$SCRIPT_DIR" && git push origin main && git push origin "v$new_version")
+  else
+    log "推送 git commit（跳过 tag）..."
+    (cd "$SCRIPT_DIR" && git push origin main)
+  fi
+  log "发布完成: v$new_version${no_tag:+ (无 tag)}"
 
   echo "$new_version"
 }
@@ -227,20 +237,22 @@ do_upgrade() {
 RELEASE_LEVEL=""
 DO_INSTALL=false
 DO_UPGRADE=false
+NO_TAG=false
 
 usage() {
   cat << 'USAGE'
 用法：
-  run.sh -r <major|minor|patch> [-i|-u]   发布（bump + tag + pack + push）后可选安装/更新
-  run.sh -i                               首次安装到 DSH web profile
-  run.sh -u                               更新到最新版本
+  run.sh -r <major|minor|patch> [-n] [-i|-u]   发布（bump + pack + push），可选跳过 tag (-n)，后可选安装/更新
+  run.sh -i                                   首次安装到 DSH web profile
+  run.sh -u                                   更新到最新版本
 USAGE
   exit 0
 }
 
-while getopts ":r:iuh" opt; do
+while getopts ":r:niuh" opt; do
   case "$opt" in
     r) RELEASE_LEVEL="$OPTARG" ;;
+    n) NO_TAG=true ;;
     i) DO_INSTALL=true ;;
     u) DO_UPGRADE=true ;;
     h) usage ;;
@@ -257,7 +269,7 @@ fi
 
 # 执行
 if [[ -n "$RELEASE_LEVEL" ]]; then
-  do_release "$RELEASE_LEVEL"
+  do_release "$RELEASE_LEVEL" "$NO_TAG"
 fi
 
 if [[ "$DO_INSTALL" == true ]]; then
