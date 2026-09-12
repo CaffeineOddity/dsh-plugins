@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import '@deepseek-ai/dsh-host-webserver' // 激活 Context.webServer 类型扩展
 import { parseCron, computeNextRun, describeCron } from './lib/cron-core.ts'
+import { ModelPool } from './lib/model-pool.ts'
+import type { ModelPoolFile } from './lib/model-pool.ts'
 import { createJob } from './cron-scheduler.ts'
 import type { CronLoopScheduler } from './cron-scheduler.ts'
 import type { CronJobRecord } from './cron-store.ts'
@@ -239,6 +241,41 @@ export function apply(ctx: Context): void {
             const removed = await store().deleteRunById(runId)
             if (!removed) throw new Error(`run ${runId} not found`)
             json(res, 200, { ok: true })
+          } catch (error: unknown) {
+            json(res, 400, { error: error instanceof Error ? error.message : String(error) })
+          }
+        })()
+        return
+      }
+      json(res, 405, { error: 'method not allowed' })
+    },
+  })
+
+  // 模型池配置：GET 读取 / PUT 更新
+  web.register({
+    kind: 'exact',
+    path: '/cron/api/model-pool',
+    handler: (req, res) => {
+      const method = req.method ?? 'GET'
+      if (method === 'GET') {
+        void (async () => {
+          const pool = await ModelPool.load()
+          json(res, 200, pool.snapshot() ?? { enabled: false, models: [] })
+        })()
+        return
+      }
+      if (method === 'PUT') {
+        void (async () => {
+          try {
+            const body = JSON.parse((await readBody(req)).toString('utf8')) as ModelPoolFile
+            const pool = await ModelPool.load()
+            const current = pool.snapshot() ?? { enabled: false, models: [] }
+            const next: ModelPoolFile = {
+              enabled: body.enabled ?? current.enabled,
+              models: body.models ?? current.models,
+            }
+            await pool.update(next)
+            json(res, 200, { ok: true, pool: pool.snapshot() })
           } catch (error: unknown) {
             json(res, 400, { error: error instanceof Error ? error.message : String(error) })
           }

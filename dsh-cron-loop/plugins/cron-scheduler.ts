@@ -17,6 +17,8 @@ import '@deepseek-ai/dsh-agent-default-model' // 激活 Context.agentDefaultMode
 import '@deepseek-ai/dsh-system-prompt' // 激活 Context.systemPrompt 类型扩展
 import { computeNextRun, matches, parseCron } from './lib/cron-core.ts'
 import { summarizeOwnedInterval, waitIdleOrTimeout } from './lib/agent-run.ts'
+import { ModelPool } from './lib/model-pool.ts'
+import type { ModelSelection } from './lib/model-pool.ts'
 import type { CronJobRecord, CronRunRecord } from './cron-store.ts'
 import { normalizeCwd } from './cron-store.ts'
 
@@ -28,6 +30,29 @@ const RUN_TIMEOUT_MS = 10 * 60_000
 
 /** 本插件 create/resume 得到的 handle（卸载时统一 dispose）。 */
 const handles = new Map<string, AgentHandle>()
+
+/** 全局模型池实例（apply 时加载，调度/触发时读最新可用模型）。 */
+let modelPool: ModelPool | null = null
+
+/** LLM 失败的最小投影（从 turn/end 事件提取）。 */
+interface LlmFailureInfo {
+  code: string
+  message: string
+}
+
+/** 从 turn/end 事件提取 LLM 失败信息（如果有）。 */
+function extractLlmFailure(events: readonly { seq: number; type: string; data?: unknown }[], firstSeq: number): LlmFailureInfo | null {
+  for (const event of events) {
+    if (event.seq < firstSeq) continue
+    if (event.type !== 'turn/end') continue
+    const data = event.data as { reason?: { kind?: string; error?: { code?: string; message?: string } } } | undefined
+    const reason = data?.reason
+    if (reason?.kind === 'error' && reason.error !== undefined) {
+      return { code: reason.error.code ?? 'UNKNOWN', message: reason.error.message ?? '' }
+    }
+  }
+  return null
+}
 
 /** 同一 job 的执行串行标记（防重入：一个 job 同时至多一个在途执行）。 */
 const inFlight = new Set<string>()
@@ -89,17 +114,18 @@ async function setupAgent(ctx: Context, agentCtx: Context, jobId: string): Promi
 /** 确保目标会话有 live agent：已 live 直接取，否则按磁盘状态 resume/create。
  * 对齐 ruliu-bridge 的 ensureAgent 模式（照搬 lifecycle 判定 + 自愈）。
  * 返回值含最终使用的 sessionId（可能因归档/损坏而变化）。 */
-async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string, permissionMode: string): Promise<{ agent: Agent; sessionId: string }> {
+async function ensureAgent(ctx: Context, sid: SessionId, jobId: string, cwd: string, permissionMode: string, modelOverride?: ModelSelection): Promise<{ agent: Agent; sessionId: string }> {
   const live = ctx.agents.get(sid)
   const persisted = await isPersisted(ctx, sid)
   // lifecycle: live 已在内存；resume 磁盘有但内存无；create 都无。
   const lifecycle = live !== undefined ? 'live' : persisted ? 'resume' : 'create'
-  ctx.logger?.info?.(`cron-scheduler: ensureAgent job=${jobId} sid=${String(sid)} lifecycle=${lifecycle} cwd=${cwd}`)
+  ctx.logger?.info?.(`cron-scheduler: ensureAgent job=${jobId} sid=${String(sid)} lifecycle=${lifecycle} cwd=${cwd}${modelOverride !== undefined ? ` model=${modelOverride.id}` : ''}`)
   if (lifecycle === 'live') {
     if (live === undefined) throw new Error(`cron-scheduler: session ${sid} resolved live but agents.get returned undefined`)
     return { agent: live, sessionId: String(sid) }
   }
-  const selection = ctx.agentDefaultModel.currentSelection()
+  // 模型选择：优先用 modelOverride（模型池），否则用 agentDefaultModel。
+  const selection = modelOverride ?? ctx.agentDefaultModel.currentSelection()
   if (selection.provider === '' || selection.model === '') {
     throw new Error(`cron-scheduler: no default model for job ${jobId} - set agent-default-model in ~/.dsh/settings.yaml`)
   }
@@ -172,69 +198,69 @@ async function mergeJobUpdate(store: { jobs: { get(id: string): CronJobRecord | 
   if (current === undefined) return // job 已被删除，丢弃更新
   await store.putJob({ ...current, ...patch })
 }
-/** 执行一个到期任务：写 running run → agent 回合 → 收口写结果 run。 */
+/** 执行一个到期任务：写 running run -> agent 回合 -> 收口写结果 run。
+ * 支持模型池：每轮选优先级最高的可用模型，额度耗尽自动切换下一个重试。 */
 async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   const store = ctx.cronLoopStore
-  // 防御：job 在 tick -> runJob 间隙被删除时直接跳过，不写 run 也不 crash。
   if (store.jobs.get(job.id) === undefined) {
     ctx.logger?.warn?.(`cron-scheduler: job ${job.id} no longer in store, skipping runJob`)
     return
   }
-  // 每个任务绑定一个固定会话：首次执行生成随机 UUID 并存入 job.sessionId，之后复用。
-  // 会话被归档（web UI 隐藏）后，生成新 UUID 重建，对齐 ruliu-bridge 的 resolveSessionId 模式。
-  let sessionStr = job.sessionId ?? randomUUID()
-  if (job.sessionId !== undefined && isArchived(ctx, job.sessionId)) {
-    ctx.logger?.info?.(`cron-scheduler: job ${job.id} 会话 ${job.sessionId} 已归档，新建会话`)
-    sessionStr = randomUUID()
-  }
-  const sid = SessionId(sessionStr)
   const runId = `run-${job.id}-${Date.now()}`
   const startedAt = Date.now()
-  const running: CronRunRecord = {
-    id: runId,
-    jobId: job.id,
-    jobName: job.name,
-    startedAt,
-    status: 'running',
-  }
+  const running: CronRunRecord = { id: runId, jobId: job.id, jobName: job.name, startedAt, status: 'running' }
   await store.putRun(running)
-  // read-modify-write：只更新运行态字段，不覆盖执行期间用户 PUT 更新的 prompt/name/cron 等。
   await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'running' })
-  ctx.logger?.info?.(`cron-scheduler: job ${job.id} (${job.name}) fired`)
+
+  // 模型池选模型：每轮取优先级最高的可用模型。
+  let modelOverride: ModelSelection | undefined = undefined
+  if (modelPool !== null && modelPool.isEnabled) {
+    await modelPool.reload()
+    const picked = modelPool.pickAvailable()
+    if (picked === null) {
+      // 所有模型额度用光 -> 暂停任务
+      const msg = 'all models exhausted'
+      ctx.logger?.warn?.(`cron-scheduler: job ${job.id} ${msg}, pausing`)
+      await store.putRun({ ...running, finishedAt: Date.now(), status: 'error', error: msg })
+      await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: Date.now(), enabled: false })
+      inFlight.delete(job.id)
+      return
+    }
+    modelOverride = picked
+  }
+
+  ctx.logger?.info?.(`cron-scheduler: job ${job.id} (${job.name}) fired${modelOverride !== undefined ? ` model=${modelOverride.id}` : ''}`)
   let succeeded = false
   try {
-    const { agent, sessionId: actualSid } = await ensureAgent(ctx, sid, job.id, job.cwd, job.permissionMode ?? 'danger-full-access')
-    // 首次执行把会话身份回写到 job 记录，之后每次复用该 id resume。
-    await mergeJobUpdate(store, job.id, { sessionId: actualSid })
-    // 首个 whenIdle 同样加安全阀：会话 hang 死时不至于永久占住 inFlight。
-    const pre = await waitIdleOrTimeout(agent.whenIdle(), RUN_TIMEOUT_MS)
-    if (pre === 'timeout') throw new Error(`cron-scheduler: job ${job.id} agent not idle within ${RUN_TIMEOUT_MS}ms (pre-turn)`)
-    const firstSeq = agent.session.seq
-    agent.followup(createUserMessage({
-      content: [{ type: 'text', text: job.prompt }],
-      source: { kind: 'user' },
-    }))
-    const wait = await waitIdleOrTimeout(agent.whenIdle(), RUN_TIMEOUT_MS)
-    const text = summarizeOwnedInterval(agent.session.snapshotEvents(), firstSeq)
-    await ctx.sessions.flush(agent.session)
-    const finishedAt = Date.now()
-    const summary = text !== ''
-      ? text.slice(0, 500)
-      : (wait === 'timeout' ? '执行超时，未产生最终文本' : '执行完成（无文本输出）')
-    await store.putRun({ ...running, finishedAt, status: 'ok', sessionId: String(sid), summary })
-    await mergeJobUpdate(store, job.id, { sessionId: String(sid), lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
-    succeeded = true
-    ctx.logger?.info?.(`cron-scheduler: job ${job.id} finished ok in ${finishedAt - startedAt}ms`)
+    const result = await executeRound(ctx, job, running, startedAt, modelOverride)
+    succeeded = result.succeeded
+    if (!succeeded && result.failure !== null && modelPool !== null && modelOverride !== undefined) {
+      const failure = result.failure
+      const isQuota = failure.code === 'QUOTA' || failure.code === 'INVALID_CREDENTIAL'
+      if (isQuota) {
+        ctx.logger?.warn?.(`cron-scheduler: job ${job.id} model ${modelOverride.id} ${failure.code}, marking exhausted`)
+        await modelPool.markExhausted(modelOverride.id, failure.code === 'INVALID_CREDENTIAL')
+        const nextModel = modelPool.pickAvailable()
+        if (nextModel !== null) {
+          ctx.logger?.info?.(`cron-scheduler: job ${job.id} switching to model ${nextModel.id}, retrying`)
+          const retryResult = await executeRound(ctx, job, { ...running, id: `run-${job.id}-${Date.now()}` }, Date.now(), nextModel)
+          succeeded = retryResult.succeeded
+          if (!succeeded && retryResult.failure !== null && (retryResult.failure.code === 'QUOTA' || retryResult.failure.code === 'INVALID_CREDENTIAL')) {
+            await modelPool.markExhausted(nextModel.id, retryResult.failure.code === 'INVALID_CREDENTIAL')
+          }
+        } else {
+          ctx.logger?.warn?.(`cron-scheduler: job ${job.id} all models exhausted after retry, pausing`)
+          await mergeJobUpdate(store, job.id, { lastStatus: 'error', updatedAt: Date.now(), enabled: false })
+        }
+      }
+    }
   } catch (error: unknown) {
     const finishedAt = Date.now()
     const message = error instanceof Error ? error.message : String(error)
-    await store.putRun({ ...running, finishedAt, status: 'error', sessionId: String(sid) !== '' ? String(sid) : undefined, error: message })
+    await store.putRun({ ...running, finishedAt, status: 'error', error: message })
     await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
     ctx.logger?.error?.(`cron-scheduler: job ${job.id} failed: ${message}`)
   } finally {
-    // 连续执行模式：成功后且任务仍启用，立即续跑下一轮（inFlight 不释放，
-    // tick 的 matches 触发被 inFlight 挡住，nextRunAt 由 tick 正常刷新即「顺延」）。
-    // 失败/禁用/删除时不续跑，释放 inFlight。
     const latest = store.jobs.get(job.id)
     if (succeeded && latest?.continuous === true && latest.enabled === true) {
       ctx.logger?.info?.(`cron-scheduler: job ${job.id} continuous -> chaining next round`)
@@ -245,10 +271,73 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   }
 }
 
+/** 单轮执行结果。 */
+interface RoundResult {
+  succeeded: boolean
+  failure: LlmFailureInfo | null
+}
+
+/** 执行单轮 agent 回合：ensureAgent -> followup -> whenIdle -> 收口。
+ * modelOverride 为模型池选的模型；undefined 时用 agentDefaultModel。 */
+async function executeRound(ctx: Context, job: CronJobRecord, running: CronRunRecord, startedAt: number, modelOverride: ModelSelection | undefined): Promise<RoundResult> {
+  const store = ctx.cronLoopStore
+  // 模型切换重试时用新会话（旧会话可能残留失败状态）。
+  let sessionStr = job.sessionId ?? randomUUID()
+  if (job.sessionId !== undefined && isArchived(ctx, job.sessionId)) {
+    sessionStr = randomUUID()
+  }
+  if (modelOverride !== undefined) {
+    sessionStr = randomUUID()
+  }
+  const sid = SessionId(sessionStr)
+  try {
+    const { agent, sessionId: actualSid } = await ensureAgent(ctx, sid, job.id, job.cwd, job.permissionMode ?? 'danger-full-access', modelOverride)
+    await mergeJobUpdate(store, job.id, { sessionId: actualSid })
+    const pre = await waitIdleOrTimeout(agent.whenIdle(), RUN_TIMEOUT_MS)
+    if (pre === 'timeout') throw new Error(`cron-scheduler: job ${job.id} agent not idle within ${RUN_TIMEOUT_MS}ms (pre-turn)`)
+    const firstSeq = agent.session.seq
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: job.prompt }],
+      source: { kind: 'user' },
+    }))
+    const wait = await waitIdleOrTimeout(agent.whenIdle(), RUN_TIMEOUT_MS)
+    const events = agent.session.snapshotEvents(firstSeq) as readonly { seq: number; type: string; data?: unknown }[]
+    const failure = extractLlmFailure(events, firstSeq)
+    const text = summarizeOwnedInterval(events, firstSeq)
+    await ctx.sessions.flush(agent.session)
+    const finishedAt = Date.now()
+    if (failure !== null) {
+      const summary = text !== '' ? text.slice(0, 500) : `模型失败: ${failure.code} - ${failure.message}`.slice(0, 500)
+      await store.putRun({ ...running, finishedAt, status: 'error', sessionId: String(sid), error: `${failure.code}: ${failure.message}`, summary })
+      await mergeJobUpdate(store, job.id, { sessionId: String(sid), lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+      ctx.logger?.error?.(`cron-scheduler: job ${job.id} turn ended with error: ${failure.code}: ${failure.message}`)
+      return { succeeded: false, failure }
+    }
+    const summary = text !== ''
+      ? text.slice(0, 500)
+      : (wait === 'timeout' ? '执行超时，未产生最终文本' : '执行完成（无文本输出）')
+    await store.putRun({ ...running, finishedAt, status: 'ok', sessionId: String(sid), summary })
+    await mergeJobUpdate(store, job.id, { sessionId: String(sid), lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
+    ctx.logger?.info?.(`cron-scheduler: job ${job.id} finished ok in ${finishedAt - startedAt}ms`)
+    return { succeeded: true, failure: null }
+  } catch (error: unknown) {
+    const finishedAt = Date.now()
+    const message = error instanceof Error ? error.message : String(error)
+    await store.putRun({ ...running, finishedAt, status: 'error', sessionId: String(sid) !== '' ? String(sid) : undefined, error: message })
+    await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+    ctx.logger?.error?.(`cron-scheduler: job ${job.id} round failed: ${message}`)
+    return { succeeded: false, failure: { code: 'UNKNOWN', message } }
+  }
+}
+
 /** 一个 tick：刷新 nextRunAt，触发到期且未在途的任务。 */
 async function tick(ctx: Context): Promise<void> {
   const store = ctx.cronLoopStore
   const now = Date.now()
+  // 模型池恢复检查：已耗尽模型重置周期到了 -> 恢复（pickAvailable 内部处理）。
+  if (modelPool !== null && modelPool.isEnabled) {
+    void modelPool.reload().then(() => { modelPool?.pickAvailable() })
+  }
   for (const job of store.listJobs()) {
     if (!job.enabled) {
       if (job.nextRunAt !== undefined) {
@@ -359,6 +448,10 @@ export const name = 'cron-scheduler'
 export const inject = ['tools', 'timer', 'agents', 'sessions', 'agentPresets', 'agentDefaultModel', 'systemPrompt', 'cronLoopStore', 'sessionPersistence', 'workspaceRegistry']
 
 export function apply(ctx: Context): void {
+  // 加载全局模型池（异步，不阻塞 apply）。
+  void ModelPool.load().then((pool) => { modelPool = pool }).catch((e: unknown) => {
+    ctx.logger?.warn?.(`cron-scheduler: failed to load model pool: ${e instanceof Error ? e.message : String(e)}`)
+  })
   // 对外暴露 trigger 服务：调用方拿到的 ctx 是 scheduler 自己的 fiber ctx，
   // 保证 runJob 内读 agents/sessions 等服务时 inject 检查通过。
   ctx.provide('cronLoopScheduler', {

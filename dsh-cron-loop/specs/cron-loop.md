@@ -134,3 +134,70 @@ add 的 `continuous` 缺省 `false`（`true` 时执行完立即续跑下一轮�
 - 不做跨进程分布式锁：单 web 进程持有调度器（多进程同时跑本插件可能重复触发，v1 不处理）。
 - 不做每 job 独立并发键/队列（同 job 串行由防重入标记保证）。
 - 不修改 deepseek-harness 本体，全部能力走公开 Service（webServer/agents/commands）+ 直接 fs。
+
+## 模型池（全局，cron 插件自管）
+
+### 配置
+
+`~/.dsh/storages/crons/model-pool.json`（独立于 job，全局共享）：
+
+```json
+{
+  "enabled": true,
+  "models": [
+    {
+      "id": "volcengine-135",
+      "provider": "volcengine",
+      "model": "ark-code-latest",
+      "priority": 1,
+      "quotaReset": { "type": "hours", "value": 24 }
+    }
+  ]
+}
+```
+
+- `enabled`：全局开关，`false` 时模型池不生效，任务用 `agentDefaultModel` 默认模型。
+- `models[].priority`：数字，越小越优先。
+- `models[].quotaReset.type`：`hours`（n 小时后重置）/ `daily`（每天 0 点）/ `weekly`（每周一 0 点）/ `monthly`（每月 1 号 0 点）。
+- 运行时追加 `exhausted: boolean`、`exhaustedAt: number | null`（耗尽时间戳），写回同一文件。
+
+### 选模型（每轮任务开始前）
+
+1. 读 model-pool.json。
+2. 恢复检查：`exhausted=true` 且重置周期已到 -> 恢复 `exhausted=false`。
+3. 按 priority 升序取第一个 `exhausted=false` 的模型。
+4. 无可用模型 -> 暂停任务（job `enabled=false`，lastStatus='error'，error='all models exhausted'）。
+5. `enabled=false`（开关关）时，跳过模型池，用 `agentDefaultModel.currentSelection()`。
+
+### 检测机制（执行后扫描，非订阅）
+
+`runJob` 执行 agent 回合后，扫描 `session.snapshotEvents(firstSeq)` 的 `turn/end` 事件：
+- `reason.kind === 'error'` -> 提取 `LlmFailure`（含 `code`/`status`/`providerRetryAfterMs`）。
+- DSH `LlmFailure.code` 稳定值：`QUOTA`（额度耗尽）/ `RATE_LIMIT`（瞬时限流）/ `EMPTY_RESPONSE` / `INVALID_CREDENTIAL` / `CONTEXT_WINDOW_EXCEEDED`。
+
+### 失败分类与处理
+
+| code | 处理 |
+|------|------|
+| `QUOTA` | 标记模型 exhausted，切换下一个可用模型，新建会话重试本轮 |
+| `INVALID_CREDENTIAL` | 标记模型 exhausted（不可恢复），切换下一个 |
+| `RATE_LIMIT` / `EMPTY_RESPONSE` / `TIMEOUT` | DSH step 级 retry-policy 已处理；cron 层不额外重试 |
+| `CONTEXT_WINDOW_EXCEEDED` | 不重试，标记 error |
+| 超时（安全阀） | 不切换模型，标记 error |
+
+切换重试上限 = 可用模型数量（每个模型试一轮）。
+
+### 额度恢复（tick 顺带检查）
+
+每个 tick（30s）调 `ModelPool.recoverExpired()`：已耗尽模型重置周期到了 -> 恢复，按 priority 重新排序。
+
+### API
+
+- `GET /cron/api/model-pool` -> 读取配置 + 运行时状态。
+- `PUT /cron/api/model-pool` -> 更新配置（enabled/models）。
+
+### 不做项
+
+- 不做模型用量主动探测（provider 不提供剩余额度查询，只有失败才知道耗尽）。
+- 不做跨进程模型池锁（单进程，与调度器一致）。
+- 不干预 DSH step 级 retry-policy（RATE_LIMIT 等瞬时失败由内置重试处理）。
