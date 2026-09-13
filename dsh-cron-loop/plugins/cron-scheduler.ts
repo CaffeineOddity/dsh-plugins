@@ -426,13 +426,21 @@ export async function createJob(
     throw new Error(`cron-scheduler: cwd must be an absolute path (after ~ expansion), got "${input.cwd}"`)
   }
   const store = ctx.cronLoopStore
-  const existing = store.listJobs().map((job) => job.id)
-  let index = 1
-  while (existing.includes(`cron-${index}`)) index++
   const now = Date.now()
+  // 任务 id：创建时刻 `cron-年月日时分秒.毫秒`（本地时间，补零）；同毫秒冲突时递增毫秒。
+  const t = new Date(now)
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const p3 = (n: number) => String(n).padStart(3, '0')
+  const stamp = `${t.getFullYear()}${p2(t.getMonth() + 1)}${p2(t.getDate())}${p2(t.getHours())}${p2(t.getMinutes())}${p2(t.getSeconds())}.${p3(t.getMilliseconds())}`
+  let id = `cron-${stamp}`
+  const existing = store.listJobs().map((job) => job.id)
+  while (existing.includes(id)) {
+    t.setMilliseconds(t.getMilliseconds() + 1)
+    id = `cron-${t.getFullYear()}${p2(t.getMonth() + 1)}${p2(t.getDate())}${p2(t.getHours())}${p2(t.getMinutes())}${p2(t.getSeconds())}.${p3(t.getMilliseconds())}`
+  }
   const fallbackName = input.prompt.replace(/\s+/g, ' ').trim().slice(0, 24) || '未命名任务'
   const job: CronJobRecord = {
-    id: `cron-${index}`,
+    id,
     name: input.name !== undefined && input.name !== '' ? input.name : fallbackName,
     cwd,
     cron: input.cron,
