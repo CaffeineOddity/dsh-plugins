@@ -29,7 +29,8 @@
   .pill.running { background: rgba(210,153,34,.15); color: var(--run); }
   .pill.off { background: rgba(139,147,163,.15); color: var(--muted); }
   .cwd { color: var(--muted); font-size: 12px; }
-  .actions button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 3px 8px; margin-right: 5px; cursor: pointer; font-size: 12px; }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; justify-items: stretch; }
+  .actions button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 3px 8px; cursor: pointer; font-size: 12px; width: 100%; }
   .actions button:hover { border-color: var(--accent); color: var(--accent); }
   .actions button.danger:hover { border-color: var(--err); color: var(--err); }
   dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: 460px; max-width: 92vw; }
@@ -263,9 +264,9 @@ function renderJobsTable(jobs) {
       <td class="summary" title="${esc(job.prompt)}">${esc(job.prompt)}</td>
       <td class="actions">
         <button data-act="edit">编辑</button>
+        <button data-act="remove" class="danger">删除</button>
         <button data-act="toggle">${job.enabled ? '暂停' : '恢复'}</button>
         <button data-act="trigger">立即跑</button>
-        <button data-act="remove" class="danger">删除</button>
       </td>
     </tr>`
   })
