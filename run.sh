@@ -4,27 +4,28 @@
 # 版本管理：读 package.json 的 version 字段。
 # 产物路径：<plugin>/.dist/<name>-<version>.tgz
 #
-# 三种安装模式（互斥）：
+# 安装模式（互斥）：
 #   -d          开发模式：link 源码到 profile（改完代码即生效）
-#   -i          部署模式：从 .dist/ tarball 安装（版本锁定到打包时的快照）
-#   -u          升级模式：从 .dist/ tarball 更新（同 -i，先移除旧依赖再装）
-#   --restart   安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/dsh.sh --restart）
+#   -i/install  部署模式：从 .dist/ tarball 安装（版本锁定到打包时的快照）
+#   -u/upgrade  升级模式：从 .dist/ tarball 更新（同 -i，先移除旧依赖再装）
+#   release     发布：bump（可选）+ pack + push
+#   -r/--restart 安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/dsh.sh --restart）
 #
 # 用法：
-#   run.sh <plugin> -d [--restart]                        开发：link 源码，可选重启
-#   run.sh <plugin> -r [major|minor|patch] [-t]          发布：bump + pack + push
-#   run.sh <plugin> -r [level] -i [--restart]           发布 + 装 tarball，可选重启
-#   run.sh <plugin> -r [level] -u [--restart]            发布 + 升级 tarball，可选重启
-#   run.sh <plugin> -i [--restart]                       装 .dist/ tarball，可选重启
-#   run.sh <plugin> -u [--restart]                      升级 .dist/ tarball，可选重启
+#   run.sh <plugin> -d [-r]                             开发：link 源码，可选重启
+#   run.sh <plugin> release [major|minor|patch] [-t]   发布：bump + pack + push
+#   run.sh <plugin> release [level] -i [-r]            发布 + 装 tarball，可选重启
+#   run.sh <plugin> release [level] -u [-r]            发布 + 升级 tarball，可选重启
+#   run.sh <plugin> -i [-r]                            装 .dist/ tarball，可选重启
+#   run.sh <plugin> -u [-r]                            升级 .dist/ tarball，可选重启
 #
 # 示例：
-#   run.sh dsh-cron-loop -d --restart       开发：link 源码 + 重启
-#   run.sh dsh-cron-loop -r patch           发布：bump + pack + push
-#   run.sh dsh-cron-loop -r patch -u --restart 发布 + 升级 tarball + 重启
-#   run.sh dsh-cron-loop -r patch -t -i --restart 发布 + tag + 装 tarball + 重启
-#   run.sh dsh-cron-loop -i                 装当前版本 tarball（不重启）
-#   run.sh dsh-cron-loop -u --restart        升级当前版本 tarball + 重启
+#   run.sh dsh-cron-loop -d -r              开发：link 源码 + 重启
+#   run.sh dsh-cron-loop release patch       发布：bump + pack + push
+#   run.sh dsh-cron-loop release -u -r       发布（保持版本）+ 升级 tarball + 重启
+#   run.sh dsh-cron-loop release patch -t -i -r 发布 + tag + 装 tarball + 重启
+#   run.sh dsh-cron-loop install -r          装当前版本 tarball + 重启
+#   run.sh dsh-cron-loop upgrade             升级当前版本 tarball（不重启）
 
 set -euo pipefail
 
@@ -122,7 +123,7 @@ find_tarball() {
   tarball="$PLUGIN_DIR/.dist/$name-$version.tgz"
   if [[ ! -f "$tarball" ]]; then
     err "未找到 tarball: $tarball"
-    err "请先运行: run.sh $PLUGIN -r"
+    err "请先运行: run.sh $PLUGIN release"
     exit 1
   fi
   echo "$tarball"
@@ -170,6 +171,26 @@ do_release() {
     log "无 typecheck 脚本，跳过"
   fi
 
+  # 编译 + 暂存目录（有 build 脚本才走）。
+  # Node 拒绝对 node_modules 下的 .ts 做 type stripping，tarball 必须装编译产物：
+  # 暂存目录放 dist/ + package.json + 指向 dist/*.js 的发布版 cordis.patch.yml。
+  local stage_dir=""
+  if node -e "process.exit(require('$PLUGIN_DIR/package.json').scripts?.build ? 0 : 1)" 2>/dev/null; then
+    log "编译产物..."
+    (cd "$PLUGIN_DIR" && pnpm build)
+    stage_dir="$(mktemp -d)"
+    rm -rf "$stage_dir"
+    mkdir -p "$stage_dir"
+    cp "$PLUGIN_DIR/package.json" "$stage_dir/package.json"
+    cp -R "$PLUGIN_DIR/dist" "$stage_dir/dist"
+    cp "$PLUGIN_DIR/README.md" "$stage_dir/README.md" 2>/dev/null || true
+    # 发布版 patch：./plugins/<id>.ts -> ./dist/<id>.js（仓库源 patch 保持 .ts 供 link 开发模式用）
+    sed 's|\./plugins/\([^.]*\)\.ts|./dist/\1.js|g' "$PLUGIN_DIR/cordis.patch.yml" > "$stage_dir/cordis.patch.yml"
+    log "暂存目录: $stage_dir"
+  else
+    log "无 build 脚本，按源码打包"
+  fi
+
   # git add + commit（版本有变才 commit）
   if [[ "$level" != "keep" ]]; then
     (cd "$SCRIPT_DIR" && git add "$PLUGIN/package.json")
@@ -183,22 +204,22 @@ do_release() {
     log "git tag ${PLUGIN}-v$new_version 已创建"
   fi
 
-  # pnpm pack 打 tarball 到 .dist/
+  # pnpm pack 打 tarball 到 .dist/（有暂存目录则从暂存目录打包，否则从源码目录打包）
   local dist_dir="$PLUGIN_DIR/.dist"
   rm -rf "$dist_dir"
   mkdir -p "$dist_dir"
   log "打包 tarball..."
-  local name
+  local name pack_dir="$PLUGIN_DIR"
   name="$(get_name)"
-  (cd "$PLUGIN_DIR" && pnpm pack --pack-destination "$dist_dir" >/dev/null 2>&1)
+  [[ -n "$stage_dir" ]] && pack_dir="$stage_dir"
+  (cd "$pack_dir" && pnpm pack --pack-destination "$dist_dir" >/dev/null 2>&1)
   local tarball="$name-$new_version.tgz"
   if [[ ! -f "$dist_dir/$tarball" ]]; then
     err "pnpm pack 未生成 $dist_dir/$tarball"
     exit 1
   fi
   log "tarball: $dist_dir/$tarball"
-
-  # git push（commit 必推，tag 有则推）
+  rm -rf "$stage_dir"
   if [[ "$do_tag" == "true" ]]; then
     log "推送 git commit 和 tag..."
     (cd "$SCRIPT_DIR" && git push origin main && git push origin "${PLUGIN}-v$new_version")
@@ -219,9 +240,11 @@ do_dev() {
   version="$(get_version)"
   log "切换到源码模式 (link): $PLUGIN_DIR"
 
+  # npm_config_loglevel=error：抑制 pnpm 的 missing-peer WARN（宿主包由 dsh 运行时注入，
+  # 不在 profile node_modules，pnpm 静态看不到必然告警；只留真错误）
   # 先移除旧依赖（可能是 tarball），再加 link
   "$dsh_bin" plugin --profile web remove "$name" 2>/dev/null || true
-  "$dsh_bin" plugin --profile web add "link:$PLUGIN_DIR"
+  npm_config_loglevel=error "$dsh_bin" plugin --profile web add "link:$PLUGIN_DIR"
   log "已链接源码: $name v${version} (源码)"
 }
 
@@ -236,8 +259,9 @@ do_install() {
   log "安装 tarball: $tarball"
 
   # 先移除旧依赖（可能是 link 或旧 tarball），再装新 tarball
+  # npm_config_loglevel=error：抑制 pnpm 的 missing-peer WARN（同 do_dev 注释）
   "$dsh_bin" plugin --profile web remove "$name" 2>/dev/null || true
-  "$dsh_bin" plugin --profile web add "$tarball"
+  npm_config_loglevel=error "$dsh_bin" plugin --profile web add "$tarball"
   log "安装完成: $name v${version} (tarball)"
 }
 
@@ -252,8 +276,9 @@ do_upgrade() {
   log "升级到 tarball: $tarball"
 
   # 移除旧依赖（可能是 link 或旧 tarball），再装新 tarball
+  # npm_config_loglevel=error：抑制 pnpm 的 missing-peer WARN（同 do_dev 注释）
   "$dsh_bin" plugin --profile web remove "$name" 2>/dev/null || true
-  "$dsh_bin" plugin --profile web add "$tarball"
+  npm_config_loglevel=error "$dsh_bin" plugin --profile web add "$tarball"
   log "升级完成: $name v${version} (tarball)"
 }
 
@@ -270,31 +295,31 @@ DO_RESTART=false
 usage() {
   cat << 'USAGE'
 用法：
-  run.sh <plugin> -d [--restart]                   开发：link 源码，可选重启
-  run.sh <plugin> -r [major|minor|patch] [-t]      发布：bump + pack + push
-  run.sh <plugin> -r [level] -i [--restart]        发布 + 装 tarball，可选重启
-  run.sh <plugin> -r [level] -u [--restart]        发布 + 升级 tarball，可选重启
-  run.sh <plugin> -i [--restart]                   装当前版本 tarball，可选重启
-  run.sh <plugin> -u [--restart]                   升级当前版本 tarball，可选重启
+  run.sh <plugin> -d [-r]                          开发：link 源码，可选重启
+  run.sh <plugin> release [major|minor|patch] [-t] 发布：bump + pack + push
+  run.sh <plugin> release [level] -i [-r]         发布 + 装 tarball，可选重启
+  run.sh <plugin> release [level] -u [-r]         发布 + 升级 tarball，可选重启
+  run.sh <plugin> -i [-r]                         装当前版本 tarball，可选重启
+  run.sh <plugin> -u [-r]                         升级当前版本 tarball，可选重启
 
 选项：
   -d            开发模式：link 源码到 profile
-  -r [level]    发布。level 可选：major|minor|patch；不传则用当前版本打包
+  release       发布。level 可选：major|minor|patch；不传则用当前版本打包
   -t            发布时打 git tag (格式：<plugin>-v<version>)，默认不打
-  -i            从 .dist/ tarball 安装（按 package.json version 匹配）
-  -u            从 .dist/ tarball 升级（同 -i，先移除旧依赖）
-  --restart     安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/dsh.sh --restart）
+  -i / install  从 .dist/ tarball 安装（按 package.json version 匹配）
+  -u / upgrade  从 .dist/ tarball 升级（同 -i，先移除旧依赖）
+  -r            安装/升级/开发模式后重启 dsh web（--restart 的简写）
   -h            显示帮助
 
 互斥：-d / -i / -u 三选一
 
 示例：
-  run.sh dsh-cron-loop -d --restart        开发：link 源码 + 重启
-  run.sh dsh-cron-loop -r patch            发布：bump + pack + push
-  run.sh dsh-cron-loop -r patch -u --restart 发布 + 升级 tarball + 重启
-  run.sh dsh-cron-loop -r patch -t -i --restart 发布 + tag + 装 tarball + 重启
-  run.sh dsh-cron-loop -i                 装当前版本 tarball（不重启）
-  run.sh dsh-cron-loop -u --restart        升级当前版本 tarball + 重启
+  run.sh dsh-cron-loop -d -r               开发：link 源码 + 重启
+  run.sh dsh-cron-loop release patch        发布：bump + pack + push
+  run.sh dsh-cron-loop release -u -r        发布（保持版本）+ 升级 tarball + 重启
+  run.sh dsh-cron-loop release patch -t -i -r 发布 + tag + 装 tarball + 重启
+  run.sh dsh-cron-loop install -r           装当前版本 tarball + 重启
+  run.sh dsh-cron-loop upgrade              升级当前版本 tarball（不重启）
 USAGE
   exit 0
 }
@@ -309,7 +334,7 @@ shift
 # 手动解析
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -r)
+    release)
       DO_RELEASE=true
       shift
       if [[ $# -gt 0 && "$1" =~ ^(major|minor|patch)$ ]]; then
@@ -321,9 +346,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     -d) DO_DEV=true; shift ;;
     -t) DO_TAG=true; shift ;;
-    -i) DO_INSTALL=true; shift ;;
-    -u) DO_UPGRADE=true; shift ;;
-    --restart) DO_RESTART=true; shift ;;
+    -i|install) DO_INSTALL=true; shift ;;
+    -u|upgrade) DO_UPGRADE=true; shift ;;
+    -r|--restart) DO_RESTART=true; shift ;;
     -h|--help) usage ;;
     *) err "未知选项: $1"; usage ;;
   esac
@@ -362,7 +387,7 @@ if [[ "$DO_RESTART" == true ]]; then
   restart_dsh_web
 fi
 
-# 只有插件名没有操作时显示用法
-if [[ "$DO_RELEASE" == false && "$DO_DEV" == false && "$DO_INSTALL" == false && "$DO_UPGRADE" == false ]]; then
+# 只有插件名没有任何操作（含仅重启）时显示用法
+if [[ "$DO_RELEASE" == false && "$DO_DEV" == false && "$DO_INSTALL" == false && "$DO_UPGRADE" == false && "$DO_RESTART" == false ]]; then
   usage
 fi
