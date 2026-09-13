@@ -18,9 +18,10 @@ function fail(text: string): CommandResult {
 }
 
 /** 任务行（列表渲染）。 */
-function jobLine(job: { id: string; enabled: boolean; cron: string; name: string; cwd: string; nextRunAt?: number }): string {
+function jobLine(job: { id: string; enabled: boolean; cron: string; name: string; cwd: string; nextRunAt?: number; runStats?: { total: number; ok: number } }): string {
   const next = job.nextRunAt !== undefined ? new Date(job.nextRunAt).toLocaleString() : '—'
-  return `${job.id} | ${job.enabled ? '✅' : '⏸'} | ${job.cron} | 下次: ${next} | ${job.name} | ${job.cwd}`
+  const stats = job.runStats !== undefined ? ` (${job.runStats.ok}/${job.runStats.total})` : ''
+  return `${job.id} | ${job.enabled ? '✅' : '⏸'} | ${job.cron} | 下次: ${next} | ${job.name}${stats} | ${job.cwd}`
 }
 
 /**

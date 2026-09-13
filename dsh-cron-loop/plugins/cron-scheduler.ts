@@ -198,6 +198,16 @@ async function mergeJobUpdate(store: { jobs: { get(id: string): CronJobRecord | 
   if (current === undefined) return // job 已被删除，丢弃更新
   await store.putJob({ ...current, ...patch })
 }
+
+/**
+ * 终态计数：total 在每轮结束（成功或失败）时 +1，ok 仅成功时 +1。
+ * 用 read-modify-write 递增而非绝对值赋值，避免重试/换模型等一轮多次收口互相覆盖。
+ * 模型池耗尽等「本轮未真正执行」的提前返回不计入。
+ */
+function countRun(job: CronJobRecord, succeeded: boolean): CronJobRecord['runStats'] {
+  const stats = job.runStats ?? { total: 0, ok: 0 }
+  return { total: stats.total + 1, ok: stats.ok + (succeeded ? 1 : 0) }
+}
 /** 执行一个到期任务：写 running run -> agent 回合 -> 收口写结果 run。
  * 支持模型池：每轮选优先级最高的可用模型，额度耗尽自动切换下一个重试。 */
 async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
@@ -265,7 +275,7 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
     const finishedAt = Date.now()
     const message = error instanceof Error ? error.message : String(error)
     await store.putRun({ ...running, finishedAt, status: 'error', error: message })
-    await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+    await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt, runStats: countRun(job, false) })
     ctx.logger?.error?.(`cron-scheduler: job ${job.id} failed: ${message}`)
   } finally {
     const latest = store.jobs.get(job.id)
@@ -316,7 +326,7 @@ async function executeRound(ctx: Context, job: CronJobRecord, running: CronRunRe
     if (failure !== null) {
       const summary = text !== '' ? text.slice(0, 500) : `模型失败: ${failure.code} - ${failure.message}`.slice(0, 500)
       await store.putRun({ ...running, finishedAt, status: 'error', sessionId: actualSid, error: `${failure.code}: ${failure.message}`, summary })
-      await mergeJobUpdate(store, job.id, { sessionId: actualSid, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+      await mergeJobUpdate(store, job.id, { sessionId: actualSid, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt, runStats: countRun(job, false) })
       ctx.logger?.error?.(`cron-scheduler: job ${job.id} turn ended with error: ${failure.code}: ${failure.message}`)
       return { succeeded: false, failure }
     }
@@ -325,7 +335,7 @@ async function executeRound(ctx: Context, job: CronJobRecord, running: CronRunRe
       // 后续轮次的 pre-turn whenIdle 会等它真正空闲再注入，不会重叠。
       const summary = text !== '' ? text.slice(0, 500) : '执行超时，未产生最终文本'
       await store.putRun({ ...running, finishedAt, status: 'error', sessionId: actualSid, error: 'TIMEOUT: 执行超时，agent 未在时限内结束本回合', summary })
-      await mergeJobUpdate(store, job.id, { sessionId: actualSid, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+      await mergeJobUpdate(store, job.id, { sessionId: actualSid, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt, runStats: countRun(job, false) })
       ctx.logger?.error?.(`cron-scheduler: job ${job.id} turn timed out after ${RUN_TIMEOUT_MS}ms`)
       return { succeeded: false, failure: null }
     }
@@ -333,14 +343,14 @@ async function executeRound(ctx: Context, job: CronJobRecord, running: CronRunRe
       ? text.slice(0, 500)
       : '执行完成（无文本输出）'
     await store.putRun({ ...running, finishedAt, status: 'ok', sessionId: actualSid, summary })
-    await mergeJobUpdate(store, job.id, { sessionId: actualSid, lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
+    await mergeJobUpdate(store, job.id, { sessionId: actualSid, lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt, runStats: countRun(job, true) })
     ctx.logger?.info?.(`cron-scheduler: job ${job.id} finished ok in ${finishedAt - startedAt}ms`)
     return { succeeded: true, failure: null }
   } catch (error: unknown) {
     const finishedAt = Date.now()
     const message = error instanceof Error ? error.message : String(error)
     await store.putRun({ ...running, finishedAt, status: 'error', sessionId: String(sid) !== '' ? String(sid) : undefined, error: message })
-    await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+    await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt, runStats: countRun(job, false) })
     ctx.logger?.error?.(`cron-scheduler: job ${job.id} round failed: ${message}`)
     return { succeeded: false, failure: { code: 'UNKNOWN', message } }
   }
@@ -541,7 +551,8 @@ export function apply(ctx: Context): void {
           if (jobs.length === 0) return textResult('暂无定时任务')
           const lines = jobs.map((job) => {
             const next = job.nextRunAt !== undefined ? new Date(job.nextRunAt).toLocaleString() : '—'
-            return `${job.id} | ${job.enabled ? '✅' : '⏸'} | ${job.cron} | 下次: ${next} | ${job.cwd} | ${job.name}`
+            const stats = job.runStats !== undefined ? ` (${job.runStats.ok}/${job.runStats.total})` : ''
+            return `${job.id} | ${job.enabled ? '✅' : '⏸'} | ${job.cron} | 下次: ${next} | ${job.cwd} | ${job.name}${stats}`
           })
           return textResult(['id | 状态 | cron | 下次触发 | 目录 | 名称', ...lines].join('\n'))
         }

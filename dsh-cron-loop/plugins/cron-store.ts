@@ -45,6 +45,8 @@ export interface CronJobRecord {
   lastStatus?: 'ok' | 'error' | 'running'
   /** 由调度器刷新的下次触发时间（epoch ms）。 */
   nextRunAt?: number
+  /** 累计执行统计：total 总轮次，ok 成功轮次（由调度器在每轮终态时递增）。 */
+  runStats?: { total: number; ok: number }
 }
 
 /** 一次执行记录。 */
@@ -90,6 +92,7 @@ const jobSchema = z.object({
   lastRunAt: z.number().optional(),
   lastStatus: z.enum(['ok', 'error', 'running']).optional(),
   nextRunAt: z.number().optional(),
+  runStats: z.object({ total: z.number(), ok: z.number() }).optional(),
 })
 
 /** zod 校验：run 记录。 */

@@ -255,7 +255,7 @@ function renderJobsTable(jobs) {
     const next = job.nextRunAtView ? new Date(job.nextRunAtView).toLocaleString() : '-'
     const last = job.lastRunAt ? new Date(job.lastRunAt).toLocaleString() : '-'
     return `<tr data-id="${job.id}">
-      <td><b>${esc(job.id)}</b><br><span class="cwd">${esc(job.name)}</span></td>
+      <td><b>${esc(job.id)}</b><br><span class="cwd">${esc(job.name)}${job.runStats ? ` (${job.runStats.ok}/${job.runStats.total})` : ''}</span></td>
       <td>${status}</td>
       <td><b>${esc(job.cronHuman || job.cron)}</b><br><code>${esc(job.cron)}</code></td>
       <td>${esc(next)}<br><span class="cwd">上次: ${esc(last)}</span></td>
