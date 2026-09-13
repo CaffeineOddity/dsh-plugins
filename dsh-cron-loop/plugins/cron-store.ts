@@ -12,7 +12,7 @@ import type { Dirent } from 'node:fs'
 
 /** 一条定时任务。 */
 export interface CronJobRecord {
-  /** 任务 id（`cron-<序号>`）。 */
+  /** 任务 id（创建时刻时间戳：`年月日时分秒.毫秒`）。 */
   id: string
   /** 展示名（默认取 prompt 前 24 字）。 */
   name: string
