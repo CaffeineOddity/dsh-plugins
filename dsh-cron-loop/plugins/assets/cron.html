@@ -29,8 +29,9 @@
   .pill.running { background: rgba(210,153,34,.15); color: var(--run); }
   .pill.off { background: rgba(139,147,163,.15); color: var(--muted); }
   .cwd { color: var(--muted); font-size: 12px; }
-  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; justify-items: stretch; }
-  .actions button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 3px 8px; cursor: pointer; font-size: 12px; width: 100%; }
+  /* 操作列：td 内包一层 grid（display:grid 不能直接放 td 上，会破坏表格布局） */
+  .actions .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+  .actions button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 3px 8px; cursor: pointer; font-size: 12px; width: 100%; white-space: nowrap; }
   .actions button:hover { border-color: var(--accent); color: var(--accent); }
   .actions button.danger:hover { border-color: var(--err); color: var(--err); }
   dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: 460px; max-width: 92vw; }
@@ -262,12 +263,12 @@ function renderJobsTable(jobs) {
       <td>${esc(next)}<br><span class="cwd">上次: ${esc(last)}</span></td>
       <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}${job.continuous ? '<br>🔄 连续执行' : ''}${job.continuous && job.newSessionPerRun ? '（每轮新会话）' : ''}</td>
       <td class="summary" title="${esc(job.prompt)}">${esc(job.prompt)}</td>
-      <td class="actions">
+      <td class="actions"><div class="btn-grid">
         <button data-act="edit">编辑</button>
         <button data-act="remove" class="danger">删除</button>
         <button data-act="toggle">${job.enabled ? '暂停' : '恢复'}</button>
         <button data-act="trigger">立即跑</button>
-      </td>
+      </div></td>
     </tr>`
   })
   return `<table>
