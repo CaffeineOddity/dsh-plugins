@@ -524,7 +524,7 @@ export function apply(ctx: Context): void {
       enabled: { type: 'boolean', description: '启用状态' },
       permissionMode: { type: 'string', enum: ['read-only', 'workspace-write', 'danger-full-access'], description: '权限模式（缺省 danger-full-access；read-only/workspace-write 会弹审批，不适合无人值守）' },
       continuous: { type: 'boolean', description: '连续执行（缺省 false；true 时成功后立即续跑下一轮，不等 cron 触发）' },
-      newSessionPerRun: { type: 'boolean', description: '每轮新会话（缺省 false 沿用同一会话，仅旧会话归档后才新建）' },
+      newSessionPerRun: { type: 'boolean', description: '每轮新会话（缺省 false 沿用同一会话）' },
     },
     output: {
       schema: { type: 'string' },

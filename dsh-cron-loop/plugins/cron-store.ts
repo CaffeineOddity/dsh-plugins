@@ -28,8 +28,7 @@ export interface CronJobRecord {
   permissionMode?: string
   /** 连续执行：成功后立即续跑下一轮，不等 cron 触发。缺省 false。 */
   continuous?: boolean
-  /** 每轮新会话：true 时每轮生成新 sessionId；缺省 false 沿用同一会话，
-   * 仅当旧会话已归档时才新建。 */
+  /** 每轮新会话：true 时每轮生成新 sessionId；缺省 false 沿用同一会话。 */
   newSessionPerRun?: boolean
   /** 保留字段：v1 固定本地时区。 */
   timezone: string
