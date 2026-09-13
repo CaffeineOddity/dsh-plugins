@@ -206,6 +206,10 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
     ctx.logger?.warn?.(`cron-scheduler: job ${job.id} no longer in store, skipping runJob`)
     return
   }
+  // inFlight 由 runJob 统一持有：入口 add，finally 释放。tick/trigger 只做检查，
+  // 链式续跑先释放再同步进入下一轮 runJob（无 await 间隙，不会与 tick 竞争）。
+  if (inFlight.has(job.id)) return
+  inFlight.add(job.id)
   const runId = `run-${job.id}-${Date.now()}`
   const startedAt = Date.now()
   const running: CronRunRecord = { id: runId, jobId: job.id, jobName: job.name, startedAt, status: 'running' }
@@ -213,20 +217,23 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'running' })
 
   // 模型池选模型：每轮取优先级最高的可用模型。
+  // 先 reload 再判断 isEnabled：否则用的是启动时的内存缓存，用户刚清空/改动池子
+  // 会被误判进池子分支，把「未配置」当成「全部耗尽」。
   let modelOverride: ModelSelection | undefined = undefined
-  if (modelPool !== null && modelPool.isEnabled) {
+  if (modelPool !== null) {
     await modelPool.reload()
-    const picked = modelPool.pickAvailable()
-    if (picked === null) {
-      // 所有模型额度用光 -> 暂停任务
-      const msg = 'all models exhausted'
-      ctx.logger?.warn?.(`cron-scheduler: job ${job.id} ${msg}, pausing`)
-      await store.putRun({ ...running, finishedAt: Date.now(), status: 'error', error: msg })
-      await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: Date.now(), enabled: false })
-      inFlight.delete(job.id)
-      return
+    if (modelPool.isEnabled) {
+      const picked = modelPool.pickAvailable()
+      if (picked === null) {
+        // 所有模型额度用光 -> 暂停任务
+        const msg = 'all models exhausted'
+        ctx.logger?.warn?.(`cron-scheduler: job ${job.id} ${msg}, pausing`)
+        await store.putRun({ ...running, finishedAt: Date.now(), status: 'error', error: msg })
+        await mergeJobUpdate(store, job.id, { lastRunAt: startedAt, lastStatus: 'error', updatedAt: Date.now(), enabled: false })
+        return
+      }
+      modelOverride = picked
     }
-    modelOverride = picked
   }
 
   ctx.logger?.info?.(`cron-scheduler: job ${job.id} (${job.name}) fired${modelOverride !== undefined ? ` model=${modelOverride.id}` : ''}`)
@@ -262,12 +269,11 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
     ctx.logger?.error?.(`cron-scheduler: job ${job.id} failed: ${message}`)
   } finally {
     const latest = store.jobs.get(job.id)
-    if (succeeded && latest?.continuous === true && latest.enabled === true) {
-      ctx.logger?.info?.(`cron-scheduler: job ${job.id} continuous -> chaining next round`)
-      void runJob(ctx, latest)
-    } else {
-      inFlight.delete(job.id)
-    }
+    const chain = succeeded && latest?.continuous === true && latest.enabled === true
+    if (chain) ctx.logger?.info?.(`cron-scheduler: job ${job.id} continuous -> chaining next round`)
+    // 先释放标记，再同步进入下一轮 runJob（其入口会立刻 add，无竞态窗口）。
+    inFlight.delete(job.id)
+    if (chain && latest !== undefined) void runJob(ctx, latest)
   }
 }
 
@@ -281,12 +287,13 @@ interface RoundResult {
  * modelOverride 为模型池选的模型；undefined 时用 agentDefaultModel。 */
 async function executeRound(ctx: Context, job: CronJobRecord, running: CronRunRecord, startedAt: number, modelOverride: ModelSelection | undefined): Promise<RoundResult> {
   const store = ctx.cronLoopStore
-  // 模型切换重试时用新会话（旧会话可能残留失败状态）。
+  // 会话策略：newSessionPerRun=true 每轮新会话；缺省沿用 job.sessionId 续跑，
+  // 仅当它已归档（或首次执行无 sessionId）时才新建。模型池换模型走 resume，
+  // 由 agentOptions 传入新模型，不再强制换会话。
   let sessionStr = job.sessionId ?? randomUUID()
-  if (job.sessionId !== undefined && isArchived(ctx, job.sessionId)) {
+  if (job.newSessionPerRun === true) {
     sessionStr = randomUUID()
-  }
-  if (modelOverride !== undefined) {
+  } else if (job.sessionId !== undefined && isArchived(ctx, job.sessionId)) {
     sessionStr = randomUUID()
   }
   const sid = SessionId(sessionStr)
@@ -308,16 +315,25 @@ async function executeRound(ctx: Context, job: CronJobRecord, running: CronRunRe
     const finishedAt = Date.now()
     if (failure !== null) {
       const summary = text !== '' ? text.slice(0, 500) : `模型失败: ${failure.code} - ${failure.message}`.slice(0, 500)
-      await store.putRun({ ...running, finishedAt, status: 'error', sessionId: String(sid), error: `${failure.code}: ${failure.message}`, summary })
-      await mergeJobUpdate(store, job.id, { sessionId: String(sid), lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+      await store.putRun({ ...running, finishedAt, status: 'error', sessionId: actualSid, error: `${failure.code}: ${failure.message}`, summary })
+      await mergeJobUpdate(store, job.id, { sessionId: actualSid, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
       ctx.logger?.error?.(`cron-scheduler: job ${job.id} turn ended with error: ${failure.code}: ${failure.message}`)
       return { succeeded: false, failure }
     }
+    if (wait === 'timeout') {
+      // 超时≠成功：agent 可能仍在执行本轮。记 error 且不链下一轮，
+      // 后续轮次的 pre-turn whenIdle 会等它真正空闲再注入，不会重叠。
+      const summary = text !== '' ? text.slice(0, 500) : '执行超时，未产生最终文本'
+      await store.putRun({ ...running, finishedAt, status: 'error', sessionId: actualSid, error: 'TIMEOUT: 执行超时，agent 未在时限内结束本回合', summary })
+      await mergeJobUpdate(store, job.id, { sessionId: actualSid, lastRunAt: startedAt, lastStatus: 'error', updatedAt: finishedAt })
+      ctx.logger?.error?.(`cron-scheduler: job ${job.id} turn timed out after ${RUN_TIMEOUT_MS}ms`)
+      return { succeeded: false, failure: null }
+    }
     const summary = text !== ''
       ? text.slice(0, 500)
-      : (wait === 'timeout' ? '执行超时，未产生最终文本' : '执行完成（无文本输出）')
-    await store.putRun({ ...running, finishedAt, status: 'ok', sessionId: String(sid), summary })
-    await mergeJobUpdate(store, job.id, { sessionId: String(sid), lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
+      : '执行完成（无文本输出）'
+    await store.putRun({ ...running, finishedAt, status: 'ok', sessionId: actualSid, summary })
+    await mergeJobUpdate(store, job.id, { sessionId: actualSid, lastRunAt: startedAt, lastStatus: 'ok', updatedAt: finishedAt })
     ctx.logger?.info?.(`cron-scheduler: job ${job.id} finished ok in ${finishedAt - startedAt}ms`)
     return { succeeded: true, failure: null }
   } catch (error: unknown) {
@@ -361,7 +377,6 @@ async function tick(ctx: Context): Promise<void> {
     // 触发判定：当前分钟是否命中 cron 计划。tick 每 30s 扫一次，同一分钟内
     // 可能命中两次，但 inFlight 标记保证一个 job 同时至多一个在途执行。
     if (matches(plan, new Date(now)) && !inFlight.has(job.id)) {
-      inFlight.add(job.id)
       const current = store.jobs.get(job.id)
       void runJob(ctx, current ?? { ...job, nextRunAt: next.getTime() })
     }
@@ -387,14 +402,13 @@ async function triggerJobNowOn(ctx: Context, jobId: string): Promise<void> {
   const job = ctx.cronLoopStore.jobs.get(jobId)
   if (job === undefined) throw new Error(`cron-scheduler: job ${jobId} not found`)
   if (inFlight.has(jobId)) throw new Error(`cron-scheduler: job ${jobId} already running`)
-  inFlight.add(jobId)
   await runJob(ctx, job)
 }
 
 /** 新建任务的公共入口（工具/命令/Web 共用）：校验 cron、生成 id、落盘。 */
 export async function createJob(
   ctx: Context,
-  input: { name?: string; cwd: string; cron: string; prompt: string; enabled?: boolean; permissionMode?: string; continuous?: boolean },
+  input: { name?: string; cwd: string; cron: string; prompt: string; enabled?: boolean; permissionMode?: string; continuous?: boolean; newSessionPerRun?: boolean },
 ): Promise<CronJobRecord> {
   parseCron(input.cron) // 非法即抛 CronParseError
   const cwd = normalizeCwd(input.cwd)
@@ -416,6 +430,7 @@ export async function createJob(
     enabled: input.enabled ?? true,
     permissionMode: input.permissionMode ?? 'danger-full-access',
     continuous: input.continuous ?? false,
+    newSessionPerRun: input.newSessionPerRun ?? false,
     timezone: 'local',
     createdAt: now,
     updatedAt: now,
@@ -436,6 +451,7 @@ interface CronToolArgs {
   enabled?: boolean
   permissionMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
   continuous?: boolean
+  newSessionPerRun?: boolean
 }
 
 /** 文本输出（output schema: string，render 原样返回）。 */
@@ -490,6 +506,7 @@ export function apply(ctx: Context): void {
       enabled: { type: 'boolean', description: '启用状态' },
       permissionMode: { type: 'string', enum: ['read-only', 'workspace-write', 'danger-full-access'], description: '权限模式（缺省 danger-full-access；read-only/workspace-write 会弹审批，不适合无人值守）' },
       continuous: { type: 'boolean', description: '连续执行（缺省 false；true 时成功后立即续跑下一轮，不等 cron 触发）' },
+      newSessionPerRun: { type: 'boolean', description: '每轮新会话（缺省 false 沿用同一会话，仅旧会话归档后才新建）' },
     },
     output: {
       schema: { type: 'string' },
@@ -515,6 +532,7 @@ export function apply(ctx: Context): void {
             prompt: args.prompt,
             permissionMode: args.permissionMode,
             continuous: args.continuous,
+            newSessionPerRun: args.newSessionPerRun,
           })
           return textResult(`已创建任务 ${job.id}「${job.name}」\ncron: ${job.cron}\n目录: ${job.cwd}\nprompt: ${job.prompt}`)
         }
@@ -539,10 +557,11 @@ export function apply(ctx: Context): void {
             name: args.name ?? job.name,
             enabled: args.enabled ?? job.enabled,
             continuous: args.continuous ?? job.continuous,
+            newSessionPerRun: args.newSessionPerRun ?? job.newSessionPerRun,
             updatedAt: Date.now(),
           }
           await store.putJob(next)
-          return textResult(`已更新 ${job.id}: cron=${next.cron} enabled=${String(next.enabled)} continuous=${String(next.continuous ?? false)}`)
+          return textResult(`已更新 ${job.id}: cron=${next.cron} enabled=${String(next.enabled)} continuous=${String(next.continuous ?? false)} newSessionPerRun=${String(next.newSessionPerRun ?? false)}`)
         }
         case 'remove': {
           if (args.id === undefined) throw new Error('cron_job remove: id is required')

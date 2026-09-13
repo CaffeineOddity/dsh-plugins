@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { homedir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
 import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import type { Dirent } from 'node:fs'
 
 /** 一条定时任务。 */
 export interface CronJobRecord {
@@ -28,6 +28,9 @@ export interface CronJobRecord {
   permissionMode?: string
   /** 连续执行：成功后立即续跑下一轮，不等 cron 触发。缺省 false。 */
   continuous?: boolean
+  /** 每轮新会话：true 时每轮生成新 sessionId；缺省 false 沿用同一会话，
+   * 仅当旧会话已归档时才新建。 */
+  newSessionPerRun?: boolean
   /** 保留字段：v1 固定本地时区。 */
   timezone: string
   /** 绑定的会话 id（首次执行时生成，之后固定复用）。 */
@@ -80,6 +83,7 @@ const jobSchema = z.object({
   timezone: z.string(),
   permissionMode: z.string().optional(),
   continuous: z.boolean().optional(),
+  newSessionPerRun: z.boolean().optional(),
   sessionId: z.string().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
@@ -193,21 +197,16 @@ async function readRunsInDir(dir: string): Promise<CronRunRecord[]> {
   return runs
 }
 
-/** 扫描 crons 根目录下所有项目子目录。 */
+/** 扫描 crons 根目录下所有项目子目录（跳过 .DS_Store 等非目录条目）。 */
 async function readAllProjectDirs(): Promise<string[]> {
-  let entries: string[]
+  let entries: Dirent[]
   try {
-    entries = await readdir(cronsRoot())
+    entries = await readdir(cronsRoot(), { withFileTypes: true })
   } catch (error: unknown) {
     if (error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return []
     throw error
   }
-  const dirs: string[] = []
-  for (const entry of entries) {
-    const full = join(cronsRoot(), entry)
-    if (existsSync(full)) dirs.push(full)
-  }
-  return dirs
+  return entries.filter(entry => entry.isDirectory()).map(entry => join(cronsRoot(), entry.name))
 }
 
 /** cron-loop 存储服务：按项目目录分组的文件树读写。 */

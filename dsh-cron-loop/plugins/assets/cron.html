@@ -70,6 +70,20 @@
   .runs-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
   .runs-toolbar button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
   .runs-toolbar button.danger:hover { border-color: var(--err); color: var(--err); }
+  /* 模型池 */
+  #poolDlg { width: 600px; }
+  .pool-row { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; background: var(--bg); }
+  .pool-row .idx { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--panel); border: 1px solid var(--border); color: var(--muted); font-size: 12px; display: flex; align-items: center; justify-content: center; }
+  .pool-row .info { flex: 1; min-width: 0; }
+  .pool-row .info .cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pool-row select, .pool-row input[type="number"] { width: auto; padding: 3px 6px; font-size: 12px; flex: none; }
+  .pool-row input[type="number"] { width: 56px; }
+  .pool-row button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 3px 7px; cursor: pointer; font-size: 12px; flex: none; }
+  .pool-row button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .pool-row button.danger:hover { border-color: var(--err); color: var(--err); }
+  .pool-row button:disabled { opacity: .35; cursor: default; }
+  .pool-chip { display: inline-block; padding: 4px 12px; margin: 0 6px 6px 0; border: 1px dashed var(--border); border-radius: 14px; cursor: pointer; font-size: 12px; }
+  .pool-chip:hover { border-color: var(--accent); color: var(--accent); border-style: solid; }
 </style>
 </head>
 <body>
@@ -100,6 +114,7 @@
     <option value="read-only">仅可查看</option>
   </select>
   <label class="checkbox-row"><input type="checkbox" id="fContinuous"> 连续执行（成功后立即续跑下一轮，不等 cron 触发）</label>
+  <label class="checkbox-row"><input type="checkbox" id="fNewSession"> 每轮新会话（缺省沿用同一会话，仅旧会话归档后才新建）</label>
   <div class="row">
     <button id="btnCancel">取消</button>
     <button id="btnSave" class="primary">保存</button>
@@ -109,11 +124,11 @@
 <dialog id="poolDlg">
   <h3>模型池配置</h3>
   <label class="checkbox-row"><input type="checkbox" id="poolEnabled"> 启用模型池（关闭时用 DSH 默认模型）</label>
-  <label>模型列表（JSON 数组）</label>
-  <textarea id="poolModels" style="min-height:200px;font-family:monospace;font-size:12px" placeholder='[{"id":"volcengine-135","provider":"volcengine","model":"ark-code-latest","priority":1,"quotaReset":{"type":"hours","value":24}}]'></textarea>
-  <div style="margin-top:8px">
-    <span class="cwd">字段：id（唯一标识）、provider、model、priority（越小越优先）、quotaReset.type（hours/daily/weekly/monthly）、quotaReset.value（hours 模式的小时数）</span>
-  </div>
+  <div class="cwd" id="poolDefault" style="margin:6px 0 12px"></div>
+  <label>池内模型（按顺序尝试，排在上面的优先；额度耗尽自动切换下一个）</label>
+  <div id="poolList" style="margin-bottom:12px"></div>
+  <label>可用模型（来自 settings.yaml，不在池内，点击加入）</label>
+  <div id="poolAvail"></div>
   <div class="row">
     <button id="poolCancel">取消</button>
     <button id="poolSave" class="primary">保存</button>
@@ -244,7 +259,7 @@ function renderJobsTable(jobs) {
       <td>${status}</td>
       <td><b>${esc(job.cronHuman || job.cron)}</b><br><code>${esc(job.cron)}</code></td>
       <td>${esc(next)}<br><span class="cwd">上次: ${esc(last)}</span></td>
-      <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}${job.continuous ? '<br>🔄 连续执行' : ''}</td>
+      <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}${job.continuous ? '<br>🔄 连续执行' : ''}${job.continuous && job.newSessionPerRun ? '（每轮新会话）' : ''}</td>
       <td class="summary" title="${esc(job.prompt)}">${esc(job.prompt)}</td>
       <td class="actions">
         <button data-act="edit">编辑</button>
@@ -376,6 +391,7 @@ function openDialog(job) {
   $('fPrompt').value = job ? job.prompt : ''
   $('fPerm').value = job?.permissionMode || 'danger-full-access'
   $('fContinuous').checked = job?.continuous || false
+  $('fNewSession').checked = job?.newSessionPerRun || false
   $('dlg').showModal()
 }
 
@@ -390,6 +406,7 @@ $('btnSave').addEventListener('click', () => {
     prompt: $('fPrompt').value.trim(),
     permissionMode: $('fPerm').value,
     continuous: $('fContinuous').checked,
+    newSessionPerRun: $('fNewSession').checked,
   }
   const req = editingId === null
     ? api('/cron/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -399,17 +416,115 @@ $('btnSave').addEventListener('click', () => {
 })
 
 // 模型池管理
-$('btnPool').addEventListener('click', () => {
-  api('/cron/api/model-pool').then((data) => {
-    $('poolEnabled').checked = data.enabled === true
-    $('poolModels').value = JSON.stringify(data.models ?? [], null, 2)
-    $('poolDlg').showModal()
-  }).catch((error) => toast('读取失败: ' + error.message))
-})
+let poolModels = []     // 池内条目，数组顺序即优先级顺序
+let poolCatalog = []    // settings.yaml 的 providers 目录 [{id,name,models:[{id,name}]}]
+let poolDefault = null   // settings.yaml 默认模型 {provider,model} | null
+
+const RESET_LABEL = { hours: '每隔', daily: '每天 0 点', weekly: '每周一 0 点', monthly: '每月 1 号 0 点' }
+
+function openPool() {
+  Promise.all([api('/cron/api/model-pool'), api('/cron/api/models')])
+    .then(([pool, catalog]) => {
+      poolModels = (pool.models ?? []).slice().sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99))
+      poolCatalog = catalog.providers ?? []
+      poolDefault = catalog.defaultModel ?? null
+      $('poolEnabled').checked = pool.enabled === true
+      $('poolDefault').textContent = '未启用或池为空时，使用 DSH 默认模型：' +
+        (poolDefault ? `${poolDefault.provider} / ${poolDefault.model}` : '（settings.yaml 未配置）')
+      renderPoolList()
+      renderPoolAvail()
+      $('poolDlg').showModal()
+    })
+    .catch((error) => toast('读取失败: ' + error.message))
+}
+
+function renderPoolList() {
+  const list = $('poolList')
+  if (poolModels.length === 0) {
+    list.innerHTML = '<div class="cwd">池为空：任务使用 DSH 默认模型。</div>'
+    return
+  }
+  const rows = poolModels.map((m, i) => {
+    const reset = m.quotaReset ?? { type: 'hours', value: 24 }
+    const resetOptions = Object.keys(RESET_LABEL)
+      .map((t) => `<option value="${t}" ${reset.type === t ? 'selected' : ''}>${RESET_LABEL[t]}</option>`).join('')
+    return `<div class="pool-row" data-i="${i}">
+      <span class="idx">${i + 1}</span>
+      <div class="info"><b>${esc(m.id)}</b><br><span class="cwd">${esc(m.provider)} / ${esc(m.model)}</span></div>
+      <select data-f="type">${resetOptions}</select>
+      ${reset.type === 'hours' ? `<input type="number" min="1" max="720" data-f="hours" value="${reset.value ?? 24}" title="重置间隔（小时）"><span class="cwd">小时</span>` : ''}
+      <button data-p="up" ${i === 0 ? 'disabled' : ''} title="上移">↑</button>
+      <button data-p="down" ${i === poolModels.length - 1 ? 'disabled' : ''} title="下移">↓</button>
+      <button data-p="del" class="danger" title="移除">✕</button>
+    </div>`
+  })
+  list.innerHTML = rows.join('')
+  list.querySelectorAll('button[data-p]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const i = Number(btn.closest('.pool-row').dataset.i)
+      const act = btn.dataset.p
+      if (act === 'up' && i > 0) { [poolModels[i - 1], poolModels[i]] = [poolModels[i], poolModels[i - 1]] }
+      if (act === 'down' && i < poolModels.length - 1) { [poolModels[i + 1], poolModels[i]] = [poolModels[i], poolModels[i + 1]] }
+      if (act === 'del') poolModels.splice(i, 1)
+      renderPoolList()
+      renderPoolAvail()
+    })
+  })
+  list.querySelectorAll('select[data-f="type"]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const i = Number(sel.closest('.pool-row').dataset.i)
+      const type = sel.value
+      poolModels[i].quotaReset = type === 'hours'
+        ? { type, value: poolModels[i].quotaReset?.value ?? 24 }
+        : { type }
+      renderPoolList()
+    })
+  })
+  list.querySelectorAll('input[data-f="hours"]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const i = Number(input.closest('.pool-row').dataset.i)
+      poolModels[i].quotaReset = { type: 'hours', value: Math.max(1, Math.min(720, Number(input.value) || 24)) }
+    })
+  })
+}
+
+function renderPoolAvail() {
+  const inPool = new Set(poolModels.map((m) => `${m.provider}/${m.model}`))
+  const chips = []
+  for (const provider of poolCatalog) {
+    for (const model of provider.models) {
+      if (inPool.has(`${provider.id}/${model.id}`)) continue
+      chips.push(`<span class="pool-chip" data-provider="${esc(provider.id)}" data-model="${esc(model.id)}" title="${esc(provider.name)}">＋ ${esc(model.name || model.id)}<span class="cwd"> · ${esc(provider.id)}</span></span>`)
+    }
+  }
+  $('poolAvail').innerHTML = chips.length === 0
+    ? '<div class="cwd">所有已配置的模型都已加入池内。</div>'
+    : chips.join('')
+  $('poolAvail').querySelectorAll('.pool-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      poolModels.push({
+        id: `${chip.dataset.provider}/${chip.dataset.model}`,
+        provider: chip.dataset.provider,
+        model: chip.dataset.model,
+        quotaReset: { type: 'hours', value: 24 },
+      })
+      renderPoolList()
+      renderPoolAvail()
+    })
+  })
+}
+
+$('btnPool').addEventListener('click', openPool)
 $('poolCancel').addEventListener('click', () => $('poolDlg').close())
 $('poolSave').addEventListener('click', () => {
-  let models
-  try { models = JSON.parse($('poolModels').value) } catch (e) { toast('JSON 格式错误: ' + e.message); return }
+  // 顺序即优先级：重编 priority 为 1..n，并剥掉运行时字段
+  const models = poolModels.map((m, i) => ({
+    id: m.id,
+    provider: m.provider,
+    model: m.model,
+    priority: i + 1,
+    quotaReset: m.quotaReset ?? { type: 'hours', value: 24 },
+  }))
   api('/cron/api/model-pool', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: $('poolEnabled').checked, models }) })
     .then(() => { $('poolDlg').close(); toast('模型池已保存') })
     .catch((error) => toast('保存失败: ' + error.message))

@@ -77,3 +77,17 @@ test('disabled pool returns null', () => {
   const pool = makePool([], false)
   assert.equal(pool.pickAvailable(), null)
 })
+
+test('enabled pool with empty models is treated as not configured', () => {
+  // UI 允许保存 {enabled: true, models: []}：应视为未配置（isEnabled=false），
+  // 任务走 dsh 自身模型流程，而不是「all models exhausted」。
+  const pool = ModelPool.fromConfig({ enabled: true, models: [] })
+  assert.equal(pool.isEnabled, false)
+  assert.equal(pool.pickAvailable(), null)
+})
+
+test('isEnabled tolerates missing models key from hand-edited file', () => {
+  const pool = ModelPool.fromConfig({ enabled: true } as unknown as ModelPoolFile)
+  assert.equal(pool.isEnabled, false)
+  assert.equal(pool.pickAvailable(), null)
+})

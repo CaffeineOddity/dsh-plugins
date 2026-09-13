@@ -134,9 +134,9 @@ export class ModelPool {
     return pool
   }
 
-  /** 是否启用（配置存在且 enabled=true）。 */
+  /** 是否启用（配置存在、enabled=true 且 models 非空）。 */
   get isEnabled(): boolean {
-    return this.config !== null && this.config.enabled === true && this.config.models.length > 0
+    return this.config !== null && this.config.enabled === true && Array.isArray(this.config.models) && this.config.models.length > 0
   }
 
   /**

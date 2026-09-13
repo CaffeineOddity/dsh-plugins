@@ -8,6 +8,8 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import '@deepseek-ai/dsh-host-webserver' // 激活 Context.webServer 类型扩展
+import '@deepseek-ai/dsh-llm' // 激活 Context.llm 类型扩展
+import '@deepseek-ai/dsh-agent-default-model' // 激活 Context.agentDefaultModel 类型扩展
 import { parseCron, computeNextRun, describeCron } from './lib/cron-core.ts'
 import { ModelPool } from './lib/model-pool.ts'
 import type { ModelPoolFile } from './lib/model-pool.ts'
@@ -18,8 +20,8 @@ import { normalizeCwd } from './cron-store.ts'
 
 /** 插件名。 */
 export const name = 'cron-web'
-/** 硬依赖：webServer 与存储服务。 */
-export const inject = ['webServer', 'cronLoopStore']
+/** 硬依赖：webServer、存储服务、模型注册表与默认模型。 */
+export const inject = ['webServer', 'cronLoopStore', 'llm', 'agentDefaultModel']
 
 /** 任务中心页面 HTML（启动时从 assets 读取一次）。 */
 const PAGE_HTML = readFileSync(
@@ -99,6 +101,7 @@ export function apply(ctx: Context): void {
               prompt?: string
               permissionMode?: string
               continuous?: boolean
+              newSessionPerRun?: boolean
             }
             if (body.cwd === undefined || body.cwd === '') throw new Error('cwd is required')
             if (body.prompt === undefined || body.prompt === '') throw new Error('prompt is required')
@@ -110,6 +113,7 @@ export function apply(ctx: Context): void {
               prompt: body.prompt,
               permissionMode: body.permissionMode,
               continuous: body.continuous,
+              newSessionPerRun: body.newSessionPerRun,
             })
             json(res, 200, { ok: true, job: jobView(job) })
           } catch (error: unknown) {
@@ -162,6 +166,7 @@ export function apply(ctx: Context): void {
               enabled?: boolean
               permissionMode?: string
               continuous?: boolean
+              newSessionPerRun?: boolean
             }
             if (body.cron !== undefined) parseCron(body.cron)
             const next: CronJobRecord = {
@@ -172,6 +177,7 @@ export function apply(ctx: Context): void {
               enabled: body.enabled ?? job.enabled,
               permissionMode: body.permissionMode ?? job.permissionMode,
               continuous: body.continuous ?? job.continuous,
+              newSessionPerRun: body.newSessionPerRun ?? job.newSessionPerRun,
               updatedAt: Date.now(),
             }
             await store().putJob(next)
@@ -283,6 +289,44 @@ export function apply(ctx: Context): void {
         return
       }
       json(res, 405, { error: 'method not allowed' })
+    },
+  })
+
+  // 可用模型目录：来自 settings.yaml（llm 注册表），供模型池选择真实模型。
+  web.register({
+    kind: 'exact',
+    path: '/cron/api/models',
+    handler: (req, res) => {
+      if ((req.method ?? 'GET') !== 'GET') {
+        json(res, 405, { error: 'method not allowed' })
+        return
+      }
+      void (async () => {
+        try {
+          const providers = ctx.llm.listProviders()
+          const groups = await Promise.all(providers.map(async (provider) => {
+            try {
+              const models = await ctx.llm.listModels(provider.id)
+              return {
+                id: provider.id,
+                name: provider.name,
+                models: models.map((m) => ({ id: m.id, name: m.name })),
+              }
+            } catch {
+              // 单个 provider 列举失败不影响整体目录
+              return { id: provider.id, name: provider.name, models: [] }
+            }
+          }))
+          const selection = ctx.agentDefaultModel.currentSelection()
+          const hasSelection = selection.provider !== '' && selection.model !== ''
+          json(res, 200, {
+            defaultModel: hasSelection ? { provider: selection.provider, model: selection.model } : null,
+            providers: groups,
+          })
+        } catch (error: unknown) {
+          json(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      })()
     },
   })
 }
