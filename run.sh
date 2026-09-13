@@ -9,7 +9,7 @@
 #   -i/install  部署模式：从 .dist/ tarball 安装（版本锁定到打包时的快照）
 #   -u/upgrade  升级模式：从 .dist/ tarball 更新（同 -i，先移除旧依赖再装）
 #   release     发布：bump（可选）+ pack + push
-#   -r/--restart 安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/dsh.sh --restart）
+#   -r/--restart 安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/run.sh --restart）
 #
 # 用法：
 #   run.sh <plugin> -d [-r]                             开发：link 源码，可选重启
@@ -133,7 +133,7 @@ find_tarball() {
 
 # 委托 ~/.dsh/dsh.sh --restart 重启（杀端口占用 + 启动 dsh web）
 restart_dsh_web() {
-  local restart_script="$HOME/.dsh/dsh.sh"
+  local restart_script="$HOME/.dsh/run.sh"
   if [[ ! -x "$restart_script" ]]; then
     warn "未找到 $restart_script，跳过重启（请手动重启 dsh web）"
     return 0
