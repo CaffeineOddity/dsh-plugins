@@ -205,10 +205,63 @@ export function describeCron(expr: string): string {
 
   const fmtHour = (h: number): string => `${String(h).padStart(2, '0')}`
   const fmtMin = (m: number): string => `${String(m).padStart(2, '0')}`
+  const fmtTime = (h: number, m: number): string => `${fmtHour(h)}:${fmtMin(m)}`
+  const DOW_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+  /** 星期受限时的人话前缀：连续 5 天（1-5）= 工作日，{0,6} = 周末，其余逐个列出。 */
+  const dowPrefix = (): string | null => {
+    if (dowAll || plan.daysOfWeek === undefined) return null
+    const dows = [...plan.daysOfWeek].sort((a, b) => a - b)
+    if (dows.length === 5 && dows.every((d, i) => d === i + 1)) return '工作日'
+    if (dows.length === 2 && dows[0] === 0 && dows[1] === 6) return '周末'
+    return dows.map((d) => DOW_NAMES[d] ?? `周${d}`).join('、')
+  }
+
+  /** 小时集合的人话：单值直接用，连续 2+ 值用「N-M 点」，其余逐个列出。 */
+  const hoursText = (): string => {
+    if (hours.length === 1) return `${fmtHour(hours[0]!)} 点`
+    const isContiguous = hours.every((h, i) => i === 0 || h - hours[i - 1]! === 1)
+    if (isContiguous && hours.length > 1) return `${fmtHour(hours[0]!)}-${fmtHour(hours[hours.length - 1]!)} 点`
+    return hours.map(fmtHour).join('、') + ' 点'
+  }
+
+  /** 分钟集合的人话：单值「X 分」，其余逐个列出。 */
+  const minutesText = (): string => {
+    if (minutes.length === 1) return `${fmtMin(minutes[0]!)} 分`
+    return minutes.map(fmtMin).join('、') + ' 分'
+  }
+
+  /** 月份受限时的人话后缀：「X 月」。 */
+  const monthsSuffix = (): string => (monAll ? '' : `，仅 ${[...plan.months].sort((a, b) => a - b).join('、')} 月`)
+
+  /** dom/dow 受限时的人话：「X 号」/「周X」；都受限按 vixie-cron OR 语义标注。 */
+  const dayText = (): string => {
+    const domRestricted = plan.daysOfMonth !== undefined
+    const dowRestricted = !dowAll && plan.daysOfWeek !== undefined
+    const domPart = domRestricted ? [...plan.daysOfMonth!].sort((a, b) => a - b).map((d) => `${d} 号`).join('、') : null
+    const dowPart = dowRestricted ? dowPrefix() : null
+    if (domPart !== null && dowPart !== null) return `${domPart}或${dowPart}` // vixie-cron: dom/dow OR
+    return domPart ?? dowPart ?? ''
+  }
 
   // 每天 X:XX
   if (minutes.length === 1 && hours.length === 1 && domAll && dowAll && monAll) {
-    return `每天 ${fmtHour(hours[0]!)}:${fmtMin(minutes[0]!)}`
+    return `每天 ${fmtTime(hours[0]!, minutes[0]!)}`
+  }
+
+  // 小时级通用描述：每天/工作日/周末/周X 的 N 点 N 分（含多值小时与分钟）
+  if (domAll && monAll) {
+    const prefix = dowPrefix()
+    if (prefix !== null || dowAll) {
+      const dayName = prefix ?? '每天'
+      return `${dayName} ${hoursText()}${minutesText()}`
+    }
+  }
+
+  // 带日期/月份的通用描述
+  const day = dayText()
+  if (day !== '' && minutes.length >= 1 && hours.length >= 1) {
+    return `${monthsSuffix() ? monthsSuffix().slice(2) + ' ' : ''}${day} ${hoursText()}${minutesText()}`
   }
 
   // 每小时 X 分
@@ -231,7 +284,7 @@ export function describeCron(expr: string): string {
 
   if (weekday && domAll && monAll) {
     if (minutes.length === 1 && hours.length === 1) {
-      return `工作日 ${fmtHour(hours[0]!)}:${fmtMin(minutes[0]!)}`
+      return `工作日 ${fmtTime(hours[0]!, minutes[0]!)}`
     }
   }
 
@@ -240,12 +293,12 @@ export function describeCron(expr: string): string {
     && [0, 6].every((d) => plan.daysOfWeek!.has(d))
     && plan.daysOfWeek.size === 2
   if (weekend && domAll && monAll && minutes.length === 1 && hours.length === 1) {
-    return `周末 ${fmtHour(hours[0]!)}:${fmtMin(minutes[0]!)}`
+    return `周末 ${fmtTime(hours[0]!, minutes[0]!)}`
   }
 
   // 每月 X 号
   if (!domAll && dowAll && monAll && plan.daysOfMonth!.size === 1 && minutes.length === 1 && hours.length === 1) {
-    return `每月 ${plan.daysOfMonth!.values().next().value!} 号 ${fmtHour(hours[0]!)}:${fmtMin(minutes[0]!)}`
+    return `每月 ${plan.daysOfMonth!.values().next().value!} 号 ${fmtTime(hours[0]!, minutes[0]!)}`
   }
 
   // 回退：原表达式
