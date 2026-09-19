@@ -64,9 +64,10 @@
       <div class="fld"><label>已选组</label><div class="ctl row" id="a-groups"></div></div>
       <div class="fld"><label></label><div class="ctl"><label class="check" style="margin:0"><input type="checkbox" id="a-append-skills"/> 追加到 prompt（关 = 只软链不写入；改了会开新会话）</label></div></div>
       <div class="apply-stack">
-        <div class="radio-list apply-tools" id="aw-tools"></div>
+        <div class="fld"><label>应用到</label><div class="ctl row" style="flex-wrap:wrap" id="aw-tools"></div></div>
+        <div class="fld" style="align-items:center"><label>落点路径</label><div class="ctl row"><span class="mono grow" id="a-apply-path" style="color:var(--t2)">选择上方位后出现 →</span><button type="button" class="btn txt" id="a-apply">应用到工作区</button></div></div>
+        <div class="fld"><label></label><div class="ctl note" style="margin:0">未保存的新建 agent 时按钮禁用；未选组 → 「请先选择技能组」；软链名冲突显式报错</div></div>
       </div>
-      <div class="fld" style="align-items:center"><label>落点路径</label><div class="ctl row"><span class="mono grow" id="a-apply-path" style="color:var(--t2)">选择上方位后出现 →</span><button type="button" class="btn txt" id="a-apply">应用到工作区</button></div></div>
     </div>
     <!-- ④ 会话与权限 -->
     <div class="fsec">
@@ -149,7 +150,7 @@ function renderAgents() {
       <div class="grow">
         <b>${esc(a.name)}</b>
         <br><span style="font-size:12px;color:var(--t2)">${esc(a.description || '')}</span>
-        <br>${(a.skill_groups || []).map((g) => '<span class="chip">' + esc(g) + '</span>').join('')}
+        <br>${(a.skill_groups || []).map((id) => { const g = groupById(id); return '<span class="chip">' + esc(g ? g.name : id) + '</span>' }).join('')}
         <div class="mono" style="color:var(--t2)">workspace: ${esc(a.workspace || '—')} · prompt: ${esc(promptName(a))} · ${a.permission_mode === 'danger-full-access' ? '完全访问' : a.permission_mode} · 会话: ${a.reuse_session !== false ? '续接' : '不复用'}${a.session_by_sender ? '/按人' : ''}${a.reuse_session !== false && a.session_timeout_minutes ? '/' + esc(a.session_timeout_minutes) + 'min' : ''}</div>
       </div>
       <div style="margin-left:auto;white-space:nowrap;text-align:right">
@@ -195,7 +196,7 @@ function renderGroupChips() {
   const chips = selectedGroups.map((id, i) => {
     const g = groupById(id)
     const label = g ? g.name : id
-    return `<span class="chip">${esc(label)}<button type="button" class="chip-x" data-gdel="${i}" aria-label="删除">×</button></span>`
+    return `<span class="chip cross">${esc(label)}<button type="button" class="chip-x" data-gdel="${i}" aria-label="删除">×</button></span>`
   }).join('')
   $('a-groups').innerHTML = (chips || '<span style="font-size:12px;color:var(--t2)">尚未添加技能组。</span>') +
     '<span class="grow"></span><button type="button" class="btn txt" id="a-add-groups">添加技能组</button>'
@@ -259,14 +260,11 @@ function fillWorkspaceApplyRadios() {
   const selected = prev && opts.some((o) => o.tool === prev.tool && o.slot === prev.slot)
     ? prev.tool + '\t' + prev.slot
     : (opts[0] ? opts[0].tool + '\t' + opts[0].slot : '')
-  $('aw-tools').innerHTML = opts.map((o) => `
-    <label class="apply-opt">
-      <span class="apply-opt-head">
-        <input type="radio" name="aw-tool" value="${esc(o.tool + '\t' + o.slot)}"${selected === o.tool + '\t' + o.slot ? ' checked' : ''}/>
-        ${esc(o.tool)}
-      </span>
-      <span class="apply-opt-path">${esc(resolveWorkspaceApplyPath(o.template))}</span>
-    </label>`).join('') || '<p class="hint">没有工作区落点。</p>'
+  $('aw-tools').innerHTML = (opts.map((o) => `
+    <label style="display:inline-flex;align-items:center;gap:4px;margin-right:16px;font-size:13px;color:var(--t1);height:24px">
+      <input type="radio" name="aw-tool" value="${esc(o.tool + '\t' + o.slot)}"${selected === o.tool + '\t' + o.slot ? ' checked' : ''} style="accent-color:var(--brand)"/>
+      ${esc(o.tool)}
+    </label>`).join('')) || '<p class="hint">没有工作区落点。</p>'
   $('a-apply').disabled = !editId || opts.length === 0
   if ($('a-apply-path')) {
     const sel = selectedWorkspaceApply()

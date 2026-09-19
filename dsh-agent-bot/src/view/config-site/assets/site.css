@@ -114,9 +114,11 @@ button:disabled{opacity:.45;cursor:not-allowed;pointer-events:none;background:va
 .timeout-row .hint{margin:0}
 /* 技能组 chips */
 .chip-row{display:flex;flex-wrap:wrap;gap:8px;min-height:32px;margin:0 0 8px}
-.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px 4px 10px;background:var(--brand-tint);color:#1e3a8a;border:1px solid var(--brand);border-radius:999px;font-size:13px}
-.chip-x{margin:0;padding:0;width:18px;height:18px;line-height:16px;border:none;border-radius:50%;background:#c7d2fe;color:#1e3a8a;font-size:13px}
-.chip-x:hover{background:#a5b4fc}
+.chip{display:inline-flex;align-items:center;gap:5px;position:relative;padding:2px 10px;background:var(--brand-tint,#eef2ff);color:#1e3a8a;border:1px solid var(--brand,#2563eb);border-radius:999px;font-size:12px;margin:0 6px 4px 0}
+.chip.cross{background:var(--brand-tint);border-color:var(--brand);color:#1e3a8a}
+.chip .chip-x, .chip.cross .chip-x{position:absolute;top:-2px;right:-2px;width:15px;height:15px;border:1px solid var(--brand,#2563eb);border-radius:50%;background:var(--brand-tint,#eef2ff);color:#1e3a8a;font-size:10px;line-height:13px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;margin:0;opacity:0;transition:opacity .15s}
+.chip:hover .chip-x, .chip.cross:hover .chip-x{opacity:1}
+.chip .chip-x:hover, .chip.cross .chip-x:hover{background:#dbeafe;color:var(--danger,#dc2626);border-color:var(--danger,#dc2626)}
 /* 技能选择器 */
 .picker{border:1px solid var(--line);border-radius:var(--r-m);max-height:220px;overflow:auto;padding:6px;background:#fff;margin-top:8px}
 .picker label{display:flex;align-items:center;gap:8px;margin:0;padding:4px 6px;width:auto;text-align:left;font-weight:normal;white-space:normal}
@@ -132,10 +134,10 @@ button:disabled{opacity:.45;cursor:not-allowed;pointer-events:none;background:va
 .radio-list input{width:auto;margin:0}
 .apply-stack{display:flex;flex-direction:column;align-items:stretch;gap:6px;margin:0 0 10px}
 .apply-stack .radio-list{margin:0}
-.apply-tools{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:8px}
-.apply-opt{display:flex;flex-direction:column;align-items:stretch;gap:4px;margin:0}
-.apply-opt-head{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--t1)}
-.apply-opt-path{margin:0 0 0 22px;font-family:var(--mono);font-size:12px;background:var(--bg);padding:6px 10px;border-radius:var(--r-m);word-break:break-all}
+/* 「应用到」三 radio 横排（对齐 phase4_hifi ③技能组） */
+#aw-tools{display:flex;flex-wrap:wrap;gap:0 20px;align-items:center}
+#aw-tools label{display:inline-flex;align-items:center;gap:6px;margin:0;font-size:13px;color:var(--t1);white-space:nowrap}
+#aw-tools input{accent-color:var(--brand);width:auto;margin:0}
 /* 日志 */
 pre{background:#0f172a;color:#e2e8f0;border-radius:var(--r-m);padding:12px;font-size:12px;white-space:pre-wrap;max-height:300px;overflow:auto;margin:0 0 12px}
 /* 弹窗 */
@@ -143,6 +145,8 @@ pre{background:#0f172a;color:#e2e8f0;border-radius:var(--r-m);padding:12px;font-
 .modal-box{background:#fff;border-radius:var(--r-l);padding:20px;width:560px;max-width:92vw;max-height:90vh;overflow:auto;box-shadow:var(--modal)}
 .modal-box h4{margin:0 0 12px;font-size:15px}
 .modal-box.wide{width:680px}
+.modal-box.narrow{width:500px}
+.modal-box textarea{width:100%;min-height:100px;box-sizing:border-box;font:inherit;font-size:13px;padding:6px 10px;border:1px solid var(--line);border-radius:var(--r-m)}
 /* 会话行、按钮小样式兼容 */
 .sess{font-size:13px;display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f0f2f5}
 .sess code{font-size:12px;background:var(--bg);padding:2px 6px;border-radius:var(--r-s)}

@@ -24,30 +24,29 @@
   </nav>
   <main class="content">
     <section>
-      <div class="card">
+      <div class="box">
         <div class="row">
-          <h2 style="margin:0 0 10px;font-size:16px">prompt 管理</h2>
-          <label>筛选</label>
-          <input id="prompt-filter" placeholder="按名称包含匹配" style="width:220px;flex:0 0 auto"/>
-          <span style="flex:1"></span>
-          <button type="button" id="add-preset" class="primary">+ 添加 prompt</button>
+          <b style="font-size:16px">prompt 管理</b>
+          <input id="prompt-filter" placeholder="筛选：按名称包含" style="width:220px;flex:0 0 auto"/>
+          <span class="grow"></span>
+          <button type="button" id="add-preset" class="btn pri">+ 添加 prompt</button>
         </div>
-        <hr style="border:none;border-top:1px solid #e2e4e8;margin:10px 0"/>
-        <div id="preset-list"></div>
+        <div id="preset-list" style="margin-top:8px"></div>
       </div>
     </section>
   </main>
 </div>
 
 <div class="modal" id="prompt-modal" style="display:none">
-  <div class="modal-box">
-    <h4 id="prompt-title">添加 prompt</h4>
-    <div class="row grow"><label>预设名</label><input id="pp-name" placeholder="如：default"/></div>
-    <div class="row"><label>system prompt</label></div>
-    <textarea id="pp-prompt" rows="8"></textarea>
-    <p class="hint">可用变量：{{sender}} {{session_key}} {{provider_id}} 以及 sessionParts 键（如 {{bot_id}} {{group_id}}）。不提供 {{webhook_url}}。推荐工具按绑定该预设的智能体技能组自动展开，不在此手填。</p>
-    <button type="button" id="pp-save" class="primary">保存</button>
-    <button type="button" id="pp-cancel" class="ghost">取消</button>
+  <div class="modal-box narrow">
+    <div class="mtitle" id="prompt-title">添加 prompt / 编辑</div>
+    <div class="fld"><label>预设名</label><div class="ctl"><input id="pp-name" placeholder="必填、唯一，如 default"/></div></div>
+    <div class="fld"><label>system prompt</label><div class="ctl"><textarea id="pp-prompt" rows="8"></textarea></div></div>
+    <div class="note" style="margin-left:100px;margin-top:0">变量：{{sender}} {{session_key}} {{provider_id}} 及 sessionParts 键；不提供 {{webhook_url}}。推荐工具按绑定该预设的智能体技能组自动展开，不在此手填。</div>
+    <div class="row" style="justify-content:flex-end">
+      <button type="button" class="btn" id="pp-cancel">取消</button>
+      <button type="button" class="btn pri" id="pp-save">保存</button>
+    </div>
   </div>
 </div>
 
@@ -61,16 +60,14 @@ function presetNames() { return Object.keys(presets).sort() }
 function renderPresets() {
   const q = ($('prompt-filter').value || '').trim().toLowerCase()
   shownNames = presetNames().filter((n) => !q || n.toLowerCase().includes(q))
-  $('preset-list').innerHTML = shownNames.map((name, i) => `
-    <div class="list-row">
-      <div class="meta">
-        <h4>${esc(name)}</h4>
+  $('preset-list').innerHTML = (shownNames.map((name, i) => `
+    <div class="li">
+      <div class="grow"><b>${esc(name)}</b></div>
+      <div style="margin-left:auto;white-space:nowrap;text-align:right">
+        <button type="button" class="btn" data-pedit="${i}">编辑</button>
+        <button type="button" class="btn dgr" data-pdel="${i}">删除</button>
       </div>
-      <div class="actions">
-        <button type="button" class="text" data-pedit="${i}">编辑</button>
-        <button type="button" class="text danger-text" data-pdel="${i}">删除</button>
-      </div>
-    </div>`).join('') || '<p class="hint">暂无预设。</p>'
+    </div>`).join('') || `<div class="statebar">状态：${q ? '筛选无结果' : '空数据 ——「暂无 prompt。点『+ 添加 prompt』创建。」'}</div>`)
 }
 
 function openPresetModal(name) {
