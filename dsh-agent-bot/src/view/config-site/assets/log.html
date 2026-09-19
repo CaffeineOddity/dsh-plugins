@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>智能体中枢 · 日志</title>
+<link rel="stylesheet" href="/agent-bot/site.css"/>
+<script src="/agent-bot/site.js"></script>
+</head>
+<body>
+<div class="msg" id="msg"></div>
+<div class="layout">
+  <nav class="sidebar">
+  <div class="side-logo"><span class="hex">⬡</span>AgentBot</div>
+  <div class="side-status"><span class="dot" id="hub-dot" title="Provider 在线状态"></span><span id="side-dot-txt">Provider 状态</span></div>
+
+
+    <a class="nav" href="/agent-bot/skills">Skills</a>
+    <a class="nav" href="/agent-bot/prompts">Prompts</a>
+    <a class="nav" href="/agent-bot/agents">Agents</a>
+    <a class="nav" href="/agent-bot/chat">对话</a>
+    <a class="nav" href="/agent-bot/settings">全局设置</a>
+    <a class="nav active" href="/agent-bot/log">日志</a>
+  </nav>
+  <main class="content">
+    <section>
+      <div class="card">
+        <div class="row"><label>配置目录</label><span id="st-configDir">-</span></div>
+        <div class="row"><label>在线 Provider</label><span id="st-providers">-</span></div>
+      </div>
+      <h3>启动日志</h3><pre id="st-boot"></pre>
+      <h3>ask 日志</h3><pre id="st-ask"></pre>
+      <h3>扫描日志</h3><pre id="st-scan"></pre>
+    </section>
+  </main>
+</div>
+</body>
+</html>

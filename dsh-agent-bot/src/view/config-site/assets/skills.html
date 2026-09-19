@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>智能体中枢 · Skills</title>
+<link rel="stylesheet" href="/agent-bot/site.css"/>
+<script src="/agent-bot/site.js"></script>
+</head>
+<body>
+<div class="msg" id="msg"></div>
+<div class="layout">
+  <nav class="sidebar">
+  <div class="side-logo"><span class="hex">⬡</span>AgentBot</div>
+  <div class="side-status"><span class="dot" id="hub-dot" title="Provider 在线状态"></span><span id="side-dot-txt">Provider 状态</span></div>
+
+
+    <a class="nav active" href="/agent-bot/skills">Skills</a>
+    <a class="nav" href="/agent-bot/prompts">Prompts</a>
+    <a class="nav" href="/agent-bot/agents">Agents</a>
+    <a class="nav" href="/agent-bot/chat">对话</a>
+    <a class="nav" href="/agent-bot/settings">全局设置</a>
+    <a class="nav" href="/agent-bot/log">日志</a>
+  </nav>
+  <main class="content">
+    <section class="pane active" id="pane-warehouse">
+      <div class="row" style="margin:0 0 4px">
+        <span class="tab active" data-tab2="warehouse" id="tab-warehouse">技能仓</span><span class="tab" data-tab2="groups" id="tab-groups">skills组</span>
+        <b style="font-size:18px;margin-left:10px" id="pane-title">技能仓</b>
+        <span class="grow"></span>
+        <button type="button" id="add-root" class="btn pri">+ 添加目录</button>
+      </div>
+      <div class="note">每行扫描该目录下含 <code>SKILL.md</code> 的技能 · 桌面宽屏+鼠标：原生选目录弹窗；触控/窄屏：页内列表逐层浏览</div>
+      <div class="box" style="margin-top:4px" id="skill-roots"></div>
+
+      <div class="row" style="margin:14px 0 4px">
+        <b style="font-size:15px">扫描结果</b>
+        <span class="grow"></span>
+        <span class="hint mono" id="scan-meta"></span>
+      </div>
+      <div class="box" id="skill-list"></div>
+    </section>
+    <section class="pane" id="pane-groups">
+      <div class="row" style="margin:0 0 4px">
+        <b style="font-size:18px">skills组</b>
+        <span class="note" style="margin:0 0 0 8px">页内 Tab，同一路由</span>
+        <span class="grow"></span>
+        <button type="button" id="g-apply-global" class="btn">应用全局</button>
+        <button type="button" id="add-group" class="btn pri">+ 添加组</button>
+      </div>
+      <div class="box" id="group-list"></div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="dir-modal" style="display:none">
+  <div class="modal-box">
+    <h4 id="dir-title">选择目录</h4>
+    <p class="path-read" id="dir-path"></p>
+    <div class="row">
+      <button type="button" id="dir-up" class="ghost">上一级</button>
+      <button type="button" id="dir-home" class="ghost">家目录</button>
+    </div>
+    <div class="dir-list" id="dir-entries"></div>
+    <p class="hint" id="dir-empty" style="display:none">此目录没有可见子目录。</p>
+    <button type="button" id="dir-pick" class="primary">选择此目录</button>
+    <button type="button" id="dir-cancel" class="ghost">取消</button>
+  </div>
+</div>
+
+<div class="modal" id="group-modal" style="display:none">
+  <div class="modal-box">
+    <h4 id="group-title">添加技能组</h4>
+    <div class="row grow"><label>名称</label><input id="g-name" placeholder="如：研发"/></div>
+    <div class="row grow"><label>搜索技能</label><input id="g-filter" placeholder="按名称或 id 过滤"/></div>
+    <p class="hint" id="g-picked">已选 0 个</p>
+    <div class="picker" id="g-skills"></div>
+    <button type="button" id="g-save" class="primary">保存</button>
+    <button type="button" id="g-cancel" class="ghost">取消</button>
+  </div>
+</div>
+
+<div class="modal" id="apply-global-modal" style="display:none">
+  <div class="modal-box">
+    <h4>应用全局</h4>
+    <p class="hint">把选中技能组软链到本机 agent-ide 全局目录，与某个智能体 workspace 无关。</p>
+    <div class="form-field">
+      <label>工具</label>
+      <div class="radio-list" id="ag-tools"></div>
+    </div>
+    <p class="path-read" id="ag-path">（未选择）</p>
+    <div class="form-field">
+      <label>技能组</label>
+      <div class="picker" id="ag-groups"></div>
+    </div>
+    <div class="form-actions">
+      <button type="button" id="ag-cancel" class="ghost">取消</button>
+      <button type="button" id="ag-save" class="primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let skills = []
+let groups = {}
+let skillApply = {}
+let editGroupId = null
+let skillRoots = []
+let pickedSkillIds = new Set()
+let rootOpen = {}           // root -> boolean，锁目录行展开/收起
+let rootsWithSkills = {}    // root -> Skill 数组（首扫后缓存，避免展开时反复请求）
+
+function groupEntries() {
+  return Object.values(groups).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+}
+
+function showTab(name) {
+  const warehouse = name !== 'groups'
+  $('tab-warehouse').classList.toggle('active', warehouse)
+  $('tab-groups').classList.toggle('active', !warehouse)
+  $('pane-warehouse').classList.toggle('active', warehouse)
+  $('pane-groups').classList.toggle('active', !warehouse)
+  if ($('pane-title')) $('pane-title').textContent = warehouse ? '技能仓' : 'skills组'
+  const hash = warehouse ? '#warehouse' : '#groups'
+  if (location.hash !== hash) history.replaceState(null, '', hash)
+}
+
+function tabFromHash() {
+  showTab(location.hash === '#groups' ? 'groups' : 'warehouse')
+}
+
+function skillsUnderRoot(root) {
+  // root 在 skill 路径里作为前缀；./ 或空串则取最浅目录作为归类 key
+  const r = String(root || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  return skills.filter((s) => {
+    const p = String(s.path).replace(/\\/g, '/')
+    if (!r) return true
+    return p === r || (r && p.startsWith(r + '/'))
+  })
+}
+
+function renderSkillRoots() {
+  const rows = skillRoots.map((root, i) => {
+    const open = !!rootOpen[root]
+    const list = rootsWithSkills[root] || skillsUnderRoot(root)
+    return `
+      <div class="li expand${open ? ' open' : ''}" data-root-toggle="${i}">
+        <div class="grow">
+          <b>${esc(rootTitle(root))}</b> <span class="chip">${list.length} 个技能</span>
+          ${skillsRhint(root)}
+          <br><span class="mono" style="color:var(--t2)">${esc(root)}</span>
+        </div>
+        <div class="btns">
+          <button type="button" class="btn" data-root-scan="${i}">扫描</button>
+          <button type="button" class="btn dgr" data-root-rm="${i}">删除</button>
+        </div>
+      </div>
+      ${open ? `<div class="sub">${subSkills(list)}</div>` : ''}`
+  }).join('')
+  const body = rows || '<div class="statebar">状态：空数据 ——「暂无扫描目录。点右上角『添加目录』把含 SKILL.md 的目录加进来。」</div>'
+  $('skill-roots').innerHTML = body
+}
+
+function skillsRhint(root) {
+  const base = String(root || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  return skillsUnderRoot(base).some((s) => !s.description) ? '' : ''
+}
+
+function subSkills(list) {
+  if (!list.length) return '<div class="note">该目录尚无可展开的技能（扫描后填充）。</div>'
+  return list.map((s) => `
+    <div class="li">
+      <div class="grow"><b>${esc(s.name)}</b> <span class="chip">${esc(s.id)}</span><br><span style="font-size:12px;color:var(--t2)">${esc(s.description || '')}</span></div>
+      <span class="mono" style="color:var(--t2)">${esc(relPath(s.path))}</span>
+    </div>`).join('')
+}
+
+function relPath(p) {
+  const parts = String(p || '').replace(/\\/g, '/').split('/').filter(Boolean)
+  return parts.slice(Math.max(0, parts.length - 2)).join('/') + '/'
+}
+
+function rootTitle(root) {
+  const parts = String(root || '').replace(/\\/g, '/').split('/').filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : root
+}
+
+function globalTools() {
+  const apply = skillApply && typeof skillApply === 'object' ? skillApply : {}
+  const preferred = ['dsh', 'openclaw', 'claudecode']
+  const names = Object.keys(apply)
+  const ordered = preferred.filter((t) => names.includes(t)).concat(names.filter((t) => !preferred.includes(t)).sort())
+  const opts = []
+  for (const tool of ordered) {
+    const slots = apply[tool]
+    if (!slots || typeof slots !== 'object') continue
+    const path = slots.global
+    if (typeof path !== 'string' || !path) continue
+    opts.push({ tool, path })
+  }
+  return opts
+}
+
+function selectedApplyTool() {
+  const el = $('ag-tools').querySelector('input[name=ag-tool]:checked')
+  return el ? el.value : ''
+}
+
+function syncApplyGlobalPath() {
+  const tool = selectedApplyTool()
+  const found = globalTools().find((o) => o.tool === tool)
+  $('ag-path').textContent = found ? found.path : '（无 global 落点）'
+}
+
+function fillApplyGlobalModal() {
+  const opts = globalTools()
+  $('ag-tools').innerHTML = opts.map((o, i) => `
+    <label class="check">
+      <input type="radio" name="ag-tool" value="${esc(o.tool)}"${i === 0 ? ' checked' : ''}/>
+      ${esc(o.tool)}
+    </label>`).join('') || '<p class="hint">没有 global 落点。</p>'
+  $('ag-groups').innerHTML = groupEntries().map((g) => `
+    <label>
+      <input type="checkbox" value="${esc(g.id)}"/>
+      ${esc(g.name)} <span class="hint">${esc(g.id)}</span>
+    </label>`).join('') || '<p class="hint">暂无技能组。</p>'
+  $('ag-save').disabled = opts.length === 0
+  syncApplyGlobalPath()
+}
+
+function selectedApplyGroupIds() {
+  return [...$('ag-groups').querySelectorAll('input[type=checkbox]:checked')].map((el) => el.value)
+}
+
+function renderGroups() {
+  const rows = groupEntries().map((g) => `
+    <div class="li">
+      <div class="grow"><b>${esc(g.name)}</b> <span class="chip">${esc((g.skill_ids || []).join('、') || '无技能')}</span></div>
+      <div class="btns">
+        <button type="button" class="btn" data-gedit="${esc(g.id)}">编辑</button>
+        <button type="button" class="btn dgr" data-gdel="${esc(g.id)}">删除</button>
+      </div>
+    </div>`).join('')
+  const body = rows || '<div class="statebar">状态：空数据 ——「暂无技能组。可先扫技能，或扫描时经 linkmap.json 自动建组。」</div>'
+  $('group-list').innerHTML = body
+}
+
+function filteredSkills() {
+  const q = ($('g-filter').value || '').trim().toLowerCase()
+  return skills.filter((s) => !q || s.id.toLowerCase().includes(q) || (s.name || '').toLowerCase().includes(q))
+}
+
+function syncPickedFromVisible() {
+  for (const el of $('g-skills').querySelectorAll('input[type=checkbox]')) {
+    if (el.checked) pickedSkillIds.add(el.value)
+    else pickedSkillIds.delete(el.value)
+  }
+}
+
+function renderPickedCount() {
+  $('g-picked').textContent = '已选 ' + pickedSkillIds.size + ' 个'
+}
+
+function renderPicker() {
+  $('g-skills').innerHTML = filteredSkills().map((s) => `
+    <label>
+      <input type="checkbox" value="${esc(s.id)}"${pickedSkillIds.has(s.id) ? ' checked' : ''}/>
+      ${esc(s.name)} <span class="hint">${esc(s.id)}</span>
+    </label>`).join('') || '<p class="hint">没有匹配的技能。</p>'
+  renderPickedCount()
+}
+
+function openGroupModal(group) {
+  editGroupId = group ? group.id : null
+  $('group-title').textContent = group ? '编辑：' + group.name : '添加技能组'
+  $('g-name').value = group ? group.name : ''
+  $('g-filter').value = ''
+  pickedSkillIds = new Set(group ? group.skill_ids : [])
+  renderPicker()
+  $('group-modal').style.display = 'flex'
+}
+
+function closeGroupModal() {
+  $('group-modal').style.display = 'none'
+  editGroupId = null
+  pickedSkillIds = new Set()
+}
+
+$('tab-warehouse').onclick = () => showTab('warehouse')
+$('tab-groups').onclick = () => showTab('groups')
+window.addEventListener('hashchange', tabFromHash)
+
+$('g-filter').addEventListener('input', () => {
+  syncPickedFromVisible()
+  renderPicker()
+})
+$('g-skills').addEventListener('change', () => {
+  syncPickedFromVisible()
+  renderPickedCount()
+})
+$('g-cancel').onclick = closeGroupModal
+$('add-group').onclick = () => openGroupModal(null)
+$('g-apply-global').onclick = () => {
+  fillApplyGlobalModal()
+  $('apply-global-modal').style.display = 'flex'
+}
+$('ag-cancel').onclick = () => { $('apply-global-modal').style.display = 'none' }
+$('ag-tools').addEventListener('change', syncApplyGlobalPath)
+$('ag-save').onclick = async () => {
+  const tool = selectedApplyTool()
+  if (!tool) { setMsg('⚠️ 没有 global 落点', true); return }
+  const groupIds = selectedApplyGroupIds()
+  if (!groupIds.length) { setMsg('⚠️ 请先选择技能组', true); return }
+  const r = await rpc('applyGlobalSkillGroups', { tool, slot: 'global', groupIds })
+  setMsg(r.ok ? '✅ 已应用到 ' + tool + ' · global' : '❌ ' + (r.error || '应用失败'), !r.ok)
+  if (r.ok) $('apply-global-modal').style.display = 'none'
+}
+$('add-root').onclick = () => openDirectoryPicker({
+  title: '添加技能仓扫描目录',
+  startPath: skillRoots.length ? skillRoots[skillRoots.length - 1] : '',
+  onPick: async (path) => {
+    if (skillRoots.includes(path)) { setMsg('⚠️ 该目录已在列表中', true); return }
+    const next = [...skillRoots, path]
+    const r = await rpc('saveSkillRoots', { skill_roots: next })
+    setMsg(r.ok ? '✅ 已添加扫描目录' : '❌ ' + (r.error || '保存失败'), !r.ok)
+    if (r.ok) loadList()
+  },
+})
+
+$('skill-roots').addEventListener('click', async (ev) => {
+  const toggle = ev.target.closest('[data-root-toggle]')
+  if (toggle && !ev.target.closest('[data-root-scan],[data-root-rm]')) {
+    const i = Number(toggle.dataset.rootToggle)
+    const root = skillRoots[i]
+    if (root === undefined) return
+    rootOpen[root] = !rootOpen[root]
+    renderSkillRoots()
+    return
+  }
+  const scanBtn = ev.target.closest('[data-root-scan]')
+  if (scanBtn) {
+    const i = Number(scanBtn.dataset.rootScan)
+    const root = skillRoots[i]
+    if (root === undefined) return
+    const r = await rpc('scanSkills', { root })
+    if (!r.ok || !r.value) { setMsg('❌ ' + (r.error || '扫描失败'), true); return }
+    const n = (r.value.skills || []).length
+    const m = typeof r.value.groupCount === 'number' ? r.value.groupCount : Object.keys(groups).length
+    const bits = ['✅ 扫描到 ' + n + ' 个技能，' + m + ' 个分组']
+    if ((r.value.droppedSkillIds || []).length) bits.push('未知：' + r.value.droppedSkillIds.join(', '))
+    if ((r.value.ambiguousSkillIds || []).length) bits.push('末段冲突：' + r.value.ambiguousSkillIds.join(', '))
+    setMsg(bits.join('；'), false)
+    loadList()
+    return
+  }
+  const btn = ev.target.closest('[data-root-rm]')
+  if (!btn) return
+  const i = Number(btn.dataset.rootRm)
+  const root = skillRoots[i]
+  if (root === undefined) return
+  if (!confirm('删除扫描目录「' + root + '」？已扫描的分组不受影响。')) return
+  const next = skillRoots.filter((_, idx) => idx !== i)
+  const r = await rpc('saveSkillRoots', { skill_roots: next })
+  setMsg(r.ok ? '✅ 已删除扫描目录' : '❌ ' + (r.error || '保存失败'), !r.ok)
+  if (r.ok) loadList()
+})
+
+$('group-list').addEventListener('click', async (ev) => {
+  const edit = ev.target.closest('[data-gedit]')
+  if (edit) {
+    openGroupModal(groups[edit.dataset.gedit])
+    return
+  }
+  const del = ev.target.closest('[data-gdel]')
+  if (!del) return
+  const id = del.dataset.gdel
+  const g = groups[id]
+  if (!confirm('确认删除技能组「' + ((g && g.name) || id) + '」？会从所有 agent 上摘掉该组。')) return
+  const next = { ...groups }
+  delete next[id]
+  const r = await rpc('saveSkillGroups', { groups: next })
+  setMsg(r.ok ? '✅ 已删除组' : '❌ ' + (r.error || '删除失败'), !r.ok)
+  if (r.ok) loadList()
+})
+
+function slugGroupId(name) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return slug || ('g' + Date.now())
+}
+
+$('g-save').onclick = async () => {
+  const name = $('g-name').value.trim()
+  if (!name) { setMsg('⚠️ 组名称必填', true); return }
+  const skill_ids = [...pickedSkillIds]
+  const next = { ...groups }
+  const id = editGroupId || slugGroupId(name)
+  next[id] = { id, name, skill_ids }
+  const r = await rpc('saveSkillGroups', { groups: next })
+  const dropped = (r.ok && r.value && r.value.droppedSkillIds) || []
+  setMsg(r.ok ? ('✅ 已保存组' + (dropped.length ? '，剔除未知技能：' + dropped.join(', ') : '')) : '❌ ' + (r.error || '保存失败'), !r.ok)
+  if (r.ok) { closeGroupModal(); loadList() }
+}
+
+async function loadList() {
+  const r = await rpc('list')
+  if (!r.ok || !r.value) { setMsg('❌ ' + (r.error || '加载失败'), true); return }
+  skillRoots = Array.isArray(r.value.skill_roots) ? r.value.skill_roots : []
+  skills = r.value.skills || []
+  groups = r.value.skill_groups || {}
+  skillApply = r.value.skill_apply || {}
+  const scanned = r.value.scanned_at
+  $('scan-meta').textContent = scanned ? ('上次扫描 ' + new Date(scanned).toLocaleString()) : ''
+  if (r.value.status) updateStatus(r.value.status)
+  rootsWithSkills = {}
+  for (const root of skillRoots) rootsWithSkills[root] = skillsUnderRoot(root)
+  renderSkillRoots()
+  renderGroups()
+}
+
+tabFromHash()
+loadList()
+</script>
+</body>
+</html>

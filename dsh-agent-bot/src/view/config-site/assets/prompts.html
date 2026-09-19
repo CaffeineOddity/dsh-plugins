@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>智能体中枢 · Prompts</title>
+<link rel="stylesheet" href="/agent-bot/site.css"/>
+<script src="/agent-bot/site.js"></script>
+</head>
+<body>
+<div class="msg" id="msg"></div>
+<div class="layout">
+  <nav class="sidebar">
+  <div class="side-logo"><span class="hex">⬡</span>AgentBot</div>
+  <div class="side-status"><span class="dot" id="hub-dot" title="Provider 在线状态"></span><span id="side-dot-txt">Provider 状态</span></div>
+
+
+    <a class="nav" href="/agent-bot/skills">Skills</a>
+    <a class="nav active" href="/agent-bot/prompts">Prompts</a>
+    <a class="nav" href="/agent-bot/agents">Agents</a>
+    <a class="nav" href="/agent-bot/chat">对话</a>
+    <a class="nav" href="/agent-bot/settings">全局设置</a>
+    <a class="nav" href="/agent-bot/log">日志</a>
+  </nav>
+  <main class="content">
+    <section>
+      <div class="card">
+        <div class="row">
+          <h2 style="margin:0 0 10px;font-size:16px">prompt 管理</h2>
+          <label>筛选</label>
+          <input id="prompt-filter" placeholder="按名称包含匹配" style="width:220px;flex:0 0 auto"/>
+          <span style="flex:1"></span>
+          <button type="button" id="add-preset" class="primary">+ 添加 prompt</button>
+        </div>
+        <hr style="border:none;border-top:1px solid #e2e4e8;margin:10px 0"/>
+        <div id="preset-list"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="prompt-modal" style="display:none">
+  <div class="modal-box">
+    <h4 id="prompt-title">添加 prompt</h4>
+    <div class="row grow"><label>预设名</label><input id="pp-name" placeholder="如：default"/></div>
+    <div class="row"><label>system prompt</label></div>
+    <textarea id="pp-prompt" rows="8"></textarea>
+    <p class="hint">可用变量：{{sender}} {{session_key}} {{provider_id}} 以及 sessionParts 键（如 {{bot_id}} {{group_id}}）。不提供 {{webhook_url}}。推荐工具按绑定该预设的智能体技能组自动展开，不在此手填。</p>
+    <button type="button" id="pp-save" class="primary">保存</button>
+    <button type="button" id="pp-cancel" class="ghost">取消</button>
+  </div>
+</div>
+
+<script>
+let presets = {}
+let shownNames = []
+let editPresetKey = null
+
+function presetNames() { return Object.keys(presets).sort() }
+
+function renderPresets() {
+  const q = ($('prompt-filter').value || '').trim().toLowerCase()
+  shownNames = presetNames().filter((n) => !q || n.toLowerCase().includes(q))
+  $('preset-list').innerHTML = shownNames.map((name, i) => `
+    <div class="list-row">
+      <div class="meta">
+        <h4>${esc(name)}</h4>
+      </div>
+      <div class="actions">
+        <button type="button" class="text" data-pedit="${i}">编辑</button>
+        <button type="button" class="text danger-text" data-pdel="${i}">删除</button>
+      </div>
+    </div>`).join('') || '<p class="hint">暂无预设。</p>'
+}
+
+function openPresetModal(name) {
+  editPresetKey = name || null
+  $('prompt-title').textContent = name ? '编辑：' + name : '添加 prompt'
+  $('pp-name').value = name || ''
+  $('pp-prompt').value = (name && presets[name] ? presets[name].system_prompt : '') || ''
+  $('prompt-modal').style.display = 'flex'
+}
+
+function closePresetModal() { $('prompt-modal').style.display = 'none'; editPresetKey = null }
+
+$('prompt-filter').addEventListener('input', renderPresets)
+$('add-preset').onclick = () => openPresetModal(null)
+$('pp-cancel').onclick = closePresetModal
+
+$('preset-list').addEventListener('click', async (ev) => {
+  const edit = ev.target.closest('[data-pedit]')
+  if (edit) { openPresetModal(shownNames[Number(edit.dataset.pedit)]); return }
+  const del = ev.target.closest('[data-pdel]')
+  if (!del) return
+  const name = shownNames[Number(del.dataset.pdel)]
+  if (!confirm('确认删除预设「' + name + '」？仍有 agent 引用时会禁止删除。')) return
+  const next = { ...presets }
+  delete next[name]
+  const r = await rpc('savePrompts', { prompts: next })
+  setMsg(r.ok ? '✅ 已删除' : '❌ ' + (r.error || '删除失败'), !r.ok)
+  if (r.ok) loadPrompts()
+})
+
+$('pp-save').onclick = async () => {
+  const name = $('pp-name').value.trim()
+  if (!name) { setMsg('⚠️ 预设名必填', true); return }
+  const next = { ...presets }
+  if (editPresetKey !== null && editPresetKey !== name) delete next[editPresetKey]
+  next[name] = { system_prompt: $('pp-prompt').value, tools: [] }
+  const r = await rpc('savePrompts', { prompts: next })
+  setMsg(r.ok ? '✅ 已保存' : '❌ ' + (r.error || '保存失败'), !r.ok)
+  if (r.ok) { closePresetModal(); loadPrompts() }
+}
+
+async function loadPrompts() {
+  const r = await rpc('listPrompts', { query: '' })
+  if (!r.ok || !r.value) { setMsg('❌ ' + (r.error || '加载失败'), true); return }
+  const items = Array.isArray(r.value) ? r.value : (r.value.prompts || [])
+  presets = {}
+  for (const item of items) {
+    presets[item.name] = { system_prompt: item.system_prompt || '', tools: item.tools || [] }
+  }
+  renderPresets()
+}
+
+loadPrompts()
+</script>
+</body>
+</html>

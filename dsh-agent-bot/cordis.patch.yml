@@ -1,0 +1,9 @@
+# @oddity/dsh-agent-bot bundle patch：作为 profile 的增量层插入到 dsh-base 之上。
+#
+# 行 id 供上层 patch 与用户 cordis.patch.yml 按 id 寻址，最后写入者生效。
+# 配置目录在 host 半体读取 process.env.AGENT_BOT_CONFIG_DIR，
+# 缺省 ~/.dsh/storages/agentbot。
+
+- insert:
+    - id: agent-bot
+      name: '@oddity/dsh-agent-bot'

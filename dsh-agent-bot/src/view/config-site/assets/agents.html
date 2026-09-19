@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>智能体中枢 · Agents</title>
+<link rel="stylesheet" href="/agent-bot/site.css"/>
+<script src="/agent-bot/site.js"></script>
+</head>
+<body>
+<div class="msg" id="msg"></div>
+<div class="layout">
+  <nav class="sidebar">
+  <div class="side-logo"><span class="hex">⬡</span>AgentBot</div>
+  <div class="side-status"><span class="dot" id="hub-dot" title="Provider 在线状态"></span><span id="side-dot-txt">Provider 状态</span></div>
+
+
+    <a class="nav" href="/agent-bot/skills">Skills</a>
+    <a class="nav" href="/agent-bot/prompts">Prompts</a>
+    <a class="nav active" href="/agent-bot/agents">Agents</a>
+    <a class="nav" href="/agent-bot/chat">对话</a>
+    <a class="nav" href="/agent-bot/settings">全局设置</a>
+    <a class="nav" href="/agent-bot/log">日志</a>
+  </nav>
+  <main class="content">
+    <section>
+      <div class="row" style="margin:0 0 8px">
+        <b style="font-size:20px">智能体</b>
+        <span class="grow"></span>
+        <button type="button" id="add-agent" class="btn pri">+ 添加智能体</button>
+      </div>
+      <div class="box" id="agent-list"></div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="agent-modal" style="display:none">
+  <div class="modal-box wide">
+    <div class="mtitle"><span id="agent-title">添加智能体 / 编辑</span> <span class="mono" style="font-size:12px;color:var(--t2)" id="a-id-hint"></span></div>
+    <!-- ① 基础信息 -->
+    <div class="fsec">
+      <b>① 基础信息</b>
+      <div class="fld"><label>名称</label><div class="ctl"><input id="a-name" placeholder="必填，如 联运助手"/></div></div>
+      <div class="fld"><label>命令别名</label><div class="ctl"><input id="a-slug" placeholder="英文，如 designer；输 /agent_别名 调用（可空）"/></div></div>
+      <div class="fld"><label>功能说明</label><div class="ctl"><textarea id="a-desc" rows="3" placeholder="多行，可空；也供任务 lead 路由挑人"></textarea></div></div>
+      <div class="fld"><label>workspace</label><div class="ctl row">
+        <span class="input grow" id="a-workspace" style="background:var(--bg)">（未选择）</span>
+        <button type="button" class="btn" id="pick-workspace">选择目录</button>
+      </div></div>
+      <div class="statebar err" style="display:none" id="a-ws-error">状态：workspace 撞库/不可 mkdir —— saveAgent 显式报错（独占约束）</div>
+    </div>
+    <!-- ② prompt 绑定 -->
+    <div class="fsec">
+      <b>② prompt 绑定</b>
+      <div class="fld"><label>预设</label><div class="ctl"><select id="a-prompt"><option value="">（不绑定）</option></select></div></div>
+      <div class="fld"><label>注入位置</label><div class="ctl"><select id="a-prompt-placement">
+        <option value="system">系统提示词</option>
+        <option value="user">追加到用户对话</option>
+      </select></div></div>
+    </div>
+    <!-- ③ 技能组 -->
+    <div class="fsec">
+      <b>③ 技能组</b>
+      <div class="fld"><label>已选组</label><div class="ctl row" id="a-groups"></div></div>
+      <div class="fld"><label></label><div class="ctl"><label class="check" style="margin:0"><input type="checkbox" id="a-append-skills"/> 追加到 prompt（关 = 只软链不写入；改了会开新会话）</label></div></div>
+      <div class="apply-stack">
+        <div class="radio-list apply-tools" id="aw-tools"></div>
+      </div>
+      <div class="fld" style="align-items:center"><label>落点路径</label><div class="ctl row"><span class="mono grow" id="a-apply-path" style="color:var(--t2)">选择上方位后出现 →</span><button type="button" class="btn txt" id="a-apply">应用到工作区</button></div></div>
+    </div>
+    <!-- ④ 会话与权限 -->
+    <div class="fsec">
+      <b>④ 会话与权限</b>
+      <div class="fld"><label></label><div class="ctl"><label class="check" style="margin:0;display:inline-flex;margin-right:16px"><input type="checkbox" id="a-reuse"/> 续接会话</label><label class="check" style="margin:0;display:inline-flex"><input type="checkbox" id="a-by-sender"/> 按人隔离</label></div></div>
+      <div class="fld"><label>空闲超时</label><div class="ctl row"><span><input id="a-timeout" type="number" min="0" step="1" style="width:70px"/></span><span style="font-size:12px;color:var(--t2)"> 分钟，0=不拆（关续接时禁用）</span></div></div>
+      <div class="fld"><label>权限</label><div class="ctl row">
+        <select id="a-permission" style="flex:1;min-width:0">
+          <option value="danger-full-access">完全访问（默认）</option>
+          <option value="workspace-write">工作区可写</option>
+          <option value="read-only">只读</option>
+        </select>
+        <span style="font-size:12px;color:var(--t2)">改权限对已打开会话不生效</span>
+      </div></div>
+    </div>
+    <div class="row" style="justify-content:flex-end">
+      <button type="button" class="btn" id="a-cancel">取消</button>
+      <button type="button" class="btn pri" id="a-save">保存</button>
+    </div>
+    <div class="note">弹窗不展示、不清 sessions 槽（运行时维护）；改 prompt/位置/技能组/追加开关 → 指纹变化 → 下次 ask 新会话</div>
+  </div>
+</div>
+
+<div class="modal" id="groups-modal" style="display:none">
+  <div class="modal-box">
+    <h4>添加技能组</h4>
+    <div class="picker" id="ag-pick"></div>
+    <p class="hint" id="ag-empty" style="display:none">没有技能组。</p>
+    <div class="form-actions">
+      <button type="button" id="ag-cancel" class="ghost">取消</button>
+      <button type="button" id="ag-ok">确认</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="dir-modal" style="display:none">
+  <div class="modal-box">
+    <h4 id="dir-title">选择目录</h4>
+    <p class="path-read" id="dir-path"></p>
+    <div class="row">
+      <button type="button" id="dir-up" class="ghost">上一级</button>
+      <button type="button" id="dir-home" class="ghost">家目录</button>
+    </div>
+    <div class="dir-list" id="dir-entries"></div>
+    <p class="hint" id="dir-empty" style="display:none">此目录没有可见子目录。</p>
+    <button type="button" id="dir-pick">选择此目录</button>
+    <button type="button" id="dir-cancel" class="ghost">取消</button>
+  </div>
+</div>
+
+<script>
+let agents = []
+let prompts = []
+let groups = {}
+let skillApply = {}
+let editId = ''
+let workspacePath = ''
+let selectedGroups = []
+
+function setWorkspacePath(path) {
+  workspacePath = path || ''
+  $('a-workspace').textContent = workspacePath || '（未选择）'
+  if ($('aw-tools')) fillWorkspaceApplyRadios()
+}
+
+function syncTimeoutDisabled() {
+  $('a-timeout').disabled = !$('a-reuse').checked
+}
+
+function promptName(a) {
+  return (a.prompt && a.prompt.trim()) ? a.prompt + '(system)' : 'default(system)'
+}
+function renderAgents() {
+  if (!agents.length) {
+    $('agent-list').innerHTML = '<div class="statebar">状态：空数据 ——「暂无智能体。点『+ 添加智能体』创建。」（对话页同步提示先来本页）</div>'
+    return
+  }
+  $('agent-list').innerHTML = agents.map((a, i) => `
+    <div class="li">
+      <div class="grow">
+        <b>${esc(a.name)}</b>
+        <br><span style="font-size:12px;color:var(--t2)">${esc(a.description || '')}</span>
+        <br>${(a.skill_groups || []).map((g) => '<span class="chip">' + esc(g) + '</span>').join('')}
+        <div class="mono" style="color:var(--t2)">workspace: ${esc(a.workspace || '—')} · prompt: ${esc(promptName(a))} · ${a.permission_mode === 'danger-full-access' ? '完全访问' : a.permission_mode} · 会话: ${a.reuse_session !== false ? '续接' : '不复用'}${a.session_by_sender ? '/按人' : ''}${a.reuse_session !== false && a.session_timeout_minutes ? '/' + esc(a.session_timeout_minutes) + 'min' : ''}</div>
+      </div>
+      <div style="margin-left:auto;white-space:nowrap;text-align:right">
+        <button type="button" class="btn txt" data-aedit="${i}">编辑</button>
+        <button type="button" class="btn txt" style="color:var(--danger)" data-adel="${i}">删除</button>
+        <button type="button" class="btn txt" data-achat="${esc(a.id)}">去对话</button>
+      </div>
+    </div>`).join('')
+}
+
+function fillPromptSelect(current) {
+  $('a-prompt').innerHTML = '<option value="">（不绑定）</option>' + prompts.map((p) =>
+    `<option value="${esc(p.name)}"${p.name === current ? ' selected' : ''}>${esc(p.name)}</option>`
+  ).join('')
+  syncPromptPlacementDisabled()
+}
+
+function syncPromptPlacementDisabled() {
+  $('a-prompt-placement').disabled = !$('a-prompt').value
+}
+
+function groupById(id) {
+  return groups[id]
+}
+
+function fillGroups(selected) {
+  selectedGroups = uniqueIds(selected || [])
+  renderGroupChips()
+}
+
+function uniqueIds(ids) {
+  const seen = new Set()
+  const out = []
+  for (const id of ids) {
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+function renderGroupChips() {
+  const chips = selectedGroups.map((id, i) => {
+    const g = groupById(id)
+    const label = g ? g.name : id
+    return `<span class="chip">${esc(label)}<button type="button" class="chip-x" data-gdel="${i}" aria-label="删除">×</button></span>`
+  }).join('')
+  $('a-groups').innerHTML = (chips || '<span style="font-size:12px;color:var(--t2)">尚未添加技能组。</span>') +
+    '<span class="grow"></span><button type="button" class="btn txt" id="a-add-groups">添加技能组</button>'
+}
+
+function listedGroups() {
+  return Object.values(groups).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+}
+
+function openGroupsModal() {
+  const taken = new Set(selectedGroups)
+  const items = listedGroups()
+  $('ag-pick').innerHTML = items.map((g) => `
+    <label>
+      <input type="checkbox" value="${esc(g.id)}"${taken.has(g.id) ? ' checked' : ''}/>
+      ${esc(g.name)} <span class="hint">${esc(g.id)}</span>
+    </label>`).join('')
+  $('ag-empty').style.display = items.length ? 'none' : 'block'
+  $('ag-ok').disabled = items.length === 0
+  $('groups-modal').style.display = 'flex'
+}
+
+function closeGroupsModal() {
+  $('groups-modal').style.display = 'none'
+}
+
+function workspaceApplyTargets() {
+  const apply = skillApply && typeof skillApply === 'object' ? skillApply : {}
+  const preferred = ['dsh', 'openclaw', 'claudecode']
+  const names = Object.keys(apply)
+  const ordered = preferred.filter((t) => names.includes(t)).concat(names.filter((t) => !preferred.includes(t)).sort())
+  const opts = []
+  for (const tool of ordered) {
+    const slots = apply[tool]
+    if (!slots || typeof slots !== 'object') continue
+    const slotNames = Object.keys(slots).filter((slot) => slot !== 'global' && typeof slots[slot] === 'string' && slots[slot])
+    const slot = slotNames.includes('workspace') ? 'workspace' : slotNames.sort()[0]
+    if (!slot) continue
+    opts.push({ tool, slot, template: slots[slot] })
+  }
+  return opts
+}
+
+function resolveWorkspaceApplyPath(template) {
+  const ws = (workspacePath || '').trim()
+  if (!ws) return '（未选择 workspace）'
+  return String(template || '').split('{workspace}').join(ws)
+}
+
+function selectedWorkspaceApply() {
+  const el = $('aw-tools').querySelector('input[name=aw-tool]:checked')
+  if (!el) return null
+  const tab = el.value.indexOf('\t')
+  if (tab < 0) return null
+  return { tool: el.value.slice(0, tab), slot: el.value.slice(tab + 1) }
+}
+
+function fillWorkspaceApplyRadios() {
+  const opts = workspaceApplyTargets()
+  const prev = selectedWorkspaceApply()
+  const selected = prev && opts.some((o) => o.tool === prev.tool && o.slot === prev.slot)
+    ? prev.tool + '\t' + prev.slot
+    : (opts[0] ? opts[0].tool + '\t' + opts[0].slot : '')
+  $('aw-tools').innerHTML = opts.map((o) => `
+    <label class="apply-opt">
+      <span class="apply-opt-head">
+        <input type="radio" name="aw-tool" value="${esc(o.tool + '\t' + o.slot)}"${selected === o.tool + '\t' + o.slot ? ' checked' : ''}/>
+        ${esc(o.tool)}
+      </span>
+      <span class="apply-opt-path">${esc(resolveWorkspaceApplyPath(o.template))}</span>
+    </label>`).join('') || '<p class="hint">没有工作区落点。</p>'
+  $('a-apply').disabled = !editId || opts.length === 0
+  if ($('a-apply-path')) {
+    const sel = selectedWorkspaceApply()
+    const found = sel && opts.find((o) => o.tool === sel.tool && o.slot === sel.slot)
+    $('a-apply-path').textContent = found ? ('→ ' + resolveWorkspaceApplyPath(found.template)) : (opts.length ? '' : '没有工作区落点')
+  }
+}
+
+function selectedGroupIds() {
+  return selectedGroups.slice()
+}
+
+function openEditor(agent) {
+  editId = agent ? agent.id : ''
+  $('agent-title').textContent = agent ? '编辑：' + agent.name : '添加智能体'
+  $('a-id-hint').textContent = agent ? ('id：' + agent.id + '（创建后不可改）') : '保存时生成 id，之后不可改。'
+  $('a-name').value = agent ? agent.name : ''
+  $('a-slug').value = agent ? (agent.slug || '') : ''
+  $('a-desc').value = agent ? (agent.description || '') : ''
+  setWorkspacePath(agent ? agent.workspace : '')
+  fillPromptSelect(agent ? agent.prompt : '')
+  $('a-prompt-placement').value = agent && agent.prompt_placement === 'user' ? 'user' : 'system'
+  syncPromptPlacementDisabled()
+  fillGroups(agent ? agent.skill_groups : [])
+  $('a-append-skills').checked = agent ? agent.prompt_append_skills !== false : true
+  fillWorkspaceApplyRadios()
+  $('a-reuse').checked = agent ? agent.reuse_session !== false : true
+  $('a-by-sender').checked = agent ? !!agent.session_by_sender : false
+  $('a-timeout').value = String(agent ? agent.session_timeout_minutes : 30)
+  $('a-permission').value = agent && agent.permission_mode ? agent.permission_mode : 'danger-full-access'
+  syncTimeoutDisabled()
+  $('agent-modal').style.display = 'flex'
+}
+
+function closeEditor() {
+  closeGroupsModal()
+  $('agent-modal').style.display = 'none'
+  editId = ''
+}
+
+$('a-reuse').addEventListener('change', syncTimeoutDisabled)
+$('a-prompt').addEventListener('change', syncPromptPlacementDisabled)
+$('a-groups').addEventListener('click', (ev) => {
+  if (ev.target.closest('#a-add-groups')) {
+    openGroupsModal()
+    return
+  }
+  const btn = ev.target.closest('[data-gdel]')
+  if (!btn) return
+  const i = Number(btn.dataset.gdel)
+  selectedGroups = selectedGroups.filter((_, idx) => idx !== i)
+  renderGroupChips()
+})
+$('aw-tools').addEventListener('change', () => {
+  const sel = selectedWorkspaceApply()
+  if (!$('a-apply-path')) return
+  if (sel) {
+    const found = workspaceApplyTargets().find((o) => o.tool === sel.tool && o.slot === sel.slot)
+    $('a-apply-path').textContent = found ? ('→ ' + resolveWorkspaceApplyPath(found.template)) : ''
+  } else {
+    $('a-apply-path').textContent = '没有工作区落点'
+  }
+})
+$('ag-cancel').onclick = closeGroupsModal
+$('ag-ok').onclick = () => {
+  const picked = [...$('ag-pick').querySelectorAll('input[type=checkbox]:checked')].map((el) => el.value)
+  selectedGroups = uniqueIds(picked)
+  renderGroupChips()
+  closeGroupsModal()
+}
+$('a-groups').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-gdel]')
+  if (!btn) return
+  const i = Number(btn.dataset.gdel)
+  selectedGroups = selectedGroups.filter((_, idx) => idx !== i)
+  renderGroupChips()
+})
+$('add-agent').onclick = () => openEditor(null)
+$('a-cancel').onclick = closeEditor
+$('pick-workspace').onclick = () => openDirectoryPicker({
+  title: '选择 workspace',
+  startPath: workspacePath,
+  onPick: (path) => setWorkspacePath(path),
+})
+
+$('agent-list').addEventListener('click', async (ev) => {
+  const edit = ev.target.closest('[data-aedit]')
+  if (edit) { openEditor(agents[Number(edit.dataset.aedit)]); return }
+  const del = ev.target.closest('[data-adel]')
+  const chat = ev.target.closest('[data-achat]')
+  if (chat) { location.href = '/agent-bot/chat?agent=' + encodeURIComponent(chat.dataset.achat); return }
+  if (!del) return
+  const a = agents[Number(del.dataset.adel)]
+  if (!confirm('确认删除智能体「' + a.name + '」？会话槽会一并删除。')) return
+  const r = await rpc('deleteAgent', { id: a.id })
+  setMsg(r.ok ? '✅ 已删除' : '❌ ' + (r.error || '删除失败'), !r.ok)
+  if (r.ok) { closeEditor(); loadAll() }
+})
+
+$('a-apply').onclick = async () => {
+  if (!editId) { setMsg('⚠️ 请先保存智能体', true); return }
+  if (!workspacePath.trim()) { setMsg('⚠️ workspace 必填，请选择目录', true); return }
+  const sel = selectedWorkspaceApply()
+  if (!sel) { setMsg('⚠️ 没有可应用的落点', true); return }
+  const groupIds = selectedGroupIds()
+  if (groupIds.length === 0) { setMsg('⚠️ 请先选择技能组', true); return }
+  const r = await rpc('applySkillGroups', { id: editId, tool: sel.tool, slot: sel.slot, groupIds })
+  setMsg(r.ok ? '✅ 已应用到 ' + sel.tool + ' · ' + sel.slot : '❌ ' + (r.error || '应用失败'), !r.ok)
+}
+
+
+$('a-save').onclick = async () => {
+  const name = $('a-name').value.trim()
+  const workspace = workspacePath.trim()
+  if (!name) { setMsg('⚠️ 名称必填', true); return }
+  if (!workspace) { setMsg('⚠️ workspace 必填，请选择目录', true); return }
+  const timeout = Number($('a-timeout').value)
+  const r = await rpc('saveAgent', {
+    id: editId,
+    name,
+    slug: $('a-slug').value.trim(),
+    description: $('a-desc').value,
+    workspace,
+    prompt: $('a-prompt').value,
+    prompt_placement: $('a-prompt-placement').value,
+    skill_groups: selectedGroupIds(),
+    prompt_append_skills: $('a-append-skills').checked,
+    reuse_session: $('a-reuse').checked,
+    session_by_sender: $('a-by-sender').checked,
+    permission_mode: $('a-permission').value,
+    session_timeout_minutes: timeout,
+  })
+  const dropped = (r.ok && r.value && r.value.droppedSkillGroupIds) || []
+  setMsg(r.ok ? ('✅ 已保存' + (dropped.length ? '，剔除未知组：' + dropped.join(', ') : '')) : '❌ ' + (r.error || '保存失败'), !r.ok)
+  if (r.ok) { closeEditor(); loadAll() }
+}
+
+async function loadAll(keepEditor) {
+  const [la, lp, ls] = await Promise.all([rpc('listAgents'), rpc('listPrompts', { query: '' }), rpc('list')])
+  if (la.ok && la.value) agents = Array.isArray(la.value) ? la.value : (la.value.agents || [])
+  if (lp.ok && lp.value) prompts = Array.isArray(lp.value) ? lp.value : (lp.value.prompts || [])
+  if (ls.ok && ls.value) {
+    groups = ls.value.skill_groups || {}
+    skillApply = ls.value.skill_apply || {}
+  }
+  renderAgents()
+  if (keepEditor && editId) {
+    const current = agents.find((a) => a.id === editId)
+    if (current) openEditor(current)
+  }
+}
+
+loadAll()
+</script>
+</body>
+</html>
