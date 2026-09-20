@@ -59,14 +59,14 @@
       </select></div></div>
     </div>
     <!-- ③ 技能组 -->
-    <div class="fsec">
+    <div class="fsec compact-skills">
       <b>③ 技能组</b>
       <div class="fld"><label>已选组</label><div class="ctl row" id="a-groups"></div></div>
-      <div class="fld"><label></label><div class="ctl"><label class="check" style="margin:0"><input type="checkbox" id="a-append-skills"/> 追加到 prompt（关 = 只软链不写入；改了会开新会话）</label></div></div>
+      <div class="fld"><label></label><div class="ctl"><label class="check" style="margin:0"><input type="checkbox" id="a-append-skills"/> 追加到 prompt</label></div></div>
       <div class="apply-stack">
-        <div class="fld"><label>应用到</label><div class="ctl row" style="flex-wrap:wrap" id="aw-tools"></div></div>
-        <div class="fld" style="align-items:center"><label>落点路径</label><div class="ctl row"><span class="mono grow" id="a-apply-path" style="color:var(--t2)">选择上方位后出现 →</span><button type="button" class="btn txt" id="a-apply">应用到工作区</button></div></div>
-        <div class="fld"><label></label><div class="ctl note" style="margin:0">未保存的新建 agent 时按钮禁用；未选组 → 「请先选择技能组」；软链名冲突显式报错</div></div>
+        <div class="fld"><label>用到</label><div class="ctl" id="aw-tools"></div></div>
+        <div class="fld"><label>落点路径</label><div class="ctl row"><span class="mono grow" id="a-apply-path" style="color:var(--t2);padding-top:3px">选择落点 →</span><button type="button" class="btn txt" id="a-apply">应用到工作区</button></div></div>
+        <div class="fld"><label></label><div class="ctl note" style="margin:0">未保存的新建 agent 时禁用；未选组 → 「请先选择技能组」；软链名冲突显式报错</div></div>
       </div>
     </div>
     <!-- ④ 会话与权限 -->
@@ -261,7 +261,7 @@ function fillWorkspaceApplyRadios() {
     ? prev.tool + '\t' + prev.slot
     : (opts[0] ? opts[0].tool + '\t' + opts[0].slot : '')
   $('aw-tools').innerHTML = (opts.map((o) => `
-    <label style="display:inline-flex;align-items:center;gap:4px;margin-right:16px;font-size:13px;color:var(--t1);height:24px">
+    <label style="display:inline-flex;align-items:center;gap:4px;margin:0;font-size:13px;color:var(--t1);height:22px">
       <input type="radio" name="aw-tool" value="${esc(o.tool + '\t' + o.slot)}"${selected === o.tool + '\t' + o.slot ? ' checked' : ''} style="accent-color:var(--brand)"/>
       ${esc(o.tool)}
     </label>`).join('')) || '<p class="hint">没有工作区落点。</p>'
