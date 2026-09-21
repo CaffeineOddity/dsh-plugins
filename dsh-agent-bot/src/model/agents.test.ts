@@ -50,6 +50,8 @@ function seed(overrides: Partial<AgentBotFileConfig> = {}): void {
       claudecode: { global: '~/.claude/skills', workspace: '{workspace}/.claude/skills' },
     },
     agent_wait_timeout_ms: 180000,
+    expert_liveness_max_renew: 3,
+    task_round_timeout_ms: 7200000,
     ...overrides,
   })
 }
@@ -66,6 +68,8 @@ function write(partial: Partial<AgentWrite> & Pick<AgentWrite, 'name' | 'workspa
     session_by_sender: false,
     permission_mode: 'danger-full-access',
     session_timeout_minutes: 30,
+    concurrency: 'serial',
+    needs_target_workspace: false,
     ...partial,
   }
 }
@@ -113,6 +117,8 @@ describe('CRUD', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: 'serial',
+          needs_target_workspace: false,
           sessions: { r1_1: { sessionId: 'sid', lastAskAt: 1 } },
         },
       ],
@@ -198,6 +204,8 @@ describe('clearSession', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: 'serial',
+          needs_target_workspace: false,
           sessions: {
             r1_1: { sessionId: 'sid-1', lastAskAt: 1 },
             r1_2: { sessionId: 'sid-2', lastAskAt: 2 },
@@ -229,6 +237,8 @@ describe('touchSession', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: 'serial',
+          needs_target_workspace: false,
           sessions: { r1_1: { sessionId: 'sid-old', lastAskAt: 1 } },
         },
       ],

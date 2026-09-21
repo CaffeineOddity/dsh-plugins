@@ -82,6 +82,7 @@ describe('normalize', () => {
     expect(cfg.agents[0]).toEqual({
       id: 'a1',
       name: '联运',
+      slug: undefined,
       description: '',
       workspace: '',
       prompt: '',
@@ -92,6 +93,9 @@ describe('normalize', () => {
       session_by_sender: false,
       permission_mode: 'danger-full-access',
       session_timeout_minutes: 30,
+      concurrency: 'serial',
+      needs_target_workspace: false,
+      agent_wait_timeout_ms: undefined,
       sessions: {},
     })
     expect(cfg.skill_apply).toEqual({
@@ -200,6 +204,8 @@ describe('loadConfig / saveConfig', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: 'serial',
+          needs_target_workspace: false,
           sessions: { r1_6031348: { sessionId: 'uuid-1', lastAskAt: 1730000000000 } },
         },
       ],
@@ -207,6 +213,8 @@ describe('loadConfig / saveConfig', () => {
         dsh: { global: '~/.dsh/skills', workspace: '{workspace}/.dsh/skills' },
       },
       agent_wait_timeout_ms: 60000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     }
     saveConfig(data)
     expect(existsSync(configFilePath())).toBe(true)
@@ -219,6 +227,8 @@ describe('loadConfig / saveConfig', () => {
     expect(loaded.prompts.default.system_prompt).toBe('hi')
     const disk = JSON.parse(readFileSync(configFilePath(), 'utf8')) as Record<string, unknown>
     expect(disk.agent_wait_timeout_ms).toBe(60000)
+    expect(disk.expert_liveness_max_renew).toBe(3)
+    expect(disk.task_round_timeout_ms).toBe(7200000)
     expect(disk.skill_groups).toBeUndefined()
     expect(disk.prompts).toBeUndefined()
     expect(disk.agents).toBeUndefined()
@@ -292,6 +302,8 @@ describe('skills-map.json', () => {
       agents: [],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const disk = JSON.parse(readFileSync(configFilePath(), 'utf8')) as Record<string, unknown>
     expect(disk.skills).toBeUndefined()

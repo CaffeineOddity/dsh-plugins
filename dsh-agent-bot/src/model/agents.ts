@@ -11,11 +11,14 @@ import {
   expandHomePath,
   loadConfig,
   loadSkillsMap,
+  parseConcurrency,
+  parseAgentWaitTimeoutOverride,
   parsePermissionMode,
   saveConfig,
   parsePromptPlacement,
   type AgentBotFileConfig,
   type AgentConfig,
+  type Concurrency,
   type PermissionMode,
   type PromptPlacement,
   type SkillApplyConfig,
@@ -46,6 +49,9 @@ export interface AgentWrite {
   session_by_sender: boolean
   permission_mode: PermissionMode
   session_timeout_minutes: number
+  concurrency: Concurrency
+  needs_target_workspace: boolean
+  agent_wait_timeout_ms?: number
 }
 
 /** 当前 agents 拷贝。 */
@@ -126,6 +132,9 @@ export function saveAgent(input: AgentWrite): SaveAgentResult {
     session_by_sender: input.session_by_sender === true,
     permission_mode: parsePermissionMode(input.permission_mode),
     session_timeout_minutes: timeout,
+    concurrency: parseConcurrency(input.concurrency),
+    needs_target_workspace: input.needs_target_workspace === true,
+    agent_wait_timeout_ms: parseAgentWaitTimeoutOverride(input.agent_wait_timeout_ms),
     sessions: existing === undefined ? {} : { ...existing.sessions },
   }
   const agents = creating
@@ -361,6 +370,8 @@ function persistAgents(cfg: AgentBotFileConfig, agents: AgentConfig[]): void {
     agents,
     skill_apply: cfg.skill_apply,
     agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
+    expert_liveness_max_renew: cfg.expert_liveness_max_renew,
+    task_round_timeout_ms: cfg.task_round_timeout_ms,
   })
 }
 

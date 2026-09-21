@@ -41,6 +41,17 @@
           <span class="hint" style="margin:0">毫秒，范围 1000–1800000，默认 180000（3 分钟）</span>
         </div>
         <p class="hint">超时未拿到回复时通道先回「处理中」，后台完成后再补发。保存后下次 ask 立即生效。</p>
+        <div class="row">
+          <label>专家续期上限</label>
+          <input id="st-renew" type="number" min="1" step="1" style="width:220px;flex:0 0 auto"/>
+          <span class="hint" style="margin:0">正整数，默认 3。专家仍 live 时最多续等这么多次窗口</span>
+        </div>
+        <div class="row">
+          <label>任务墙钟</label>
+          <input id="st-round" type="number" min="1" step="1000" style="width:220px;flex:0 0 auto"/>
+          <span class="hint" style="margin:0">正整数毫秒，默认 7200000（2 小时），禁止 0 表示永不超时</span>
+        </div>
+        <p class="hint">墙钟从任务创建／问卷发出起算，到点收口「处理超时」或只作废待决。</p>
         <button type="button" id="st-save" class="primary">保存</button>
       </div>
     </section>
@@ -51,6 +62,8 @@ async function loadSettings() {
   const r = await rpc('settings')
   if (r.ok && r.value) {
     $('st-timeout').value = String(r.value.agent_wait_timeout_ms ?? 180000)
+    $('st-renew').value = String(r.value.expert_liveness_max_renew ?? 3)
+    $('st-round').value = String(r.value.task_round_timeout_ms ?? 7200000)
     if (r.value.configDir) setText('st-configDir', r.value.configDir)
     if (Array.isArray(r.value.providers)) {
       setText('st-providers', r.value.providers.length === 0
@@ -60,8 +73,12 @@ async function loadSettings() {
   }
 }
 $('st-save').onclick = async () => {
-  const r = await rpc('saveSettings', { agent_wait_timeout_ms: $('st-timeout').value.trim() })
-  setMsg(r.ok ? '✅ 已保存超时 ' + ((r.value && r.value.agent_wait_timeout_ms) || '') + ' ms' : '❌ ' + (r.error || '保存失败'), !r.ok)
+  const r = await rpc('saveSettings', {
+    agent_wait_timeout_ms: $('st-timeout').value.trim(),
+    expert_liveness_max_renew: $('st-renew').value.trim(),
+    task_round_timeout_ms: $('st-round').value.trim(),
+  })
+  setMsg(r.ok ? '✅ 已保存' : '❌ ' + (r.error || '保存失败'), !r.ok)
   if (r.ok) loadSettings()
 }
 loadSettings()

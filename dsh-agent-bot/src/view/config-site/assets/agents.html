@@ -83,6 +83,19 @@
         <span style="font-size:12px;color:var(--t2)">改权限对已打开会话不生效</span>
       </div></div>
     </div>
+    <!-- ⑤ 协作 -->
+    <div class="fsec compact-skills">
+      <b>⑤ 群内协作</b>
+      <div class="fld"><label>磁盘并发</label><div class="ctl row">
+        <select id="a-concurrency" style="width:180px">
+          <option value="serial">串行（默认）</option>
+          <option value="concurrent">并发</option>
+        </select>
+        <span style="font-size:12px;color:var(--t2)">并发时不同目标目录的 write 可并行</span>
+      </div></div>
+      <div class="fld"><label></label><div class="ctl"><label class="check" style="margin:0"><input type="checkbox" id="a-needs-target"/> 需要目标项目目录</label></div></div>
+      <div class="fld"><label>本轮等待</label><div class="ctl row"><span><input id="a-wait" type="number" min="0" step="1" style="width:90px" placeholder="全局"/></span><span style="font-size:12px;color:var(--t2)"> 毫秒，空=用全局，0=回退全局（专家巡检用）</span></div></div>
+    </div>
     <div class="row" style="justify-content:flex-end">
       <button type="button" class="btn" id="a-cancel">取消</button>
       <button type="button" class="btn pri" id="a-save">保存</button>
@@ -151,7 +164,7 @@ function renderAgents() {
         <b>${esc(a.name)}</b>
         <br><span style="font-size:12px;color:var(--t2)">${esc(a.description || '')}</span>
         <br>${(a.skill_groups || []).map((id) => { const g = groupById(id); return '<span class="chip">' + esc(g ? g.name : id) + '</span>' }).join('')}
-        <div class="mono" style="color:var(--t2)">workspace: ${esc(a.workspace || '—')} · prompt: ${esc(promptName(a))} · ${a.permission_mode === 'danger-full-access' ? '完全访问' : a.permission_mode} · 会话: ${a.reuse_session !== false ? '续接' : '不复用'}${a.session_by_sender ? '/按人' : ''}${a.reuse_session !== false && a.session_timeout_minutes ? '/' + esc(a.session_timeout_minutes) + 'min' : ''}</div>
+        <div class="mono" style="color:var(--t2)">workspace: ${esc(a.workspace || '—')} · prompt: ${esc(promptName(a))} · ${a.permission_mode === 'danger-full-access' ? '完全访问' : a.permission_mode} · 会话: ${a.reuse_session !== false ? '续接' : '不复用'}${a.session_by_sender ? '/按人' : ''}${a.reuse_session !== false && a.session_timeout_minutes ? '/' + esc(a.session_timeout_minutes) + 'min' : ''}${a.concurrency === 'concurrent' ? ' · 并发' : ''}${a.needs_target_workspace ? ' · 需目标目录' : ''}</div>
       </div>
       <div style="margin-left:auto;white-space:nowrap;text-align:right">
         <button type="button" class="btn txt" data-aedit="${i}">编辑</button>
@@ -295,6 +308,9 @@ function openEditor(agent) {
   $('a-by-sender').checked = agent ? !!agent.session_by_sender : false
   $('a-timeout').value = String(agent ? agent.session_timeout_minutes : 30)
   $('a-permission').value = agent && agent.permission_mode ? agent.permission_mode : 'danger-full-access'
+  $('a-concurrency').value = agent && agent.concurrency === 'concurrent' ? 'concurrent' : 'serial'
+  $('a-needs-target').checked = agent ? !!agent.needs_target_workspace : false
+  $('a-wait').value = agent && typeof agent.agent_wait_timeout_ms === 'number' ? String(agent.agent_wait_timeout_ms) : ''
   syncTimeoutDisabled()
   $('agent-modal').style.display = 'flex'
 }
@@ -396,6 +412,9 @@ $('a-save').onclick = async () => {
     session_by_sender: $('a-by-sender').checked,
     permission_mode: $('a-permission').value,
     session_timeout_minutes: timeout,
+    concurrency: $('a-concurrency').value,
+    needs_target_workspace: $('a-needs-target').checked,
+    agent_wait_timeout_ms: $('a-wait').value.trim() === '' ? undefined : Number($('a-wait').value),
   })
   const dropped = (r.ok && r.value && r.value.droppedSkillGroupIds) || []
   setMsg(r.ok ? ('✅ 已保存' + (dropped.length ? '，剔除未知组：' + dropped.join(', ') : '')) : '❌ ' + (r.error || '保存失败'), !r.ok)

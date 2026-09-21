@@ -127,8 +127,34 @@ export interface AgentSummary {
   workspace: string
 }
 
-/** 通道插件向大脑登记自己。dispose 在通道 unload 时必须调用。 */
+/** 通道登记时提供的一位群成员（agent 投影）。 */
+export interface AgentGroupMemberInfo {
+  agentId: string
+  name: string
+  description: string
+}
+
+/** deliver 收口请求：与本轮回发同形。 */
+export interface AgentDeliverRequest {
+  sessionParts: Record<string, string>
+  messages: AgentOutboundMessage[]
+}
+
+/**
+ * 通道插件向大脑登记自己。dispose 在通道 unload 时必须调用。
+ * `listGroupAgents` / `deliver` 可选（见 docs/specs/02-provider-contract.md）。
+ */
 export interface AgentChannelProviderRegistration {
+  id: string
+  label: string
+  /** 可选：按本轮 sessionParts 返回该群绑定了 agentId 的成员。缺省专家清单为空。 */
+  listGroupAgents?(sessionParts: Record<string, string>): AgentGroupMemberInfo[]
+  /** 可选：任务收口投递（与 ask 出站同形）。缺省只打日志。 */
+  deliver?(req: AgentDeliverRequest): Promise<void>
+}
+
+/** 已注册 Provider 的运行时表示（含可选反向能力）。 */
+export interface AgentChannelProviderInfo extends AgentChannelProviderRegistration {
   id: string
   label: string
 }
@@ -141,4 +167,6 @@ export interface AgentBotService {
   ask(req: AgentAskRequest): Promise<AgentAskResponse>
   /** /agent 命令与 rpc 共用：解析 rawInput 调本地 ask，展平 pending，返回所有条。 */
   localAsk(rawInput: string, sessionKey?: string): Promise<{ messages: AgentOutboundMessage[]; error?: string }>
+  /** 按 providerId 查已登记通道的收口能力。 */
+  providerDeliver(providerId: string): ((req: AgentDeliverRequest) => Promise<void>) | undefined
 }

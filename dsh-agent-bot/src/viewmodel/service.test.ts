@@ -98,11 +98,15 @@ function seedRunnableAgent(sessionBySender: boolean, timeoutMs: number): void {
         session_by_sender: sessionBySender,
         permission_mode: 'danger-full-access',
         session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
         sessions: {},
       },
     ],
     skill_apply: {},
     agent_wait_timeout_ms: timeoutMs,
+    expert_liveness_max_renew: 3,
+    task_round_timeout_ms: 7200000,
   })
 }
 
@@ -160,11 +164,15 @@ describe('listAgents / getAgent', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: { r1_1: { sessionId: 'sid', lastAskAt: 1 } },
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const svc = createAgentBotService(emptyHostServices())
     expect(svc.listAgents()).toEqual([
@@ -248,11 +256,15 @@ describe('ask 校验先于回合', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: {},
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
@@ -283,11 +295,15 @@ describe('ask 校验先于回合', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: {},
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const svc = createAgentBotService(
       fakeHost(
@@ -340,11 +356,15 @@ describe('ask 校验先于回合', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: {},
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
@@ -379,11 +399,15 @@ describe('ask 校验先于回合', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: {},
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
@@ -401,6 +425,8 @@ describe('ask 校验先于回合', () => {
       agents: [cfg],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     await svc.ask({ ...req, meta: { ...req.meta, traceId: 't2' } })
     const second = getAgent('a1')?.sessions.r1_1
@@ -428,18 +454,22 @@ describe('ask 校验先于回合', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: {},
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const followups: unknown[] = []
     const svc = createAgentBotService(fakeHost([], idleNow, { followups }))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     await svc.ask(askReq('t1', 'alice'))
     const payload = followups[0] as { content: Array<{ text: string }> }
-    expect(payload.content[0]?.text).toBe('用户[alice]: 你好\n\n你是alice助手')
+    expect(payload.content[0]?.text).toBe('用户[alice]: 你好\n\n你是alice助手\n\n——本群任务板（specs/12）——\n（本群暂无 running 任务；你可以 open_task 新建一份，或直接自己做）')
     expect(getAgent('a1')?.sessions.r1_1?.promptFingerprint).toBe('user\n你是{{sender}}助手')
   })
 
@@ -463,18 +493,22 @@ describe('ask 校验先于回合', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: {},
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const followups: unknown[] = []
     const svc = createAgentBotService(fakeHost([], idleNow, { followups }))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     await svc.ask(askReq('t1', 'alice'))
     const payload = followups[0] as { content: Array<{ text: string }> }
-    expect(payload.content[0]?.text).toBe('用户[alice]: 你好\n\n角色说明\n\n推荐工具：union-xxx, git-skill')
+    expect(payload.content[0]?.text).toBe('用户[alice]: 你好\n\n角色说明\n\n推荐工具：union-xxx, git-skill\n\n——本群任务板（specs/12）——\n（本群暂无 running 任务；你可以 open_task 新建一份，或直接自己做）')
     expect(getAgent('a1')?.sessions.r1_1?.promptFingerprint).toBe('user\n角色说明\n\n推荐工具：union-xxx, git-skill')
   })
 
@@ -498,18 +532,22 @@ describe('ask 校验先于回合', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: {},
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const followups: unknown[] = []
     const svc = createAgentBotService(fakeHost([], idleNow, { followups }))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     await svc.ask(askReq('t1', 'alice'))
     const payload = followups[0] as { content: Array<{ text: string }> }
-    expect(payload.content[0]?.text).toBe('用户[alice]: 你好\n\n角色说明')
+    expect(payload.content[0]?.text).toBe('用户[alice]: 你好\n\n角色说明\n\n——本群任务板（specs/12）——\n（本群暂无 running 任务；你可以 open_task 新建一份，或直接自己做）')
     expect(getAgent('a1')?.sessions.r1_1?.promptFingerprint).toBe('user\n角色说明')
   })
 
@@ -533,11 +571,15 @@ describe('ask 校验先于回合', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: {},
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     const svc = createAgentBotService(emptyHostServices())
     svc.registerProvider({ id: 'demo', label: '示例通道' })
@@ -575,11 +617,15 @@ describe('ask 校验先于回合', () => {
           session_by_sender: false,
           permission_mode: 'danger-full-access',
           session_timeout_minutes: 30,
+          concurrency: "serial",
+          needs_target_workspace: false,
           sessions: {},
         },
       ],
       skill_apply: {},
       agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
     })
     let disposed = 0
     const host = fakeHost([], idleNow)

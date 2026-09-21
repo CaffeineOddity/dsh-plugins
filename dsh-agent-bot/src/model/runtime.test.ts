@@ -178,6 +178,7 @@ function probingAgents(
 const input = {
   sessionId: 'sid-1',
   cwd: '/tmp/ws',
+  agentId: 'agent-1',
   agentName: '联运助手',
   promptText: '你是联运助手',
   variables: { sender: 'alice', session_key: 'r1_1', provider_id: 'demo', bot_id: 'r1', group_id: '1' },

@@ -223,6 +223,8 @@ export function saveSkillRoots(skillRoots: string[]): void {
     agents: cfg.agents,
     skill_apply: cfg.skill_apply,
     agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
+    expert_liveness_max_renew: cfg.expert_liveness_max_renew,
+    task_round_timeout_ms: cfg.task_round_timeout_ms,
   })
 }
 
@@ -415,6 +417,8 @@ function persistGroups(groups: Record<string, SkillGroupConfig>): void {
     agents,
     skill_apply: cfg.skill_apply,
     agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
+    expert_liveness_max_renew: cfg.expert_liveness_max_renew,
+    task_round_timeout_ms: cfg.task_round_timeout_ms,
   }
   saveConfig(next)
 }

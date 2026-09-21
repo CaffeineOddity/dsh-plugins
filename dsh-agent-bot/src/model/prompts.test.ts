@@ -56,6 +56,8 @@ function agent(partial: Partial<AgentConfig> & Pick<AgentConfig, 'id' | 'name'>)
     session_by_sender: false,
     permission_mode: 'danger-full-access',
     session_timeout_minutes: 30,
+    concurrency: 'serial',
+    needs_target_workspace: false,
     sessions: {},
     ...partial,
   }
@@ -69,6 +71,8 @@ function cfg(overrides: Partial<AgentBotFileConfig> = {}): AgentBotFileConfig {
     agents: [],
     skill_apply: {},
     agent_wait_timeout_ms: 180000,
+    expert_liveness_max_renew: 3,
+    task_round_timeout_ms: 7200000,
     ...overrides,
   }
 }

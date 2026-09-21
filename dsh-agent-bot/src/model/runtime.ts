@@ -62,17 +62,27 @@ export interface HostServices {
   sessionPersistence(): { list(): Promise<Array<{ id: string }>> } | undefined
   sessions(): { get?(id: string): unknown } | undefined
   workspaceRegistry(): WorkspaceRegistryLike | undefined
+  /** 可选：agent 会话 setup 时挂载 scoped 看板工具。缺省不注册工具。 */
+  toolsMount?: () => ToolsMountHook | undefined
 }
 
 /** ensureAgent 入参。cwd 必须是 agent.workspace。 */
 export interface EnsureAgentInput {
   sessionId: string
   cwd: string
+  /** 稳定 agent id（用于任务看板身份）。 */
+  agentId: string
   agentName: string
   promptText: string
   variables: Record<string, string>
   permissionMode: PermissionMode
 }
+
+/**
+ * tools 挂载钩子：create/resume 建好 live agent、setup(agentCtx) 阶段调用，
+ * 用 agentCtx 的 scoped tools 注册看板工具。返回 none；scoped 注册随 agent 释放。
+ */
+export type ToolsMountHook = (sessionId: string, agentId: string, agentName: string, agentCtx: Context) => void
 
 /** 进程内 live handle 与 opening 去重。 */
 export interface AgentRuntime {
@@ -81,6 +91,10 @@ export interface AgentRuntime {
   isArchived(sessionId: string): boolean
   disposeAll(): Promise<void>
   liveCount(): number
+  /** sessionId → 建立它所用的 agent identity（不足时 undefined）。 */
+  identityFor(sessionId: string): { agentId: string; agentName: string } | undefined
+  /** 宿主 agents 服务（供看板工具查 live 会话）。 */
+  hostAgents(): ReturnType<HostServices['agents']>
 }
 
 /** DSH 侧边栏标题：`agent_<智能体名>`。 */
@@ -157,6 +171,8 @@ export function createAgentRuntime(host: HostServices): AgentRuntime {
   const handles = new Map<string, AgentHandleLike>()
   const opening = new Map<string, Promise<AgentLike>>()
   const lastVars = new Map<string, Record<string, string>>()
+  const toolHooks = new Map<string, ToolsMountHook | undefined>()
+  const _identities = new Map<string, { agentId: string; agentName: string }>()
 
   async function isPersisted(sessionId: string): Promise<boolean> {
     const persistence = host.sessionPersistence()
@@ -188,6 +204,7 @@ export function createAgentRuntime(host: HostServices): AgentRuntime {
       if (live === undefined) {
         throw new Error(`agent-bot: session ${input.sessionId} 判定 live 但 agents.get 为空`)
       }
+      _identities.set(input.sessionId, { agentId: input.agentId, agentName: input.agentName })
       return live
     }
 
@@ -195,6 +212,13 @@ export function createAgentRuntime(host: HostServices): AgentRuntime {
     if (!sel.provider || !sel.model) {
       throw new Error('agent-bot: 未配置默认模型（settings.yaml 的 agent-default-model）')
     }
+
+    let hooksMount = toolHooks.get(input.sessionId)
+    if (hooksMount === undefined) {
+      hooksMount = host.toolsMount?.()
+      toolHooks.set(input.sessionId, hooksMount)
+    }
+    const mount = hooksMount
 
     const opts = {
       agentOptions: { provider: sel.provider, model: sel.model },
@@ -211,6 +235,10 @@ export function createAgentRuntime(host: HostServices): AgentRuntime {
         }
         if (input.promptText !== '') {
           sp?.section?.({ name: 'agent-bot:prompt', order: 1, text: input.promptText })
+        }
+        // scoped 看板工具：在 agent 自己的 agentCtx 上注册，随 agent 释放。
+        if (mount !== undefined) {
+          mount(input.sessionId, input.agentId, input.agentName, agentCtx)
         }
       },
     }
@@ -252,6 +280,7 @@ export function createAgentRuntime(host: HostServices): AgentRuntime {
           input.cwd,
           workspaceDisplayTitle(input.agentName),
         )
+        _identities.set(input.sessionId, { agentId: input.agentId, agentName: input.agentName })
         return agent
       })()
       opening.set(key, job)
@@ -268,10 +297,18 @@ export function createAgentRuntime(host: HostServices): AgentRuntime {
       handles.clear()
       opening.clear()
       lastVars.clear()
+      toolHooks.clear()
+      _identities.clear()
       await Promise.all(jobs)
     },
     liveCount(): number {
       return handles.size
+    },
+    identityFor(sessionId: string): { agentId: string; agentName: string } | undefined {
+      return _identities.get(sessionId)
+    },
+    hostAgents() {
+      return host.agents()
     },
   }
 }

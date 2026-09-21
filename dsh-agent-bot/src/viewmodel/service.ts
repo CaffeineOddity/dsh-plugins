@@ -12,15 +12,21 @@ import { randomUUID } from 'node:crypto'
 import { planSession, prepareAsk, settleAskRound } from '../model/ask.js'
 import { getAgent as getAgentConfig, listAgents as listAgentConfigs, touchSession } from '../model/agents.js'
 import { loadConfig } from '../model/config.js'
+import { appendLog } from './rpc.js'
 import { assemblePromptText, appendPromptToUserContext, getPrompt, promptFingerprintFor, promptVariableNames, skillToolNamesForAgent } from '../model/prompts.js'
 import { createAskQueue, enqueueHoldPending } from '../model/queue.js'
 import { createAgentRuntime, type HostServices } from '../model/runtime.js'
+import type { AgentConfig } from '../model/config.js'
+import { registerBoardTools } from '../model/teamwork/board-tools.js'
+import { createPatrol } from '../model/teamwork/patrol.js'
+import { describeTasks, listTasksIn } from '../model/teamwork/task-board.js'
 import type {
   AgentAskRequest,
   AgentAskResponse,
   AgentBotService,
   AgentChannelProviderInfo,
   AgentChannelProviderRegistration,
+  AgentDeliverRequest,
   AgentOutboundMessage,
   AgentSummary,
 } from '../types.js'
@@ -44,6 +50,7 @@ export function emptyHostServices(): HostServices {
     sessionPersistence: () => undefined,
     sessions: () => undefined,
     workspaceRegistry: () => undefined,
+    toolsMount: () => undefined,
   }
 }
 
@@ -56,6 +63,7 @@ export function hostServicesFromContext(ctx: { get(name: string): unknown }): Ho
     sessionPersistence: () => ctx.get('sessionPersistence') as ReturnType<HostServices['sessionPersistence']>,
     sessions: () => ctx.get('sessions') as ReturnType<HostServices['sessions']>,
     workspaceRegistry: () => ctx.get('workspaceRegistry') as ReturnType<HostServices['workspaceRegistry']>,
+    toolsMount: () => undefined,
   }
 }
 
@@ -88,16 +96,79 @@ function variableValues(req: AgentAskRequest, sessionKey: string): Record<string
 /** 门面 + unload 时 dispose live handle。dispose 不进通道契约。 */
 export type AgentBotHostService = AgentBotService & { dispose(): Promise<void> }
 
-/** 内置本地 Provider：无 IM 通道时本地对话页与 ask 仍可用，红点不空。固定，不可被 registerProvider 覆盖。 */
+/** 从登记的 provider 查 listGroupAgents / deliver。 */
 export const LOCAL_PROVIDER: AgentChannelProviderInfo = { id: 'local', label: '本地' }
 
 /** 创建 agentBot 服务。host 由组合根注入；测试可传假服务。 */
+/** 进程内已登记 Provider：公共字段 + 内部代令牌。 */
+interface StoredProvider extends AgentChannelProviderInfo {
+  token: symbol
+}
+
 export function createAgentBotService(host: HostServices): AgentBotHostService {
-  const providers = new Map<string, { label: string; token: symbol }>()
+  const providers = new Map<string, StoredProvider>()
   // 预置内置 local provider：不走 registerProvider（无 disposer、固定）。
-  providers.set(LOCAL_PROVIDER.id, { label: LOCAL_PROVIDER.label, token: Symbol('agent-bot:builtin-local') })
+  providers.set(LOCAL_PROVIDER.id, { ...LOCAL_PROVIDER, token: Symbol('agent-bot:builtin-local') })
   const queue = createAskQueue()
-  const runtime = createAgentRuntime(host)
+
+  /** 入站绑定点：包入站 running 摘要 + 群快照；缺省（无 provider）只给空摘要。 */
+  function boardContextFor(live: AgentConfig): { text: string; variables: Record<string, string> } {
+    // 群快照只在已绑任务时随卡片提供；这里只带 running 摘要引导认捡起/新建。
+    const running = describeTasks(listTasksIn('running'))
+    const lines: string[] = ['——本群任务板（specs/12）——']
+    if (running.length === 0) {
+      lines.push('（本群暂无 running 任务；你可以 open_task 新建一份，或直接自己做）')
+    } else {
+      for (const r of running) {
+        const ph = r.pendingHuman as undefined | { questions?: string[] }
+        const pending = ph === undefined ? '' : ` 待决:${String(ph.questions?.join('; ') ?? '')}`
+        lines.push(`- ${String(r.taskId)}: lead=${String(r.taskLead)} sender=${String(r.sender)} access=${String(r.access)} 摘要=${String(r.summary ?? '')}${pending}`)
+      }
+    }
+    void live
+    return { text: lines.join('\n'), variables: {} }
+  }
+
+  // 看板工具挂载：每个 agent 会话 setup 时 scoped 注册。identity 从运行时会话映射解析。
+  const hostWithMount: HostServices = {
+    ...host,
+    toolsMount: () => (sessionId, agentId, agentName, agentCtx) => {
+      registerBoardTools(agentCtx, {
+        agentIdentity: (sid) => runtime.identityFor(sid),
+        ensureAgent: (input) => runtime.ensureAgent(input),
+        agents: () => runtime.hostAgents(),
+      })
+      void agentId
+      void agentName
+      void sessionId
+    },
+  }
+  const runtime = createAgentRuntime(hostWithMount)
+
+  // 看板巡检器：扫描 running/ 收口叫醒/综合/超时。run() 常驻循环，service dispose 时 stop。
+  const patrol = createPatrol(
+    {
+      ensureAgent: (input) => runtime.ensureAgent(input),
+      agents: () => runtime.hostAgents(),
+      deliver: (providerId, sessionParts, messages) => {
+        const deliver = providerDeliver(providerId)
+        if (deliver === undefined) {
+          appendLog('deliver', `provider ${providerId} 未实现 deliver，收口只打日志: ${messages.map((m) => m.text).filter(Boolean).join(' ')}`)
+          return Promise.resolve()
+        }
+        return deliver({ sessionParts, messages })
+      },
+    },
+    {},
+  )
+  void patrol.run()
+
+  /** 按 providerId 找通道的 deliver 能力（缺省打日志）。 */
+  function providerDeliver(providerId: string): ((req: AgentDeliverRequest) => Promise<void>) | undefined {
+    const info = providers.get(providerId)
+    return info?.deliver
+  }
+
   return {
     listAgents() {
       return listAgentConfigs().map(toSummary)
@@ -107,9 +178,10 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
       if (found === undefined) return undefined
       return toSummary(found)
     },
+    providerDeliver,
     listProviders() {
       const out: AgentChannelProviderInfo[] = []
-      for (const [id, { label }] of providers) out.push({ id, label })
+      for (const [id, info] of providers) out.push({ id, label: info.label, listGroupAgents: info.listGroupAgents, deliver: info.deliver })
       return out
     },
     registerProvider(reg: AgentChannelProviderRegistration) {
@@ -118,7 +190,13 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         console.warn(`agent-bot: provider ${reg.id} 重复注册，后写覆盖`)
       }
       const token = Symbol('agent-bot:provider-generation')
-      providers.set(reg.id, { label: reg.label || reg.id, token })
+      providers.set(reg.id, {
+        id: reg.id,
+        label: reg.label || reg.id,
+        token,
+        listGroupAgents: reg.listGroupAgents,
+        deliver: reg.deliver,
+      })
       return () => {
         const current = providers.get(reg.id)
         if (current !== undefined && current.token === token) providers.delete(reg.id)
@@ -135,19 +213,24 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         const decision = planSession(current, archived, Date.now(), randomUUID())
         const promptText = promptTextFor(live.id, live.prompt, live.skill_groups, live.prompt_append_skills)
         const values = variableValues(req, current.sessionKey)
+        // 入站包装（specs/12 §入站怎么绑任务）：附本群 running 短摘要，让 LLM 认捡起/新建。
+        const boardCtx = boardContextFor(live)
+        const promptTextForAgent = live.prompt_placement === 'user' ? '' : promptText
         const agent = await runtime.ensureAgent({
           sessionId: decision.sessionId,
           cwd: live.workspace,
+          agentId: live.id,
           agentName: live.name,
-          promptText: live.prompt_placement === 'user' ? '' : promptText,
-          variables: values,
+          promptText: promptTextForAgent,
+          variables: { ...values, ...boardCtx.variables },
           permissionMode: live.permission_mode,
         })
         const followupContext =
           live.prompt_placement === 'user'
             ? appendPromptToUserContext(req.context, promptText, values)
             : req.context
-        const result = await settleAskRound(agent, followupContext, loadConfig().agent_wait_timeout_ms)
+        const contextWithBoard = boardCtx.text === '' ? followupContext : `${followupContext}\n\n${boardCtx.text}`
+        const result = await settleAskRound(agent, contextWithBoard, loadConfig().agent_wait_timeout_ms)
         touchSession(
           live.id,
           current.sessionKey,
@@ -191,6 +274,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
       }
     },
     async dispose() {
+      patrol.stop()
       await runtime.disposeAll()
     },
   }

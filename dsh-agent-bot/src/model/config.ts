@@ -21,6 +21,12 @@ export const MIN_AGENT_WAIT_TIMEOUT_MS = 1_000
 /** agent 等待超时上限（毫秒）。 */
 export const MAX_AGENT_WAIT_TIMEOUT_MS = 1_800_000
 
+/** 专家活性探针续期上限默认值。 */
+export const DEFAULT_EXPERT_LIVENESS_MAX_RENEW = 3
+
+/** 任务墙钟默认值（毫秒，2h）。 */
+export const DEFAULT_TASK_ROUND_TIMEOUT_MS = 7_200_000
+
 /** 空闲超时默认值（分钟）。 */
 export const DEFAULT_SESSION_TIMEOUT_MINUTES = 30
 
@@ -45,6 +51,15 @@ export const PROMPT_PLACEMENTS: readonly PromptPlacement[] = ['system', 'user']
 
 /** 注入位置默认值：系统提示词。 */
 export const DEFAULT_PROMPT_PLACEMENT: PromptPlacement = 'system'
+
+/** 磁盘并发模式：serial=该专家所有来源进同一 FIFO；concurrent=不同 target 的 write 可并行。 */
+export type Concurrency = 'serial' | 'concurrent'
+
+/** 合法并发模式。 */
+export const CONCURRENCIES: readonly Concurrency[] = ['serial', 'concurrent']
+
+/** 并发默认值：串行。 */
+export const DEFAULT_CONCURRENCY: Concurrency = 'serial'
 
 /** 存储根：~/.dsh/storages/agentbot。 */
 export const STORAGE_ROOT = join(homedir(), '.dsh', 'storages', 'agentbot')
@@ -99,6 +114,12 @@ export interface AgentConfig {
   session_by_sender: boolean
   permission_mode: PermissionMode
   session_timeout_minutes: number
+  /** 磁盘并发：serial 该专家所有来源同一 FIFO；concurrent 不同 target 的 write 可并行。 */
+  concurrency: Concurrency
+  /** true：被 dispatch_expert / 直 @ 时必须带已存在的绝对路径 target_workspace。 */
+  needs_target_workspace: boolean
+  /** per-agent 覆盖单次 waitIdle；缺字段用全局；0 fallback 全局。 */
+  agent_wait_timeout_ms?: number
   sessions: Record<string, SessionSlot>
 }
 
@@ -110,6 +131,8 @@ export interface AgentBotFileConfig {
   agents: AgentConfig[]
   skill_apply: SkillApplyConfig
   agent_wait_timeout_ms: number
+  expert_liveness_max_renew: number
+  task_round_timeout_ms: number
 }
 
 /** 扫描产物 skills-map.json；不进 config.json。 */
@@ -164,6 +187,11 @@ export function skillsMapFilePath(): string {
   return join(configDirPath(), 'skills-map.json')
 }
 
+/** 任务看板根目录：jobs/{todo|running|done}/task_{id}.md（见 docs/specs/12）。 */
+export function jobsRootPath(): string {
+  return join(configDirPath(), 'jobs')
+}
+
 function defaultConfig(): AgentBotFileConfig {
   return {
     skill_roots: [],
@@ -172,6 +200,8 @@ function defaultConfig(): AgentBotFileConfig {
     agents: [],
     skill_apply: defaultSkillApply(),
     agent_wait_timeout_ms: DEFAULT_AGENT_WAIT_TIMEOUT_MS,
+    expert_liveness_max_renew: DEFAULT_EXPERT_LIVENESS_MAX_RENEW,
+    task_round_timeout_ms: DEFAULT_TASK_ROUND_TIMEOUT_MS,
   }
 }
 
@@ -224,6 +254,8 @@ export function loadConfig(): AgentBotFileConfig {
     skill_roots: core.skill_roots,
     skill_apply: core.skill_apply,
     agent_wait_timeout_ms: core.agent_wait_timeout_ms,
+    expert_liveness_max_renew: core.expert_liveness_max_renew,
+    task_round_timeout_ms: core.task_round_timeout_ms,
     skill_groups: existsSync(groupsPath) ? readJsonFile(groupsPath) : core.skill_groups,
     prompts: existsSync(promptsPath) ? readJsonFile(promptsPath) : core.prompts,
     agents: existsSync(agentsPath) ? readJsonFile(agentsPath) : core.agents,
@@ -241,6 +273,8 @@ export function saveConfig(data: AgentBotFileConfig): void {
     skill_roots: normalized.skill_roots,
     skill_apply: normalized.skill_apply,
     agent_wait_timeout_ms: normalized.agent_wait_timeout_ms,
+    expert_liveness_max_renew: normalized.expert_liveness_max_renew,
+    task_round_timeout_ms: normalized.task_round_timeout_ms,
   })
   writeJsonFile(skillGroupsFilePath(), normalized.skill_groups)
   writeJsonFile(promptsFilePath(), normalized.prompts)
@@ -290,6 +324,43 @@ export function expandHomePath(p: string): string {
   return p
 }
 
+/** 合法并发保留；缺字段或非法回退串行。 */
+export function parseConcurrency(raw: unknown): Concurrency {
+  if (raw === 'concurrent') return 'concurrent'
+  return DEFAULT_CONCURRENCY
+}
+
+/**
+ * agent 级 waitIdle 覆盖：接受有限正整数或整数字符串；`0` 表示 fallback 全局。
+ * 缺字段 / 非法返回 undefined（用全局）。
+ */
+export function parseAgentWaitTimeoutOverride(raw: unknown): number | undefined {
+  let n: number
+  if (typeof raw === 'number') n = raw
+  else if (typeof raw === 'string' && raw.trim() !== '') n = Number(raw.trim())
+  else return undefined
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return undefined
+  if (n === 0) return 0
+  if (n < MIN_AGENT_WAIT_TIMEOUT_MS || n > MAX_AGENT_WAIT_TIMEOUT_MS) return undefined
+  return n
+}
+
+/** 活性探针续期上限：整数 ≥ 1；非法回退默认。 */
+export function parseExpertLivenessMaxRenew(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || !Number.isInteger(raw) || raw < 1) {
+    return DEFAULT_EXPERT_LIVENESS_MAX_RENEW
+  }
+  return raw
+}
+
+/** 任务墙钟：正整数毫秒（禁止 0 表示永不超时）；非法回退默认。 */
+export function parseTaskRoundTimeoutMs(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) {
+    return DEFAULT_TASK_ROUND_TIMEOUT_MS
+  }
+  return raw
+}
+
 /** 将运行时结构规范化到 AgentBotFileConfig（补默认值、忽略无关字段）。 */
 export function normalize(raw: unknown): AgentBotFileConfig {
   const d = defaultConfig()
@@ -302,6 +373,8 @@ export function normalize(raw: unknown): AgentBotFileConfig {
     agents: normalizeAgents(o.agents),
     skill_apply: normalizeSkillApply(o.skill_apply),
     agent_wait_timeout_ms: parseAgentWaitTimeoutMs(o.agent_wait_timeout_ms) ?? d.agent_wait_timeout_ms,
+    expert_liveness_max_renew: parseExpertLivenessMaxRenew(o.expert_liveness_max_renew),
+    task_round_timeout_ms: parseTaskRoundTimeoutMs(o.task_round_timeout_ms),
   }
 }
 
@@ -359,6 +432,9 @@ function normalizeAgents(raw: unknown): AgentConfig[] {
       session_by_sender: o.session_by_sender === true,
       permission_mode: parsePermissionMode(o.permission_mode),
       session_timeout_minutes: parseSessionTimeoutMinutes(o.session_timeout_minutes),
+      concurrency: parseConcurrency(o.concurrency),
+      needs_target_workspace: o.needs_target_workspace === true,
+      agent_wait_timeout_ms: parseAgentWaitTimeoutOverride(o.agent_wait_timeout_ms),
       sessions: normalizeSessions(o.sessions),
     })
   }

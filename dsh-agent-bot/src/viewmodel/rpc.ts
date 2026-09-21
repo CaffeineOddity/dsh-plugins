@@ -20,6 +20,7 @@ import {
   loadConfig,
   loadSkillsMap,
   parseAgentWaitTimeoutMs,
+  parseAgentWaitTimeoutOverride,
   parsePermissionMode,
   parsePromptPlacement,
   saveConfig,
@@ -53,7 +54,7 @@ const askLog: string[] = []
 const scanLog: string[] = []
 
 /** 追加配置站日志尾。kind 对应 log 页三栏。 */
-export function appendLog(kind: 'boot' | 'ask' | 'scan', line: string): void {
+export function appendLog(kind: 'boot' | 'ask' | 'scan' | 'deliver' | 'patrol', line: string): void {
   const bucket = kind === 'boot' ? bootLog : kind === 'ask' ? askLog : scanLog
   bucket.push(line)
   if (bucket.length > LOG_LIMIT) bucket.splice(0, bucket.length - LOG_LIMIT)
@@ -168,6 +169,9 @@ function parseAgentWrite(payload: Record<string, unknown>): AgentWrite {
     session_by_sender: asBool(payload.session_by_sender, false),
     permission_mode: parsePermissionMode(payload.permission_mode),
     session_timeout_minutes: timeout,
+    concurrency: payload.concurrency === 'concurrent' ? 'concurrent' : 'serial',
+    needs_target_workspace: asBool(payload.needs_target_workspace, false),
+    agent_wait_timeout_ms: parseAgentWaitTimeoutOverride(payload.agent_wait_timeout_ms),
   }
 }
 
@@ -257,6 +261,8 @@ export async function handleRpc(
           ok: true,
           value: {
             agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
+            expert_liveness_max_renew: cfg.expert_liveness_max_renew,
+            task_round_timeout_ms: cfg.task_round_timeout_ms,
             configDir: configDirPath(),
             providers: host.listProviders(),
           },
@@ -268,6 +274,24 @@ export async function handleRpc(
           return { ok: false, error: 'bad-request: agent_wait_timeout_ms 须为 1000–1800000 的正整数毫秒' }
         }
         const cfg = loadConfig()
+        const renewRaw = asRecord(payload).expert_liveness_max_renew
+        let renew = cfg.expert_liveness_max_renew
+        if (renewRaw !== undefined && renewRaw !== '' && renewRaw !== null) {
+          const n = typeof renewRaw === 'number' ? renewRaw : Number(String(renewRaw).trim())
+          if (!Number.isInteger(n) || n < 1) {
+            return { ok: false, error: 'bad-request: expert_liveness_max_renew 须为正整数' }
+          }
+          renew = n
+        }
+        const roundRaw = asRecord(payload).task_round_timeout_ms
+        let round = cfg.task_round_timeout_ms
+        if (roundRaw !== undefined && roundRaw !== '' && roundRaw !== null) {
+          const n = typeof roundRaw === 'number' ? roundRaw : Number(String(roundRaw).trim())
+          if (!Number.isInteger(n) || n <= 0) {
+            return { ok: false, error: 'bad-request: task_round_timeout_ms 须为正整数毫秒（禁止 0）' }
+          }
+          round = n
+        }
         saveConfig({
           skill_roots: cfg.skill_roots,
           skill_groups: cfg.skill_groups,
@@ -275,6 +299,8 @@ export async function handleRpc(
           agents: cfg.agents,
           skill_apply: cfg.skill_apply,
           agent_wait_timeout_ms: ms,
+          expert_liveness_max_renew: renew,
+          task_round_timeout_ms: round,
         })
         return { ok: true, value: { saved: true, agent_wait_timeout_ms: ms } }
       }

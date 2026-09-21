@@ -1,5 +1,9 @@
 # 12. 群内专家协作（task board）
 
+> **实现进度（SDD 标记）**：任务板模型（`task-board.ts`）、会话绑定（`binding.ts`）、中继（`relay.ts`）、六件看板工具（`board-tools.ts`）、巡检器（`patrol.ts` 含活性探针/超时/重启）、service 接线（toolsMount 挂载 + deliver 路由 + 入站 running 摘要包装）均已实现。测试见各 `*.test.ts`。
+> 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、墙钟超时、待决作废、deliver @sender 收口、重启按 `jobs/running/` 恢复。
+> 未做（见 §边界与不做项）：dsh-`user-questions/request` waterfall 拦截（本插件包无法导入 `dsh-user-questions`）；进程级 `listGroupAgents` 已接入、缺则回退到「同组卡片缺失，自己答」。
+
 ## 背景与目标
 
 agent-bot 现在 `ask` 是单 agent 路由：`req.agentId -> AgentConfig -> ensureAgent + followup + settleAskRound`（见 [03](03-ask-and-session.md)、`runtime.ts`）。

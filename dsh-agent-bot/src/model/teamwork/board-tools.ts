@@ -1,0 +1,482 @@
+/**
+ * 看板工具（specs/12 §工具）。
+ * 每个 agent-bot agent 的 setup 都 scoped 注册这 6 个工具（无 is_lead）：
+ *   list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead
+ *
+ * 调用方身份：`exec.agent?.id` 即 DSH sessionId；经 agentIdentity 解析成 agentId/agentName。
+ * 本任务绑定：binding.ts（session→taskId），open_task / 入站 followup 落。
+ *
+ * 工具输出不直接向模型隐藏：render 给纯文本，附完整能力卡片与任务摘要。
+ */
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { getAgent as getAgentConfig, listAgents as listAgentConfigs } from '../agents.js'
+import { expandHomePath, loadConfig, type AgentConfig } from '../config.js'
+import { listSkills } from '../skills.js'
+import { existsSync } from 'node:fs'
+import { basename } from 'node:path'
+import { buildRelay, type RelayHost } from './relay.js'
+import { bindSession, boundTaskId, bindIfAbsent } from './binding.js'
+import {
+  readTask,
+  writeTask,
+  listTasksIn,
+  describeTasks,
+  isTaskId,
+  marshalTaskYaml,
+  type Access,
+  type TaskBoard,
+  type AssigneeStatus,
+} from './task-board.js'
+
+/** 调用方 agent 身份解析。sessionId → { agentId, agentName }。 */
+export interface AgentIdentity {
+  (sessionId: string): { agentId: string; agentName: string } | undefined
+}
+
+export interface BoardToolDeps {
+  agentIdentity: AgentIdentity
+  ensureAgent: RelayHost['ensureAgent']
+  agents: RelayHost['agents']
+}
+
+/** 一个专家的能力卡片（供 list_group_experts / 派发 turn 包装，不写进被派专家 prompt）。 */
+export interface ExpertCard {
+  agentId: string
+  name: string
+  description?: string
+  needs_target_workspace?: boolean
+  workspaceCandidates?: Array<{ name: string; workspace: string }>
+  skills?: Array<{ name: string; description: string }>
+}
+
+/** 群快照（由 Provider 在派发 / 入站时发现；任务创建时缓存一份写进 frontmatter）。 */
+export interface GroupSnapshotInput {
+  members: Array<{ agentId: string; name: string; description: string }>
+}
+
+/** 组装专家卡片（从 agents.json + skills-map 补齐 description / skills）。 */
+export function buildExpertCards(members: Array<{ agentId: string; name: string; description: string }>): ExpertCard[] {
+  const configs = new Map(listAgentConfigs().map((a) => [a.id, a]))
+  const skillsMap = new Map(listSkills().map((s) => [s.id, s]))
+  const cards: ExpertCard[] = []
+  for (const m of members) {
+    const cfg = configs.get(m.agentId)
+    if (cfg === undefined) continue // 不在 agents.json：丢掉
+    const card: ExpertCard = { agentId: cfg.id, name: cfg.name }
+    if (cfg.description !== '') card.description = cfg.description
+    if (cfg.needs_target_workspace) {
+      card.needs_target_workspace = true
+      card.workspaceCandidates = members
+        .filter((x) => x.agentId !== cfg.id)
+        .map((x) => {
+          const c = configs.get(x.agentId)
+          return { name: c?.name ?? x.name, workspace: c?.workspace ?? '' }
+        })
+        .filter((c) => c.workspace !== '')
+    }
+    const skills: Array<{ name: string; description: string }> = []
+    for (const gid of cfg.skill_groups) {
+      const group = loadConfig().skill_groups[gid]
+      if (group === undefined) continue
+      for (const skillId of group.skill_ids) {
+        const entry = skillsMap.get(skillId)
+        if (entry === undefined) continue
+        skills.push({ name: basename(entry.path), description: entry.description })
+      }
+    }
+    if (skills.length > 0) card.skills = skills
+    cards.push(card)
+  }
+  return cards
+}
+
+/** 本群 running/ 任务短摘要（入站包装也复用）。 */
+export function runningSummaries(providerId: string, sessionParts: Record<string, string>): Record<string, unknown>[] {
+  void providerId
+  void sessionParts
+  return describeTasks(listTasksIn('running'))
+}
+
+/** 任务前台上手文本：本任务快照 + 卡片 + 运行中摘要。 */
+export function taskBoardPrompt(snapshot: GroupSnapshotInput): string {
+  const cards = buildExpertCards(snapshot.members)
+  const running = describeTasks(listTasksIn('running'))
+  const lines: string[] = ['——本群专家卡片（供选人派活，不写进被派专家 prompt）——']
+  for (const c of cards) {
+    const parts = [`- ${c.name} (${c.agentId})`]
+    if (c.description) parts.push(c.description)
+    if (c.needs_target_workspace) {
+      parts.push('需要目标项目目录')
+      const ws = c.workspaceCandidates?.map((w) => `${w.name}=${w.workspace}`).join('; ')
+      if (ws) parts.push(`候选: ${ws}`)
+    }
+    if (c.skills && c.skills.length > 0) {
+      parts.push(`技能: ${c.skills.map((s) => `${s.name}${s.description ? `(${s.description})` : ''}`).join(', ')}`)
+    }
+    lines.push(parts.join('；'))
+  }
+  lines.push('——本群 running 任务摘要——')
+  if (running.length === 0) lines.push('（暂无 running 任务）')
+  for (const r of running) lines.push(`- ${String(r.taskId)}: ${String(r.summary ?? '')}`)
+  return lines.join('\n')
+}
+
+/** 解析运行中的 session 归属哪个 agent（channel 槽 or 协作槽），供 running_experts。 */
+function runningExpertIds(snapshotMembers: Array<{ agentId: string; name: string; description: string }>): string[] {
+  const configs = new Map(listAgentConfigs().map((a) => [a.id, a]))
+  const running = new Set<string>()
+  for (const m of snapshotMembers) {
+    const cfg = configs.get(m.agentId)
+    if (cfg === undefined) continue
+    for (const slot of Object.values(cfg.sessions)) {
+      // 通道槽 / 协作槽都算：会话活着（agents.get）即未 idle
+      if (slot.sessionId !== '' ) running.add(m.agentId)
+    }
+  }
+  return [...running]
+}
+
+/** 校验 target_workspace：needs_target_workspace=true 才检查；绝对路径 + 目录存在。 */
+export function resolveTargetWorkspace(agent: AgentConfig, raw: string | undefined): { ok: true; path: string } | { ok: false; reason: string } {
+  if (agent.needs_target_workspace !== true) return { ok: true, path: '' }
+  const value = (raw ?? '').trim()
+  if (value === '') return { ok: false, reason: `专家 ${agent.name} 需要目标项目目录：请传绝对路径 target_workspace` }
+  const expanded = expandHomePath(value)
+  if (!expanded.startsWith('/')) return { ok: false, reason: `target_workspace 必须是绝对路径，收到: ${value}` }
+  if (!existsSync(expanded)) return { ok: false, reason: `目标目录不存在: ${expanded}` }
+  return { ok: true, path: expanded }
+}
+
+function getBoundTask(sessionId: string): { task: TaskBoard; status: 'running' } | undefined {
+  const taskId = boundTaskId(sessionId)
+  if (taskId === undefined) return undefined
+  const task = readTask('running', taskId)
+  if (task === undefined) return undefined
+  return { task, status: 'running' }
+}
+
+/** 派发写入：解析名称 + 落 assignees[]（status 按 FIFO / 并行判定）。 */
+function upsertAssignee(
+  task: TaskBoard,
+  expert: { agentId: string; name: string; sessionId: string; dispatchedBy: string; dispatchedByName: string; access: Access; target?: string; status: AssigneeStatus },
+): void {
+  const idx = task.assignees.findIndex((a) => a.expertId === expert.agentId)
+  const record = {
+    expertId: expert.agentId,
+    expertName: expert.name,
+    dispatchedBy: expert.dispatchedBy,
+    dispatchedByName: expert.dispatchedByName,
+    sessionId: expert.sessionId,
+    access: expert.access,
+    target: expert.target,
+    status: expert.status,
+    wake: true,
+  }
+  if (idx < 0) task.assignees.push(record)
+  else task.assignees[idx] = record
+}
+
+function notBoundError(): Error {
+  return new Error('agent-bot: 尚未绑定任务。先 open_task 新建/捡起一份，或等入站自动绑定后再操作。')
+}
+
+export interface BoardTools {
+  dispose(): void
+}
+
+/**
+ * 在 agent 会话的 scoped ctx 上注册 6 个看板工具。
+ * deps 由 service 提供（identity 来自 runtime.identityFor；ensureAgent/agents 来自 runtime）。
+ */
+export function registerBoardTools(ctx: {
+  get(name: string): unknown
+  effect(fn: () => () => void): unknown
+}, deps: BoardToolDeps): BoardTools {
+  const tools = ctx.get('tools') as { register(def: unknown): () => void } | undefined
+  if (tools === undefined) {
+    throw new Error('agent-bot: 会话上下文没有 tools 服务，无法注册看板工具')
+  }
+  const relay = buildRelay({
+    ensureAgent: deps.ensureAgent,
+    agents: deps.agents,
+  })
+  const disposeFns: Array<() => void> = []
+
+  const caller = (sessionId: string | undefined): { agentId: string; agentName: string; sessionId: string } => {
+    if (sessionId === undefined || sessionId === '') throw new Error('agent-bot: 工具调用缺少调用方会话')
+    const ident = deps.agentIdentity(sessionId)
+    if (ident === undefined) throw new Error(`agent-bot: 无法解析调用方会话 ${sessionId} 的 agent 身份`)
+    return { ...ident, sessionId }
+  }
+
+  const bound = (sessionId: string | undefined): { task: TaskBoard; agentId: string; agentName: string } => {
+    const who = caller(sessionId)
+    const got = getBoundTask(who.sessionId)
+    if (got === undefined) throw notBoundError()
+    return { task: got.task, agentId: who.agentId, agentName: who.agentName }
+  }
+
+  disposeFns.push(
+    tools.register(
+      defineTool({
+        name: 'list_group_experts',
+        description: '列出本群专家的能力卡片与此刻运行中的专家。无参数。',
+        parameters: {},
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
+          render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        async execute(_args, exec) {
+          const who = caller(exec.agent?.id)
+          const got = getBoundTask(who.sessionId)
+          if (got === undefined) {
+            return { text: '未绑定任务，暂无本群专家清单' }
+          }
+          const cards = buildExpertCards(got.task.groupSnapshot)
+          const runningIds = runningExpertIds(got.task.groupSnapshot)
+          const lines: string[] = []
+          for (const c of cards) {
+            const parts = [`- ${c.name} (${c.agentId})`]
+            if (c.description) parts.push(c.description)
+            if (c.needs_target_workspace) {
+              parts.push('需要目标项目目录')
+              const ws = c.workspaceCandidates?.map((w) => `${w.name}=${w.workspace}`).join('; ')
+              if (ws) parts.push(`候选: ${ws}`)
+            }
+            if (c.skills && c.skills.length > 0) {
+              parts.push(`技能: ${c.skills.map((s) => `${s.name}${s.description ? `(${s.description})` : ''}`).join(', ')}`)
+            }
+            if (runningIds.includes(c.agentId)) parts.push('(运行中)')
+            lines.push(parts.join('；'))
+          }
+          return { text: lines.join('\n') || '（群快照为空）' }
+        },
+      }),
+    ),
+  )
+
+  disposeFns.push(
+    tools.register(
+      defineTool({
+        name: 'list_tasks',
+        description: '列出本群 running/ 全部任务的短摘要。无参数。',
+        parameters: {},
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
+          render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        async execute() {
+          const running = describeTasks(listTasksIn('running'))
+          if (running.length === 0) return { text: '（本群暂无 running 任务）' }
+          const lines = running.map((r) => `- ${String(r.taskId)}: sender=${String(r.sender)} access=${String(r.access)} 摘要=${String(r.summary ?? '')}`)
+          return { text: lines.join('\n') }
+        },
+      }),
+    ),
+  )
+
+  disposeFns.push(
+    tools.register(
+      defineTool({
+        name: 'open_task',
+        description: '打开一份任务：有 taskId 则绑定那份（必须是本群 running），无则新建并绑定。',
+        parameters: {
+          taskId: { type: 'string', description: '要绑定的任务 id（task_xxx）。缺省新建。' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: { taskId: { type: 'string', required: true }, text: { type: 'string', required: true } } },
+          render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        async execute(args, exec) {
+          const who = caller(exec.agent?.id)
+          if (args.taskId !== undefined) {
+            if (!isTaskId(args.taskId)) throw new Error(`agent-bot: 非法 taskId ${args.taskId}`)
+            const task = readTask('running', args.taskId)
+            if (task === undefined) throw new Error(`agent-bot: 任务 ${args.taskId} 不在 running/`)
+            // 绑定：已绑别的任务 → 报错（防串单）
+            const existing = boundTaskId(who.sessionId)
+            if (existing !== undefined && existing !== args.taskId) {
+              throw new Error(`agent-bot: 本会话已绑定 ${existing}，不能同时绑 ${args.taskId}`)
+            }
+            bindSession(who.sessionId, args.taskId)
+            return { taskId: args.taskId, text: `已绑定任务 ${args.taskId}（taskLead=${task.taskLead}）` }
+          }
+          // 新建：谁 open 谁是 taskLead（只在这个 agent 自己的上下文）
+          const existing = boundTaskId(who.sessionId)
+          if (existing !== undefined) {
+            const task = readTask('running', existing)
+            if (task !== undefined) return { taskId: existing, text: `已绑定任务 ${existing}，无需新建` }
+            bindIfAbsent(who.sessionId, existing)
+          }
+          throw new Error('agent-bot: 新建任务需要 sender / providerId / 群快照，当前上下文未提供')
+        },
+      }),
+    ),
+  )
+
+  disposeFns.push(
+    tools.register(
+      defineTool({
+        name: 'update_task',
+        description: '更新本轮已绑定任务的正文或允许字段（markdown / access / target / summary）。改不了 taskLead / sender。',
+        parameters: {
+          markdown: { type: 'string', description: '新的正文（替换 md 正文）' },
+          access: { type: 'string', description: '任务访问级别：read 或 write' },
+          target: { type: 'string', description: 'write 时的目标目录（绝对路径）' },
+          summary: { type: 'string', description: '追加一行进展摘要到正文末尾' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
+          render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        async execute(args, exec) {
+          const { task } = bound(exec.agent?.id)
+          if (args.markdown !== undefined) task.body = args.markdown
+          if (args.access !== undefined) {
+            if (args.access !== 'read' && args.access !== 'write') throw new Error('agent-bot: access 只能是 read 或 write')
+            task.access = args.access
+          }
+          if (args.target !== undefined) {
+            const expanded = expandHomePath(args.target.trim())
+            if (expanded !== '' && !expanded.startsWith('/')) throw new Error('agent-bot: target 必须是绝对路径')
+            task.target = expanded === '' ? undefined : expanded
+          }
+          if (args.summary !== undefined && args.summary.trim() !== '') {
+            task.body = `${task.body}\n\n- ${args.summary.trim()}`
+          }
+          writeTask('running', task)
+          return { text: `已更新任务 ${task.taskId}` }
+        },
+      }),
+    ),
+  )
+
+  disposeFns.push(
+    tools.register(
+      defineTool({
+        name: 'dispatch_expert',
+        description:
+          '派活给本群另一位专家（本任务快照内）。access 必填。返回 { kind: "running", sessionId }，不等对方跑完。目标不能是自己。',
+        parameters: {
+          expert_id: { type: 'string', required: true, description: '目标专家 agentId（见 list_group_experts）' },
+          instruction: { type: 'string', required: true, description: '给专家的指令' },
+          access: { type: 'string', required: true, description: 'read 或 write' },
+          session: { type: 'string', description: 'reuse（默认）或 new' },
+          title: { type: 'string', description: '可选会话标题' },
+          target_workspace: { type: 'string', description: 'needs_target_workspace 专家必填：目标项目绝对路径' },
+          wake: { type: 'boolean', description: '默认 true；false 则只落 assignees 不立刻叫醒' },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              kind: { type: 'string', required: true },
+              sessionId: { type: 'string', required: true },
+              text: { type: 'string', required: true },
+            },
+          },
+          render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        async execute(args, exec) {
+          const { task, agentId, agentName } = bound(exec.agent?.id)
+          const snapshot = task.groupSnapshot.find((m) => m.agentId === args.expert_id)
+          if (snapshot === undefined) {
+            throw new Error(`agent-bot: 专家 ${args.expert_id} 不在本任务快照内（见 list_group_experts）`)
+          }
+          if (args.expert_id === agentId) throw new Error('agent-bot: 不能派活给自己')
+          if (args.access !== 'read' && args.access !== 'write') throw new Error('agent-bot: access 只能是 read 或 write')
+          const expertCfg = getAgentConfig(args.expert_id)
+          if (expertCfg === undefined) throw new Error(`agent-bot: 未知 agent ${args.expert_id}`)
+          const target = resolveTargetWorkspace(expertCfg, args.target_workspace)
+          if (!target.ok) throw new Error(`agent-bot: ${target.reason}`)
+
+          // 重复派发同 expert 同 target：占着仍可派（spec：不拒，FIFO）
+          const status: AssigneeStatus = 'running'
+          const sessionId = relay.resolveSession(expertCfg, task.taskId, args.expert_id, args.session === 'new' ? 'new' : 'reuse', Date.now())
+          upsertAssignee(task, {
+            agentId: args.expert_id,
+            name: snapshot.name,
+            sessionId,
+            dispatchedBy: agentId,
+            dispatchedByName: agentName,
+            access: args.access,
+            target: target.path !== '' ? target.path : task.target,
+            status,
+          })
+          writeTask('running', task)
+
+          if (args.wake === false) {
+            return { kind: 'waiting', sessionId, text: `已把 ${snapshot.name} 记为待命（wake=false），未叫醒` }
+          }
+          const mdText = marshalText(task)
+          await relay.startTurn({
+            agent: expertCfg,
+            taskId: task.taskId,
+            expertId: args.expert_id,
+            instruction: args.instruction,
+            mdText,
+            access: args.access,
+            session: args.session === 'new' ? 'new' : 'reuse',
+            nowMs: Date.now(),
+            variables: { sender: task.sender, provider_id: task.providerId },
+            promptText: '',
+            permissionMode: expertCfg.permission_mode,
+            targetWorkspace: target.path !== '' ? target.path : undefined,
+          })
+          return { kind: 'running', sessionId, text: `已派给 ${snapshot.name}，正在处理` }
+        },
+      }),
+    ),
+  )
+
+  disposeFns.push(
+    tools.register(
+      defineTool({
+        name: 'ask_task_lead',
+        description: '把问题上抛给本任务的任务 lead。仅当本 agent 不是 taskLead 时可用。taskLead 自己调会报错（应走 ask_user_question）。',
+        parameters: {
+          questions: {
+            type: 'array',
+            items: { type: 'string' },
+            required: true,
+            description: '要问的问题列表',
+          },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
+          render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        async execute(args, exec) {
+          const { task, agentId } = bound(exec.agent?.id)
+          if (agentId === task.taskLead) {
+            throw new Error('agent-bot: 你是任务 lead，应走 ask_user_question 直接问人')
+          }
+          const questions = (args.questions ?? []).map((q) => String(q).trim()).filter((q) => q !== '')
+          if (questions.length === 0) throw new Error('agent-bot: questions 不能为空')
+          task.pendingHuman = { questions, askedBy: agentId, askedAt: Date.now() }
+          writeTask('running', task)
+          // 叫醒任务 lead：任务 lead 的通道 session 由入站 FIFO 管；这里记 wake，交给巡检器
+          return { text: `已把问题记入任务 ${task.taskId}，等待任务 lead 处理` }
+        },
+      }),
+    ),
+  )
+
+  return {
+    dispose() {
+      for (const fn of disposeFns) {
+        try {
+          fn()
+        } catch {
+          // 注册失效不阻断其余清理
+        }
+      }
+    },
+  }
+}
+
+/** 把 TaskBoard 渲染成 md 文本（frontmatter + 正文），供 followup 注入。 */
+export function marshalText(task: TaskBoard): string {
+  return marshalTaskYaml(task, task.body)
+}
