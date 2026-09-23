@@ -5,16 +5,16 @@
 # 产物路径：<plugin>/.dist/<name>-<version>.tgz
 #
 # 安装模式（互斥）：
-#   -d          开发模式：link 源码到 profile（改完代码即生效）
-#   -i/install  部署模式：从 .dist/ tarball 安装（版本锁定到打包时的快照）
-#   -u/upgrade  升级模式：从 .dist/ tarball 更新（同 -i，先移除旧依赖再装）
-#   release     发布：bump（可选）+ pack；默认不 commit / push，需 --commit / --tag 才动 git
-#   -r/--restart 安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/run.sh --restart）
+#   -d                 开发模式：link 源码到 profile（改完代码即生效）
+#   -i/install         部署模式：从 .dist/ tarball 安装（版本锁定到打包时的快照）
+#   -u/upgrade         升级模式：从 .dist/ tarball 更新（同 -i，先移除旧依赖再装）
+#   release [level]    发布：bump（可选）+ pack；默认不 commit / push，需 --commit / --tag 才动 git
+#   -r/--restart       安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/run.sh --restart）
 #
 # 用法：
 #   run.sh <plugin> -d [-r]                             开发：link 源码，可选重启
-#   run.sh <plugin> release [major|minor|patch]        发布：bump + pack（不动 git）
-#   run.sh <plugin> release [level] [--commit] [--tag] 发布 + 提交/打 tag（可选）
+#   run.sh <plugin> release [major|minor|patch]          发布：bump + pack（不动 git）
+#   run.sh <plugin> release [level] [--commit] [--tag]  发布 + 提交/打 tag（可选）
 #   run.sh <plugin> release [level] -i [-r]            发布 + 装 tarball，可选重启
 #   run.sh <plugin> release [level] -u [-r]            发布 + 升级 tarball，可选重启
 #   run.sh <plugin> -i [-r]                            装 .dist/ tarball，可选重启
@@ -27,7 +27,7 @@
 #   run.sh dsh-cron-loop release -u -r       发布（保持版本）+ 升级 tarball + 重启
 #   run.sh dsh-cron-loop release patch --tag -i -r  发布 + tag + 装 tarball + 重启
 #   run.sh dsh-cron-loop install -r          装当前版本 tarball + 重启
-#   run.sh dsh-cron-loop upgrade             升级当前版本 tarball（不重启）
+#   run.sh dsh-cron-loop upgrade              升级当前版本 tarball（不重启）
 
 set -euo pipefail
 
@@ -36,7 +36,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE_DIR="$HOME/.dsh/profiles/web"
 DSH_NPX_CACHE="$HOME/.npm/_npx"
 
-# 颜色
+# ─── node/pnpm 解析 ───
+# sh（非交互 shell）不读 .bashrc/.zshrc，nvm 可能没加载 -> PATH 里缺 node/corepack。
+# dsh plugin 安装硬编码调 pnpm（spawnSync("pnpm")），不认 npm，
+# 所以必须保证 PATH 里真有一个 pnpm（corepack 包装器即可）。
+# 策略：1) source nvm  2) glob 找 nvm 已装版本的 corepack  3) 降级 npm（仅发布打包）
+
+# 颜色与输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -45,6 +51,65 @@ NC='\033[0m'
 log()  { echo -e "${GREEN}[run.sh]${NC} $*"; }
 warn() { echo -e "${YELLOW}[run.sh]${NC} $*"; }
 err()  { echo -e "${RED}[run.sh]${NC} $*" >&2; }
+
+# 统一脚本执行：pm_run <script> -- npm 需要 `run <script>`，pnpm 不需要
+pm_run() {
+  if [[ -n "$PM_RUN_CMD" ]]; then
+    ( cd "$PLUGIN_DIR" && "$PM" "$PM_RUN_CMD" "$1" )
+  else
+    ( cd "$PLUGIN_DIR" && "$PM" "$1" )
+  fi
+}
+# 统一打包：pm_pack <pack_dir> <dist_dir>（pnpm/npm 的 pack 语法一致）
+pm_pack() {
+  ( cd "$1" && "$PM" pack --pack-destination "$2" )
+}
+
+# 1) 加载 nvm（如果装了）-- nvm 是 node 版本管理器，加载后 node/corepack 自动进 PATH
+# nvm.sh 内部命令可能返回非零，set -e 会中断脚本，source 时临时关掉
+if [[ -z "${NVM_BIN:-}" ]] && [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+  set +e
+  . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
+  set -e
+fi
+
+# 2) pnpm 不在 PATH 时，用 corepack 造一个包装器（写死解析到的绝对路径，每次运行重建）
+if ! command -v pnpm >/dev/null 2>&1; then
+  _corepack_bin="$(command -v corepack || true)"
+  # corepack 不在 PATH 时，glob 找 nvm 已装版本（动态匹配，不写死版本号）
+  if [[ -z "$_corepack_bin" ]]; then
+    for _cp in "$HOME/.nvm/versions/node/"*/bin/corepack; do
+      if [[ -x "$_cp" ]]; then
+        _corepack_bin="$_cp"
+        # 把 nvm node 的 bin 目录加进 PATH（corepack 内部要调 node）
+        PATH="$(dirname "$_cp"):$PATH"
+        break
+      fi
+    done
+  fi
+  if [[ -n "$_corepack_bin" ]] && command -v node >/dev/null 2>&1; then
+    mkdir -p "$SCRIPT_DIR/.bin"
+    printf '#!/bin/sh\n# run.sh 自动生成（每次运行重建，跨设备通用）\nexec "%s" "%s" pnpm "$@"\n' "$(command -v node)" "$_corepack_bin" > "$SCRIPT_DIR/.bin/pnpm"
+    chmod +x "$SCRIPT_DIR/.bin/pnpm"
+    PATH="$SCRIPT_DIR/.bin:$PATH"
+    log "PATH 中未找到 pnpm，使用 corepack 包装器: $(command -v pnpm) (corepack: $_corepack_bin)"
+  fi
+  unset _corepack_bin _cp
+fi
+
+# 3) 仍没有 pnpm：降级 npm（仅发布打包可用；dsh 安装需要 pnpm，会提前报错）
+PM="pnpm"
+PM_RUN_CMD=""
+if ! command -v pnpm >/dev/null 2>&1; then
+  if command -v npm >/dev/null 2>&1; then
+    PM="npm"
+    PM_RUN_CMD="run"
+    warn "未找到 pnpm/corepack，降级使用 npm: $(command -v npm)（dsh 插件安装需要 pnpm，仅发布打包可用）"
+  else
+    err "未找到 pnpm，也无 corepack/npm 可用。请安装 pnpm（npm install -g pnpm）或以 node 自带 corepack 提供"
+    exit 1
+  fi
+fi
 
 # ─── 路径与版本 ───
 
@@ -137,8 +202,12 @@ find_tarball() {
 # 默认 nohup 后台执行，日志写 /tmp/dsh-web.log；-n/--nohup 跟踪日志直到进程退出。
 restart_dsh_web() {
   local restart_script="$HOME/.dsh/run.sh"
+  if [[ ! -e "$restart_script" ]]; then
+    warn "未找到 ${restart_script}，跳过重启（请手动重启 dsh web）"
+    return 0
+  fi
   if [[ ! -x "$restart_script" ]]; then
-    warn "未找到 $restart_script，跳过重启（请手动重启 dsh web）"
+    err "${restart_script} 存在但不可执行，跳过重启（请先 chmod +x）"
     return 0
   fi
   log "重启 dsh web..."
@@ -175,7 +244,7 @@ do_release() {
   # typecheck（有 typecheck 脚本才跑）
   if node -e "process.exit(require('$PLUGIN_DIR/package.json').scripts?.typecheck ? 0 : 1)" 2>/dev/null; then
     log "运行 typecheck..."
-    (cd "$PLUGIN_DIR" && pnpm typecheck)
+    pm_run typecheck
     log "typecheck 通过"
   else
     log "无 typecheck 脚本，跳过"
@@ -187,7 +256,7 @@ do_release() {
   local stage_dir=""
   if node -e "process.exit(require('$PLUGIN_DIR/package.json').scripts?.build ? 0 : 1)" 2>/dev/null; then
     log "编译产物..."
-    (cd "$PLUGIN_DIR" && pnpm build)
+    pm_run build
     stage_dir="$(mktemp -d)"
     rm -rf "$stage_dir"
     mkdir -p "$stage_dir"
@@ -208,13 +277,13 @@ do_release() {
   log "打包 tarball..."
   local pack_dir="$PLUGIN_DIR"
   [[ -n "$stage_dir" ]] && pack_dir="$stage_dir"
-  (cd "$pack_dir" && pnpm pack --pack-destination "$dist_dir" >/dev/null 2>&1)
-  # scoped 包（@scope/name）经 pnpm pack 产物文件名会去掉 @，不能直接拿 name 拼，
+  pm_pack "$pack_dir" "$dist_dir"
+  # scoped 包（@scope/name）经 pack 后产物文件名会去掉 @，不能直接拿 name 拼，
   # 改取 .dist/ 下以 -$new_version.tgz 结尾的实际产物。
   local tarball
   tarball="$(cd "$dist_dir" && ls -1 *-"$new_version".tgz 2>/dev/null | head -1 || true)"
   if [[ -z "$tarball" || ! -f "$dist_dir/$tarball" ]]; then
-    err "pnpm pack 未生成 $dist_dir/*-$new_version.tgz"
+    err "${PM} pack 未生成 $dist_dir/*-$new_version.tgz"
     exit 1
   fi
   log "tarball: $dist_dir/$tarball"
@@ -244,6 +313,10 @@ do_release() {
 do_dev() {
   local dsh_bin name version
   dsh_bin="$(find_dsh_bin)" || exit 1
+  if [[ "$PM" != "pnpm" ]]; then
+    err "dsh 插件开发模式（link）强制依赖 pnpm，当前只有 npm（PM=${PM}）。请先安装 pnpm：npm install -g pnpm（或让 node 自带 corepack 可用）"
+    exit 1
+  fi
   name="$(get_name)"
   version="$(get_version)"
   log "切换到源码模式 (link): $PLUGIN_DIR"
@@ -261,6 +334,10 @@ do_dev() {
 do_install() {
   local dsh_bin name version tarball
   dsh_bin="$(find_dsh_bin)" || exit 1
+  if [[ "$PM" != "pnpm" ]]; then
+    err "dsh 插件安装强制依赖 pnpm，当前只有 npm（PM=${PM}）。请先安装 pnpm：npm install -g pnpm（或让 node 自带 corepack 可用）"
+    exit 1
+  fi
   name="$(get_name)"
   version="$(get_version)"
   tarball="$(find_tarball)"
@@ -278,6 +355,10 @@ do_install() {
 do_upgrade() {
   local dsh_bin name version tarball
   dsh_bin="$(find_dsh_bin)" || exit 1
+  if [[ "$PM" != "pnpm" ]]; then
+    err "dsh 插件升级强制依赖 pnpm，当前只有 npm（PM=${PM}）。请先安装 pnpm：npm install -g pnpm（或让 node 自带 corepack 可用）"
+    exit 1
+  fi
   name="$(get_name)"
   version="$(get_version)"
   tarball="$(find_tarball)"
