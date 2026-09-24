@@ -30,6 +30,8 @@ export interface CronJobRecord {
   continuous?: boolean
   /** 每轮新会话：true 时每轮生成新 sessionId；缺省 false 沿用同一会话。 */
   newSessionPerRun?: boolean
+  /** 成功后立即激活的另一个任务 id（进入 running，不等其 cron 到期）。缺省不激活。 */
+  activateOnSuccess?: string
   /** 保留字段：v1 固定本地时区。 */
   timezone: string
   /** 绑定的会话 id（首次执行时生成，之后固定复用）。 */
@@ -85,6 +87,7 @@ const jobSchema = z.object({
   permissionMode: z.string().optional(),
   continuous: z.boolean().optional(),
   newSessionPerRun: z.boolean().optional(),
+  activateOnSuccess: z.string().optional(),
   sessionId: z.string().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),

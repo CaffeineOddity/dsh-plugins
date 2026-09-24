@@ -32,7 +32,8 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 - `CronJobRecord`：`id`, `name`, `cwd`（绝对路径）, `cron`, `prompt`, `enabled`,
   `permissionMode?`（`read-only`/`workspace-write`/`danger-full-access`，缺省 `danger-full-access`）,
   `continuous?`（缺省 `false`：执行完等下次 cron 触发；`true`：成功后立即续跑下一轮）,
-  `timezone`, `sessionId?`, `createdAt`, `updatedAt`, `lastRunAt?`, `lastStatus?`, `nextRunAt?`
+  `timezone`, `sessionId?`, `createdAt`, `updatedAt`, `lastRunAt?`, `lastStatus?`, `nextRunAt?`,
+  `activateOnSuccess?`（成功后立即激活的另一个任务 id，缺省不激活）
 - `CronRunRecord`：`id`, `jobId`, `jobName`, `startedAt`, `finishedAt?`,
   `status`, `sessionId?`, `summary?`, `error?`
 - 每 job 保留最近 50 条 run（写入新 run 时裁剪旧 run）。
@@ -73,6 +74,20 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
   `nextRunAt` 由 tick 正常刷新（即「原定触发时间自动顺延」）。
   执行失败（`error`）或任务被禁用/删除时不续跑，`inFlight` 释放。
 
+### 完成后激活（`activateOnSuccess`，缺省不激活）
+
+- 任务 A 配 `activateOnSuccess: <b-id>`：A 一轮**成功**结束后立即激活 B，让 B 进入 running
+  （不等 B 自己的 cron 到期）。B 的 `nextRunAt` 由 tick 正常刷新（即「下次触发时间顺延」），
+  不会在 A 激活完 B 的那一轮结束时被 B 自己的 cron 立即再触发一轮（B 的 `enabled=false` 时先置 `enabled=true` 再跑）。
+- 语义与「立即跑」（`triggerJobNow`）一致：A 成功后的激活不经过 B 的 cron `matches` 判定；
+  B 已在途（`inFlight`）时本轮跳过（日志警告），B 不存在时跳过（日志警告）。
+- 链式激活不设防（与 `continuous` 的循环语义一致）；但只记一次 `trig` 类的 run，避免
+  A→B→A 自激循环（同一 job 只能有一个在途，`inFlight` 保证），仍可能无限交替，属误配不拦。
+- 失败（`error`/超时/模型耗尽暂停）不激活；连续执行与激活互不干扰，可同时配。按 B 自己的
+  `permissionMode` / `cwd` / 模型池执行，不改 B 的 cron/prompt。
+- 配置站表单用下拉选择目标（除自己外的所有任务，选项显示 `名称（id）`），不再手填 id；
+  编辑时原目标已被删除则重置为不激活。
+
 ### 模型工具（`cron-scheduler.ts` 内 `harness.registerTool`）
 
 `cron_job`（单工具多 action，避免枚举一堆相似工具）：
@@ -80,6 +95,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 add/update 的 `cwd` 缺省取当前 agent 会话的 `session.header.cwd`（项目级归属的落点）；
 add 的 `permissionMode` 缺省 `danger-full-access`（可选 `read-only`/`workspace-write`/`danger-full-access`）；
 add 的 `continuous` 缺省 `false`（`true` 时执行完立即续跑下一轮）；
+add/update 的 `activateOnSuccess` 缺省不填（成功后立即激活的另一个任务 id）；
 `cron` 参数必须通过 `parseCron` 校验，非法即抛错。
 
 ### 斜杠命令（`cron-commands.ts`，`ctx.commands.register`）
@@ -97,8 +113,8 @@ add 的 `continuous` 缺省 `false`（`true` 时执行完立即续跑下一轮�
 
 - `GET /cron` → 任务中心页面（内联单文件 HTML+JS，调用下方 JSON API）。
 - `GET /cron/api/jobs` → 全部 job（含 nextRunAt 计算与 cron 可读描述 `cronHuman`）。
-- `POST /cron/api/jobs` → 新建（body: name/cwd/cron/prompt/permissionMode/continuous）。
-- `PUT /cron/api/jobs/:id` → 更新（cron/prompt/enabled/name/permissionMode/continuous）。
+- `POST /cron/api/jobs` → 新建（body: name/cwd/cron/prompt/permissionMode/continuous/activateOnSuccess）。
+- `PUT /cron/api/jobs/:id` → 更新（cron/prompt/enabled/name/permissionMode/continuous/activateOnSuccess）。
 - `DELETE /cron/api/jobs/:id` → 删除。
 - `GET /cron/api/runs?jobId=&limit=` -> 执行历史（默认 100 条，新->旧）。
 - `DELETE /cron/api/runs` -> 清空全部（或 `?jobId=` 限定某 job）。
@@ -127,6 +143,7 @@ add 的 `continuous` 缺省 `false`（`true` 时执行完立即续跑下一轮�
 4. 模型可调用 `cron_job` 工具完成增删改查。
 5. 到期任务自动执行：`/cron` 页面出现 ok/error 状态的 run 记录与摘要文本。
 6. 页面上可编辑 cron/prompt、启停、删除，改动即时生效（下次 tick 重算）。
+7. A 配 `activateOnSuccess=B`：A 成功一轮后 B 立即进入 running，B 的 nextRunAt 顺延刷新。
 
 ## 已知边界与不做项
 
@@ -134,6 +151,8 @@ add 的 `continuous` 缺省 `false`（`true` 时执行完立即续跑下一轮�
 - 不做跨进程分布式锁：单 web 进程持有调度器（多进程同时跑本插件可能重复触发，v1 不处理）。
 - 不做每 job 独立并发键/队列（同 job 串行由防重入标记保证）。
 - 不修改 deepseek-harness 本体，全部能力走公开 Service（webServer/agents/commands）+ 直接 fs。
+- `/cron` 斜杠命令的快速建任务不设 `activateOnSuccess`（一行表达式塞不下目标 id）；
+  完成后激活走 `cron_job` 工具或 `/cron` 页面编辑。
 
 ## 模型池（全局，cron 插件自管）
 

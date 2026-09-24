@@ -34,12 +34,12 @@
   .actions button { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 3px 8px; cursor: pointer; font-size: 12px; width: 100%; white-space: nowrap; }
   .actions button:hover { border-color: var(--accent); color: var(--accent); }
   .actions button.danger:hover { border-color: var(--err); color: var(--err); }
-  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: 460px; max-width: 92vw; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 20px; width: 720px; max-width: 92vw; }
   dialog::backdrop { background: rgba(0,0,0,.55); }
   dialog h3 { margin: 0 0 14px; font-size: 15px; }
   dialog label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
   dialog input, dialog textarea, dialog select { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 9px; font: inherit; }
-  dialog textarea { min-height: 72px; resize: vertical; }
+  dialog textarea { min-height: 140px; resize: vertical; }
   dialog .row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
   dialog .row button { padding: 6px 16px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; }
   dialog .row button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -117,6 +117,10 @@
   </select>
   <label class="checkbox-row"><input type="checkbox" id="fContinuous"> 连续执行（成功后立即续跑下一轮，不等 cron 触发）</label>
   <label class="checkbox-row"><input type="checkbox" id="fNewSession"> 每轮新会话（缺省沿用同一会话）</label>
+  <label>成功后激活任务（可选：本任务完成后立即激活它，进入 running 且下次触发顺延）</label>
+  <select id="fActivate">
+    <option value="">不激活其它任务</option>
+  </select>
   <div class="row">
     <button id="btnCancel">取消</button>
     <button id="btnSave" class="primary">保存</button>
@@ -261,7 +265,7 @@ function renderJobsTable(jobs) {
       <td>${status}</td>
       <td><b>${esc(job.cronHuman || job.cron)}</b><br><code>${esc(job.cron)}</code></td>
       <td>${esc(next)}<br><span class="cwd">上次: ${esc(last)}</span></td>
-      <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}${job.continuous ? '<br>🔄 连续执行' : ''}${job.continuous && job.newSessionPerRun ? '（每轮新会话）' : ''}</td>
+      <td class="cwd">${esc(PERM_LABEL[job.permissionMode] || job.permissionMode || '完全权限')}${job.continuous ? '<br>🔄 连续执行' : ''}${job.continuous && job.newSessionPerRun ? '（每轮新会话）' : ''}${job.activateOnSuccess ? `<br>➡️ 完成后激活 ${esc(job.activateOnSuccess)}` : ''}</td>
       <td class="actions"><div class="btn-grid">
         <button data-act="edit">编辑</button>
         <button data-act="remove" class="danger">删除</button>
@@ -393,6 +397,14 @@ function openDialog(job) {
   $('fPerm').value = job?.permissionMode || 'danger-full-access'
   $('fContinuous').checked = job?.continuous || false
   $('fNewSession').checked = job?.newSessionPerRun || false
+  // 成功后激活：下拉列出除自己外的所有任务（显示名称 + id）
+  const sel = $('fActivate')
+  const prev = job?.activateOnSuccess || ''
+  sel.innerHTML = '<option value="">不激活其它任务</option>' +
+    allJobs.filter((j) => j.id !== editingId)
+      .map((j) => `<option value="${esc(j.id)}">${esc(j.name || j.id)}（${esc(j.id)}）</option>`).join('')
+  sel.value = prev
+  if (sel.value !== prev) sel.value = ''  // 编辑时原值已被删除则重置
   $('dlg').showModal()
 }
 
@@ -408,6 +420,7 @@ $('btnSave').addEventListener('click', () => {
     permissionMode: $('fPerm').value,
     continuous: $('fContinuous').checked,
     newSessionPerRun: $('fNewSession').checked,
+    activateOnSuccess: $('fActivate').value.trim() || undefined,
   }
   const req = editingId === null
     ? api('/cron/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })

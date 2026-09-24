@@ -102,6 +102,7 @@ export function apply(ctx: Context): void {
               permissionMode?: string
               continuous?: boolean
               newSessionPerRun?: boolean
+              activateOnSuccess?: string
             }
             if (body.cwd === undefined || body.cwd === '') throw new Error('cwd is required')
             if (body.prompt === undefined || body.prompt === '') throw new Error('prompt is required')
@@ -114,6 +115,7 @@ export function apply(ctx: Context): void {
               permissionMode: body.permissionMode,
               continuous: body.continuous,
               newSessionPerRun: body.newSessionPerRun,
+              activateOnSuccess: body.activateOnSuccess,
             })
             json(res, 200, { ok: true, job: jobView(job) })
           } catch (error: unknown) {
@@ -167,6 +169,7 @@ export function apply(ctx: Context): void {
               permissionMode?: string
               continuous?: boolean
               newSessionPerRun?: boolean
+              activateOnSuccess?: string
             }
             if (body.cron !== undefined) parseCron(body.cron)
             const next: CronJobRecord = {
@@ -178,6 +181,7 @@ export function apply(ctx: Context): void {
               permissionMode: body.permissionMode ?? job.permissionMode,
               continuous: body.continuous ?? job.continuous,
               newSessionPerRun: body.newSessionPerRun ?? job.newSessionPerRun,
+              activateOnSuccess: body.activateOnSuccess !== undefined ? (body.activateOnSuccess === '' ? undefined : body.activateOnSuccess) : job.activateOnSuccess,
               updatedAt: Date.now(),
             }
             await store().putJob(next)

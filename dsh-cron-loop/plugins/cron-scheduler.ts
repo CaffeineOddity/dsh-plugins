@@ -284,6 +284,26 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
     // 先释放标记，再同步进入下一轮 runJob（其入口会立刻 add，无竞态窗口）。
     inFlight.delete(job.id)
     if (chain && latest !== undefined) void runJob(ctx, latest)
+    // 成功后激活：B 立即进入 running，nextRunAt 由 tick 顺延；B 不在则跳过（警告）。
+    if (succeeded && latest !== undefined && latest.activateOnSuccess !== undefined && latest.activateOnSuccess !== '') {
+      const targetId = latest.activateOnSuccess
+      if (targetId === latest.id) {
+        ctx.logger?.warn?.(`cron-scheduler: job ${latest.id} activateOnSuccess points to itself, skipping`)
+      } else {
+        const target = store.jobs.get(targetId)
+        if (target === undefined) {
+          ctx.logger?.warn?.(`cron-scheduler: job ${latest.id} activateOnSuccess target ${targetId} not found, skipping`)
+        } else if (inFlight.has(targetId)) {
+          ctx.logger?.warn?.(`cron-scheduler: job ${latest.id} activateOnSuccess target ${targetId} already running, skipping`)
+        } else {
+          ctx.logger?.info?.(`cron-scheduler: job ${latest.id} done -> activate ${targetId} (running)`)
+          // 顺延：先把 B 置为 running 状态并确保 enabled，再进入 runJob（入口 inFlight.add）。
+          await mergeJobUpdate(store, targetId, { enabled: true, updatedAt: Date.now(), lastStatus: 'running' })
+          const activated = store.jobs.get(targetId)
+          if (activated !== undefined) void runJob(ctx, activated)
+        }
+      }
+    }
   }
 }
 
@@ -418,7 +438,7 @@ async function triggerJobNowOn(ctx: Context, jobId: string): Promise<void> {
 /** 新建任务的公共入口（工具/命令/Web 共用）：校验 cron、生成 id、落盘。 */
 export async function createJob(
   ctx: Context,
-  input: { name?: string; cwd: string; cron: string; prompt: string; enabled?: boolean; permissionMode?: string; continuous?: boolean; newSessionPerRun?: boolean },
+  input: { name?: string; cwd: string; cron: string; prompt: string; enabled?: boolean; permissionMode?: string; continuous?: boolean; newSessionPerRun?: boolean; activateOnSuccess?: string },
 ): Promise<CronJobRecord> {
   parseCron(input.cron) // 非法即抛 CronParseError
   const cwd = normalizeCwd(input.cwd)
@@ -450,6 +470,7 @@ export async function createJob(
     permissionMode: input.permissionMode ?? 'danger-full-access',
     continuous: input.continuous ?? false,
     newSessionPerRun: input.newSessionPerRun ?? false,
+    activateOnSuccess: input.activateOnSuccess !== undefined && input.activateOnSuccess !== '' ? input.activateOnSuccess : undefined,
     timezone: 'local',
     createdAt: now,
     updatedAt: now,
@@ -471,6 +492,7 @@ interface CronToolArgs {
   permissionMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
   continuous?: boolean
   newSessionPerRun?: boolean
+  activateOnSuccess?: string
 }
 
 /** 文本输出（output schema: string，render 原样返回）。 */
@@ -514,6 +536,7 @@ export function apply(ctx: Context): void {
       '- pause / resume: 停用 / 启用任务（id 必填）',
       '- runs: 查看任务最近执行历史（id 必填）',
       '- clear_runs: 删除任务执行历史（id 必填；不指定 id 则删除全部历史）',
+      '- 任务完成后激活另一个任务：add/update 时传 activateOnSuccess（另一个任务 id）；本任务成功后目标立即进入 running 且下次触发时间顺延',
     ].join('\n'),
     parameters: {
       action: { type: 'string', enum: ['add', 'list', 'update', 'remove', 'pause', 'resume', 'runs', 'clear_runs'], required: true, description: '要执行的动作' },
@@ -526,6 +549,7 @@ export function apply(ctx: Context): void {
       permissionMode: { type: 'string', enum: ['read-only', 'workspace-write', 'danger-full-access'], description: '权限模式（缺省 danger-full-access；read-only/workspace-write 会弹审批，不适合无人值守）' },
       continuous: { type: 'boolean', description: '连续执行（缺省 false；true 时成功后立即续跑下一轮，不等 cron 触发）' },
       newSessionPerRun: { type: 'boolean', description: '每轮新会话（缺省 false 沿用同一会话）' },
+      activateOnSuccess: { type: 'string', description: '成功后立即激活的另一个任务 id（进入 running，下次触发时间顺延；缺省不激活）' },
     },
     output: {
       schema: { type: 'string' },
@@ -552,6 +576,7 @@ export function apply(ctx: Context): void {
             permissionMode: args.permissionMode,
             continuous: args.continuous,
             newSessionPerRun: args.newSessionPerRun,
+            activateOnSuccess: args.activateOnSuccess,
           })
           return textResult(`已创建任务 ${job.id}「${job.name}」\ncron: ${job.cron}\n目录: ${job.cwd}\nprompt: ${job.prompt}`)
         }
@@ -578,10 +603,11 @@ export function apply(ctx: Context): void {
             enabled: args.enabled ?? job.enabled,
             continuous: args.continuous ?? job.continuous,
             newSessionPerRun: args.newSessionPerRun ?? job.newSessionPerRun,
+            activateOnSuccess: args.activateOnSuccess !== undefined ? (args.activateOnSuccess === '' ? undefined : args.activateOnSuccess) : job.activateOnSuccess,
             updatedAt: Date.now(),
           }
           await store.putJob(next)
-          return textResult(`已更新 ${job.id}: cron=${next.cron} enabled=${String(next.enabled)} continuous=${String(next.continuous ?? false)} newSessionPerRun=${String(next.newSessionPerRun ?? false)}`)
+          return textResult(`已更新 ${job.id}: cron=${next.cron} enabled=${String(next.enabled)} continuous=${String(next.continuous ?? false)} newSessionPerRun=${String(next.newSessionPerRun ?? false)} activateOnSuccess=${String(next.activateOnSuccess ?? '')}`)
         }
         case 'remove': {
           if (args.id === undefined) throw new Error('cron_job remove: id is required')
