@@ -300,7 +300,8 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
     inFlight.delete(job.id)
     if (chain && latest !== undefined) void runJob(ctx, latest)
     // 成功后激活：B 立即进入 running，nextRunAt 由 tick 顺延；B 不在则跳过（警告）。
-    if (succeeded && latest !== undefined && latest.activateOnSuccess !== undefined && latest.activateOnSuccess !== '') {
+    // 本任务（A）已被暂停（enabled=false）时不激活，避免停用的任务继续驱动下游链路。
+    if (succeeded && latest !== undefined && latest.enabled === true && latest.activateOnSuccess !== undefined && latest.activateOnSuccess !== '') {
       const targetId = latest.activateOnSuccess
       if (targetId === latest.id) {
         ctx.logger?.warn?.(`cron-scheduler: job ${latest.id} activateOnSuccess points to itself, skipping`)

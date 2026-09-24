@@ -83,6 +83,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
   不会在 A 激活完 B 的那一轮结束时被 B 自己的 cron 立即再触发一轮（B 的 `enabled=false` 时先置 `enabled=true` 再跑）。
 - 语义与「立即跑」（`triggerJobNow`）一致：A 成功后的激活不经过 B 的 cron `matches` 判定；
   B 已在途（`inFlight`）时本轮跳过（日志警告），B 不存在时跳过（日志警告）。
+- A 已被暂停（`enabled=false`）时不激活：停用的任务不再驱动下游链路。
 - 链式激活不设防（与 `continuous` 的循环语义一致）；但只记一次 `trig` 类的 run，避免
   A→B→A 自激循环（同一 job 只能有一个在途，`inFlight` 保证），仍可能无限交替，属误配不拦。
 - 失败（`error`/超时/模型耗尽暂停）不激活；连续执行与激活互不干扰，可同时配。按 B 自己的
