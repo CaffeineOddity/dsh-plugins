@@ -10,7 +10,7 @@ import type { AgentLike } from '../runtime.js'
 import { getAgent as getAgentConfig } from '../agents.js'
 import { listTasksIn, readTask, writeTask, moveTask, type TaskBoard, type Assignee } from './task-board.js'
 import { boundTaskId, listBindings, unbindSession } from './binding.js'
-import { taskSlotKey, type RelayHost } from './relay.js'
+import { buildRelay, taskSlotKey, writeFenceKey, type RelayHost } from './relay.js'
 import { marshalText } from './board-tools.js'
 import { encodeSessionKey, sessionPartsForEncode, type AgentOutboundMessage } from '../../types.js'
 import { summarizeOwnedInterval, toMarkdownMessages, waitIdleOrTimeout } from '../ask.js'
@@ -129,6 +129,8 @@ interface ProbeState {
  *  - 全终态且无待决 → 叫醒 taskLead 综合
  */
 export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Patrol {
+  // 共享 write 栅栏（进程级）：推进队列时要和 board-tools 用同一把锁
+  const relay = buildRelay({ ensureAgent: host.ensureAgent, agents: host.agents })
   const probeRenew = new Map<string, ProbeState>() // `taskId\0expertId` -> 续期状态
   const notified = new Map<string, string>() // `taskId\0agentId` -> 已叫醒时的完成情况指纹
   const delivering = new Map<string, Promise<void>>() // taskId -> 在跑的收口交付（同任务只跑一次）
@@ -386,6 +388,59 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     writeTask('running', task)
     await sendQuestionnaire(task, task.pendingHuman.questions, '需要你确认')
     syncDeadline(task.taskId)
+  }
+
+  /** 该 assignee 的 write 串行键（按目标目录；read 不占锁）。 */
+  function fenceKeyOf(task: TaskBoard, a: Assignee, cfg: AgentConfig): string {
+    return writeFenceKey(a.access, a.target, task.target, cfg.workspace)
+  }
+
+  /** write 那一轮结束（idle/failed）→ 释放目标锁，并叫醒同一目标排队中的下一个。 */
+  async function releaseAndAdvance(task: TaskBoard, a: Assignee, cfg: AgentConfig): Promise<void> {
+    if (a.access !== 'write') return
+    const key = fenceKeyOf(task, a, cfg)
+    relay.writeFence.release(key, a.sessionId)
+    await advanceWriteQueue(task.taskId, key)
+  }
+
+  /**
+   * 同一目标目录的 write 队列推进（FIFO，按 md 里 assignees 顺序）：
+   * 锁空着就取第一个 waiting 启动它（用派发时存下的 instruction）。
+   */
+  async function advanceWriteQueue(taskId: string, key: string): Promise<void> {
+    if (relay.writeFence.occupied(key)) return
+    const fresh = readTask('running', taskId)
+    if (fresh === undefined) return
+    for (const a of fresh.assignees) {
+      if (a.status !== 'waiting' || a.access !== 'write') continue
+      const cfg = getAgentConfig(a.expertId)
+      if (cfg === undefined) continue
+      if (fenceKeyOf(fresh, a, cfg) !== key) continue
+      if (a.instruction === undefined || a.instruction === '') continue
+      relay.writeFence.begin('write', key, a.sessionId)
+      a.status = 'running'
+      a.wake = true
+      writeTask('running', fresh)
+      try {
+        await relay.startTurn({
+          agent: cfg,
+          taskId: fresh.taskId,
+          expertId: a.expertId,
+          instruction: a.instruction,
+          mdText: marshalText(fresh),
+          access: a.access,
+          session: 'reuse',
+          nowMs: Date.now(),
+          variables: { sender: fresh.sender, provider_id: fresh.providerId },
+          promptText: '',
+          permissionMode: cfg.permission_mode,
+          targetWorkspace: a.target,
+        })
+      } catch (err) {
+        console.warn(`agent-bot: 推进 write 队列启动 ${a.expertId} 失败: ${(err as Error).message}`)
+      }
+      return
+    }
   }
 
   /** 该 assignee 的会话是否还活着（在跑）。 */
@@ -761,6 +816,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
           a.status = 'failed'
           if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
           probeRenew.delete(key)
+          await releaseAndAdvance(task, a, cfg)
           continue
         }
         await restartExpert(task, cfg, a)
@@ -772,6 +828,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
         st.renew = 0
         a.status = 'idle'
         if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
+        await releaseAndAdvance(task, a, cfg) // 这一轮 write 结束 → 让出目标锁，叫醒排队的下一个
         continue
       }
       // 还在跑：不阻塞、不计数

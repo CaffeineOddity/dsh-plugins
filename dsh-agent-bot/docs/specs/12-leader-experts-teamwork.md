@@ -299,11 +299,21 @@ B 可 `open_task(task_x)` 捡起（复用**同一份 md**，接着做 / `update_
 
 被叫醒后看这一单 `access` 和自己是否占着：
 
-| 新这一单 | 行为 |
+**串行域 = 目标目录（target workspace），不是任务。** 三种情形：
+
+| 这一路 | 行为 |
 |---|---|
-| `access=read` | **并行新会话**，不排队。同 target 正有 write 在跑时可能读到半成品；要等写完由派发方设 `wake` 或再派 |
-| `access=write` 且与正在跑的某路 **同一 target**（同一 `target_workspace` / md `target`，或两边都没 target、会写专家 cwd） | 下发成功，进该专家这条 target 的 FIFO（`assignees[].status=waiting` 直到轮到） |
-| `access=write` 且 target **明确不同** | `concurrency=concurrent`：并行；`=serial`：仍进该专家 FIFO |
+| `access=read` | **并行**，不占锁、不排队（同 target 正有 write 在跑时可能读到半成品） |
+| `access=write`，且该目标目录**已有 write 在跑** | 下发成功即**进队列**：`assignees[].status=waiting`，**不立即叫醒**；同时把 `instruction` 存进 assignees（轮到时要拿它重启） |
+| `access=write`，目标目录**空着** | 立刻占锁 + 叫醒 |
+| 不同目标目录 | **并行**（各自一把锁） |
+
+目标目录的取法：`assignee.target` → `task.target` → 该专家 cwd（三者取第一个有值的）。
+
+**锁的释放与推进**：某个 write 那一轮结束（会话 idle）或判 `failed` 时 → 释放该目标锁 →
+在同一目标的 `waiting` 队列里按 md 顺序取第一个启动（`status=running`、`wake=true`、用它存下的 `instruction`）。
+锁是**进程级共享**的（`getWriteFence`）——`buildRelay` 是每个 agent 会话各建一份的，栅栏若跟着会话建，
+同一 target 的两个专家会各拿一把锁，串行直接失效。占位会话用 `agents.get(sessionId)` 判活性，进程重启后锁自动失效回退。
 
 专家也可以在本轮把自身 assignee 标 `waiting`（更新 md 后收口）：中继不视为失败，等派发方再次 `dispatch_expert` 或 FIFO 轮到再叫醒。占着仍可派，不报错。
 

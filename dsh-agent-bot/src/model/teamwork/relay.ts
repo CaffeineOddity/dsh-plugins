@@ -83,6 +83,22 @@ export function createWriteFence(agents: () => { get(sessionId: string): unknown
   }
 }
 
+/**
+ * 进程级共享的 write 栅栏。
+ * 必须共享：`buildRelay` 是**每个 agent 会话**各建一份的，若栅栏跟着会话建，
+ * 同一 target 的两个专家会各拿一把锁 → 串行失效。
+ */
+let sharedFence: WriteFence | null = null
+let sharedAgents: (() => { get(sessionId: string): unknown } | undefined) | null = null
+
+export function getWriteFence(agents: () => { get(sessionId: string): unknown } | undefined): WriteFence {
+  if (sharedFence === null) {
+    sharedAgents = agents
+    sharedFence = createWriteFence(() => sharedAgents?.())
+  }
+  return sharedFence
+}
+
 /** 中继所需宿主（只读面向运行时的最小面）。 */
 export interface RelayHost {
   ensureAgent(input: EnsureAgentInput): Promise<AgentLike>
@@ -143,7 +159,7 @@ export function wrapDispatchFollowup(input: {
  * 启动一个专家 turn 并写入协作槽。重复启动同 (taskId, expertId) 幂等换 sessionId。
  */
 export function buildRelay(host: RelayHost): Relay {
-  const writeFence = createWriteFence(host.agents)
+  const writeFence = getWriteFence(host.agents)
   return {
     resolveSession(agent, taskId, expertId, session, nowMs) {
       return resolveCollabSlotSession(agent, taskId, expertId, session, nowMs)

@@ -14,7 +14,7 @@ import { expandHomePath, loadConfig, type AgentConfig } from '../config.js'
 import { listSkills } from '../skills.js'
 import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
-import { buildRelay, taskSlotKey, type RelayHost } from './relay.js'
+import { buildRelay, taskSlotKey, writeFenceKey, type RelayHost } from './relay.js'
 import { bindSession, boundTaskId, bindIfAbsent } from './binding.js'
 import {
   readTask,
@@ -138,7 +138,7 @@ function getBoundTask(sessionId: string): { task: TaskBoard; status: 'running' }
 /** 派发写入：解析名称 + 落 assignees[]（status 按 FIFO / 并行判定）。 */
 function upsertAssignee(
   task: TaskBoard,
-  expert: { agentId: string; name: string; sessionId: string; dispatchedBy: string; dispatchedByName: string; access: Access; target?: string; status: AssigneeStatus },
+  expert: { agentId: string; name: string; sessionId: string; dispatchedBy: string; dispatchedByName: string; access: Access; target?: string; status: AssigneeStatus; instruction?: string },
   wake = true,
 ): void {
   const idx = task.assignees.findIndex((a) => a.expertId === expert.agentId)
@@ -152,6 +152,7 @@ function upsertAssignee(
     target: expert.target,
     status: expert.status,
     wake,
+    instruction: expert.instruction,
   }
   if (idx < 0) task.assignees.push(record)
   else task.assignees[idx] = record
@@ -464,9 +465,33 @@ export function registerBoardTools(ctx: {
           const target = resolveTargetWorkspace(expertCfg, args.target_workspace)
           if (!target.ok) throw new Error(`agent-bot: ${target.reason}`)
 
+          // write 串行域 = **目标目录**（同一 target 的 write 一律串行；read 并行；不同 target 并行）
+          const assigneeTarget = target.path !== '' ? target.path : task.target
+          const fenceKey = writeFenceKey(args.access, assigneeTarget, task.target, expertCfg.workspace)
+          const mustQueue = args.access === 'write' && relay.writeFence.occupied(fenceKey)
           // 重复派发同 expert 同 target：占着仍可派（spec：不拒，FIFO）
-          const status: AssigneeStatus = 'running'
+          const status: AssigneeStatus = mustQueue ? 'waiting' : 'running'
           const sessionId = relay.resolveSession(expertCfg, task.taskId, args.expert_id, args.session === 'new' ? 'new' : 'reuse', Date.now())
+          if (mustQueue) {
+            upsertAssignee(task, {
+              agentId: args.expert_id,
+              name: expertName,
+              sessionId,
+              dispatchedBy: agentId,
+              dispatchedByName: agentName,
+              access: args.access,
+              target: assigneeTarget,
+              status,
+              instruction: args.instruction,
+            }, false)
+            writeTask('running', task)
+            return {
+              kind: 'waiting',
+              sessionId,
+              text: `目标目录 ${assigneeTarget ?? '(专家 cwd)'} 上已有 write 在跑，已把 ${expertName} 排进队列（status=waiting），轮到会立刻叫醒它`,
+            }
+          }
+          if (args.access === 'write') relay.writeFence.begin('write', fenceKey, sessionId)
           upsertAssignee(task, {
             agentId: args.expert_id,
             name: expertName,
@@ -474,8 +499,9 @@ export function registerBoardTools(ctx: {
             dispatchedBy: agentId,
             dispatchedByName: agentName,
             access: args.access,
-            target: target.path !== '' ? target.path : task.target,
+            target: assigneeTarget,
             status,
+            instruction: args.instruction,
           }, args.wake !== false)
           // 中间层（B 派 C）：B 自己暂停等下游，等 C 那几路终态后由上报链叫醒它接着做
           const paused = pauseSelfIfIntermediate(task, agentId)

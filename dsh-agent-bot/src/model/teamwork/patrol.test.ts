@@ -90,6 +90,7 @@ function fakeHost(
       get: (sessionId: string) => {
         if (!live.includes(sessionId)) return undefined
         return {
+          status: busy.includes(sessionId) ? 'running' : 'idle',
           cancel: () => { cancelled.push(sessionId) },
           whenIdle: () => (busy.includes(sessionId) ? new Promise<void>(() => undefined) : Promise.resolve()),
           followup: (msg: { content: Array<{ text: string }> }) => {
@@ -579,6 +580,53 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     expect(cancelled).toEqual([])
     expect(delivered).toHaveLength(0)
     expect(readTask('running', 'task_t1')?.pendingHuman).toBeUndefined()
+  })
+
+  it('同 target 的 write 队列：前一个 idle → 释放锁并叫醒排队中的下一个', async () => {
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      target: '/proj',
+      assignees: [
+        // B 是同一 target 上正在跑的 write（占着锁）
+        assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'running', access: 'write', target: '/proj' }),
+        // C 排在同一 target 的队列里（还没被启动）
+        assignee({ expertId: c, expertName: 'C', dispatchedBy: a, sessionId: 'sess-c', status: 'waiting', access: 'write', target: '/proj', instruction: '做海报', wake: false }),
+      ],
+    }))
+    // 手动占锁（模拟 dispatch 时 begin 过），并让 B 的会话已 idle
+    const { getWriteFence } = await import('./relay.js')
+    getWriteFence(() => undefined).begin('write', 'write:/proj', 'sess-b')
+    const started: string[] = []
+    const { host } = fakeHost(['sess-a', 'sess-b', 'sess-c'], [], {}, [], undefined, started)
+    const patrol = createPatrol(host, { windowMs: 1 })
+    await patrol.tickOnce()
+    const back = readTask('running', 'task_t1')!
+    expect(back.assignees.find((x) => x.expertId === b)?.status).toBe('idle')
+    // 锁让出来了，C 被启动
+    expect(back.assignees.find((x) => x.expertId === c)?.status).toBe('running')
+    expect(back.assignees.find((x) => x.expertId === c)?.wake).toBe(true)
+  })
+
+  it('read 不占锁：同 target 有 write 在跑时，read 照样跑', async () => {
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
+    const { getWriteFence } = await import('./relay.js')
+    getWriteFence(() => undefined).begin('write', 'write:/proj', 'sess-b')
+    const { host } = fakeHost(['sess-a', 'sess-b', 'sess-c'])
+    const patrol = createPatrol(host, { windowMs: 1 })
+    void patrol
+    const fence = getWriteFence(() => undefined)
+    expect(fence.occupied('write:/proj')).toBe(true)
+    // read 的键与 write 不同 → 互不影响
+    const { writeFenceKey } = await import('./relay.js')
+    expect(writeFenceKey('read', '/proj', undefined, undefined)).not.toBe(writeFenceKey('write', '/proj', undefined, undefined))
+    void b
+    void c
   })
 
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {

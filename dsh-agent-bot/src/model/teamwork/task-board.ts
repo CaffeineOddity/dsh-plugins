@@ -37,6 +37,8 @@ export interface Assignee {
   target?: string
   status: AssigneeStatus
   wake: boolean
+  /** 派发时那句指令（write 排队后轮到时要拿它重启；frontmatter 里单行 JSON 存）。 */
+  instruction?: string
 }
 
 /** 待决问题（抛给人或任务 lead）。 */
@@ -130,6 +132,17 @@ function parseAssignee(raw: unknown, where: string): Assignee {
     target: typeof rec.target === 'string' && rec.target !== '' ? rec.target : undefined,
     status,
     wake: rec.wake === true,
+    instruction: typeof rec.instruction === 'string' && rec.instruction !== '' ? decodeText(rec.instruction) : undefined,
+  }
+}
+
+/** 读回 instruction（JSON 编码；解不开就当原文，兼容手写的 md）。 */
+function decodeText(raw: string): string {
+  try {
+    const v = JSON.parse(raw)
+    return typeof v === 'string' ? v : raw
+  } catch {
+    return raw
   }
 }
 
@@ -204,6 +217,10 @@ export function marshalTaskYaml(task: SerializeTask, body: string): string {
     if (a.target) lines.push(`    target: ${yamlScalar(a.target)}`)
     lines.push(`    status: ${a.status}`)
     lines.push(`    wake: ${a.wake}`)
+    if (a.instruction !== undefined && a.instruction !== '') {
+      // 单行存：JSON 把换行转义成 \n，再由 yamlScalar 加引号 → 不会破坏 frontmatter 的行结构
+      lines.push(`    instruction: ${yamlScalar(JSON.stringify(a.instruction))}`)
+    }
   }
   if (task.pendingHuman) {
     lines.push('pendingHuman:')
