@@ -77,6 +77,7 @@ function fakeHost(
   eventsBySession: Record<string, Array<{ seq: number; type: string; data?: unknown }>> = {},
   busy: string[] = [],
   onFollowup?: (sessionId: string) => void,
+  cancelled: string[] = [],
 ) {
   const woken: Array<{ sessionId: string; text: string }> = []
   const host = {
@@ -88,6 +89,7 @@ function fakeHost(
       get: (sessionId: string) => {
         if (!live.includes(sessionId)) return undefined
         return {
+          cancel: () => { cancelled.push(sessionId) },
           whenIdle: () => (busy.includes(sessionId) ? new Promise<void>(() => undefined) : Promise.resolve()),
           followup: (msg: { content: Array<{ text: string }> }) => {
             woken.push({ sessionId, text: msg.content[0]?.text ?? '' })
@@ -479,7 +481,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   it('专家卡在等审批 → 标 need_decision + 通知人（只发一次）；批准后回到 running', async () => {
     const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
-    const bEvents = [
+    const bEvents: Array<{ seq: number; type: string; data?: unknown }> = [
       { seq: 1, type: 'turn/start' },
       { seq: 2, type: 'approval/asked', data: { id: 'ap1', toolName: 'write_file', reason: '要写工作区外文件' } },
     ]
@@ -518,6 +520,57 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
     expect(delivered.some((d) => d.text[0]?.includes('需要你确认'))).toBe(true)
+  })
+
+  it('IM 任务里专家调了 ask_user_question → 取消那轮、写待决、发问卷到群', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const bEvents = [
+      { seq: 1, type: 'turn/start' },
+      {
+        seq: 2,
+        type: 'tool/call',
+        data: { callId: 'c1', name: 'ask_user_question', arguments: JSON.stringify({ questions: [{ id: 'q1', question: '要哪个尺寸？' }] }) },
+      },
+    ]
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      providerId: 'demo', // IM
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'running', wake: true })],
+    }))
+    const cancelled: string[] = []
+    const { host, delivered } = fakeHost(['sess-a', 'sess-b'], [], { 'sess-b': bEvents }, ['sess-b'], undefined, cancelled)
+    const patrol = createPatrol(host, { windowMs: 1, askHandoffGraceMs: 1 })
+    await patrol.tickOnce()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(cancelled).toEqual(['sess-b'])                       // 取消了那轮
+    const back = readTask('running', 'task_t1')!
+    expect(back.assignees[0]?.status).toBe('need_decision')      // 标记在等人
+    expect(back.pendingHuman?.toHuman).toBe(true)
+    expect(back.pendingHuman?.questions).toEqual(['要哪个尺寸？'])
+    expect(delivered[0]?.text[0]).toContain('要哪个尺寸？')      // 问卷发到群
+    expect(back.deadlineAt).toBeGreaterThan(Date.now())          // 顺延墙钟
+  })
+
+  it('local（Web）任务里调 ask_user_question → 不接管，留给网页 answerer', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const bEvents = [
+      { seq: 1, type: 'tool/call', data: { callId: 'c1', name: 'ask_user_question', arguments: '{"questions":[{"id":"q1","question":"?"}]}' } },
+    ]
+    writeTask('running', task({
+      taskId: 'task_t1', taskLead: a, providerId: 'local',
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'running', wake: true })],
+    }))
+    const cancelled: string[] = []
+    const { host, delivered } = fakeHost(['sess-a', 'sess-b'], [], { 'sess-b': bEvents }, ['sess-b'], undefined, cancelled)
+    const patrol = createPatrol(host, { windowMs: 1, askHandoffGraceMs: 1 })
+    await patrol.tickOnce()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(cancelled).toEqual([])
+    expect(delivered).toHaveLength(0)
+    expect(readTask('running', 'task_t1')?.pendingHuman).toBeUndefined()
   })
 
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {

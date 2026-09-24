@@ -2,7 +2,8 @@
 
 > **实现进度（SDD 标记）**：任务板模型（`task-board.ts`）、会话绑定（`binding.ts`）、中继（`relay.ts`）、六件看板工具（`board-tools.ts`）、巡检器（`patrol.ts` 含活性探针/超时/重启）、service 接线（toolsMount 挂载 + deliver 路由 + 入站 running 摘要包装）均已实现。测试见各 `*.test.ts`。
 > 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、deliver @sender 收口、重启按 `jobs/running/` 恢复；全局开关 `use_hub_experts`（默认 true=中枢全集）；`open_task` 新建任务（入站上下文提供 sender/providerId/群快照）；派发时 fiber 绑定协作槽 + prompt 带任务文件绝对路径；中间层派下游后 `waiting` 暂停、下游终态后恢复；**全终态 → 叫醒 taskLead 综合 → 取其该轮产出 deliver @sender → 移 `done/` + 解绑**；墙钟到点按会话状态分四种处理（顺延/进度反馈/救活/交回给人）；`jobs/cancel/` 人工取消；任务移走后自动解绑。
-> 未做：入站 `ask_user_question` 的拦截。`dsh-user-questions` **只有 `user-questions/request` waterfall，没有会话日志事件**，拿不到「正在等问卷」的信号；且 spec 不拦截审批/问卷 waterfall。替代：`ask_human` 工具（lead 主动把问题上抛给人），prompt 里引导 lead 用它。
+> 接管 `ask_user_question` 走的是「检测挂起 tool/call + 取消回合 + 非阻塞问人」，**不拦 waterfall**；
+> `user-questions/request` 的 waterfall 本身不介入（认领会与人的 IM 回复形成死锁，见上）。
 > 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）。
 
 ## 背景与目标
@@ -373,6 +374,35 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 - 墙钟定时器是**内存态**：进程重启会丢，由 `start()` 的补扫重建。
 - 没有任何兜底扫描 ⇒ 漏事件的唯一自愈路径是「启动扫一次」与「入站互动时复核」。
   这是去掉轮询的代价：若事件丢失且无人再与这单互动，该单会停在原地等下一次互动。
+
+### 内置 `ask_user_question` 的接管（按来源分流）
+
+DSH 自带的 `ask_user_question` 会**阻塞**发起它的那一轮，等网页 answerer 回答。IM 来的任务里
+没人看网页 ⇒ 回合被卡住。按**任务来源**分流：
+
+| 任务来源 | 处理 |
+|---|---|
+| **IM**（`providerId` ≠ `local`） | **接管**：见下 |
+| **local / Web**（`providerId` = `local`） | **不接管**，网页 answerer 照常处理 |
+
+接管流程（`patrol.handOffAskToHuman`）：
+
+```
+会话日志里出现 tool/call(name=ask_user_question) 且无配对 tool/result
+  → 等一个宽限期（默认 10s，给网页 answerer 机会）
+  → 仍挂着：
+      1. cancel({kind:'hook'}, {keepInbox:true})  ← **结束那一轮**
+         不取消就会死锁：tool call 占着会话，人的 IM 回复是同会话的下一次入站，永远排队进不来
+      2. assignees[].status = need_decision + 写 pendingHuman{toHuman:true, questions 从 arguments 解析}
+      3. deliver 问卷 @sender（`sendQuestionnaire`）+ 顺延墙钟
+  → 人下次来消息：入站带 running 摘要（含待决题干）→ LLM 自己认
+      「这是答复」→ 回填 + 自动清待决 + 复活该专家；「这是新活」→ 新开一单
+```
+
+为什么不在 waterfall 里"认领并回答"：认领后必须**当场返回结构化答案**才能解除 tool call，
+而答案来自人的 IM 回复（同会话下一次入站）⇒ 死锁；绕开就得自建「回复↔问题」配对、超时、
+取消与选项解码 —— 即 §边界与不做项 明禁的那套。取消回合 + 非阻塞 `ask_human` 语义，
+用现成的入站链路就绕过了整个问题。
 
 ### 等人拍板 / 等审批的状态标记（`need_decision`）
 

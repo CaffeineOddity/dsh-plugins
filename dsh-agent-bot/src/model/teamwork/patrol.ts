@@ -21,6 +21,12 @@ export interface PatrolHost extends RelayHost {
   deliver(providerId: string, sessionParts: Record<string, string>, messages: AgentOutboundMessage[]): Promise<void>
 }
 
+/** 内置问卷工具名（DSH 自带，会阻塞回合等网页 answerer）。 */
+const ASK_TOOL_NAME = 'ask_user_question'
+
+/** 交给网页 answerer 的宽限期（ms）：过了还挂着就取消回合、改由人在 IM 回答。 */
+const DEFAULT_ASK_HANDOFF_GRACE_MS = 10_000
+
 /** 解绑清理的最小间隔（ms）：任务被人挪走后不必每轮查。 */
 const RECONCILE_MS = 5_000
 
@@ -31,6 +37,8 @@ export interface PatrolOptions {
   maxRenew?: number
   /** 任务墙钟（缺省用全局 task_round_timeout_ms）。 */
   roundTimeoutMs?: number
+  /** ask_user_question 转交人的宽限期（ms）。缺省 10s。 */
+  askHandoffGraceMs?: number
   /** 专家已 idle 但 wake 未消费时的收口等待（超时则按失败处理）。 */
   idleCollectMs?: number
 }
@@ -122,6 +130,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   const notified = new Map<string, string>() // `taskId\0agentId` -> 已叫醒时的完成情况指纹
   const delivering = new Map<string, Promise<void>>() // taskId -> 在跑的收口交付（同任务只跑一次）
   const deciding = new Map<string, Promise<void>>() // taskId -> 在等 taskLead 拍板的 job
+  const askTimers = new Map<string, ReturnType<typeof setTimeout>>() // `taskId\0expertId` -> 转交人的宽限定时器
   const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>() // taskId -> 墙钟定时器
   const lastScheduledDeadline = new Map<string, number>() // taskId -> 已排的 deadlineAt（避免重复排）
   let lastReconcileAt = 0
@@ -230,6 +239,8 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   function stop(): void {
     stopped = true
     for (const taskId of [...deadlineTimers.keys()]) clearDeadline(taskId)
+    for (const t of askTimers.values()) clearTimeout(t)
+    askTimers.clear()
   }
 
   function windowFor(agent: AgentConfig): number {
@@ -273,6 +284,105 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       }
     }
     return [...asked.values()]
+  }
+
+  /** 解析 ask_user_question 的 arguments（JSON 串）成题干列表。解析不出来给空数组。 */
+  function parseAskQuestions(raw: unknown): string[] {
+    if (typeof raw !== 'string' || raw === '') return []
+    try {
+      const parsed = JSON.parse(raw) as { questions?: unknown }
+      if (!Array.isArray(parsed.questions)) return []
+      const out: string[] = []
+      for (const q of parsed.questions) {
+        if (typeof q !== 'object' || q === null) continue
+        const rec = q as { question?: unknown; header?: unknown }
+        const text = typeof rec.question === 'string' ? rec.question.trim() : ''
+        if (text === '') continue
+        const header = typeof rec.header === 'string' && rec.header.trim() !== '' ? `${rec.header.trim()}：` : ''
+        out.push(`${header}${text}`)
+      }
+      return out
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * 挂起的 `ask_user_question` 调用（有 `tool/call`、没有配对的 `tool/result`）。
+   * 它会把这一轮**阻塞**在会话里等网页 answerer —— IM 任务里没人看网页，所以必须接管。
+   */
+  function openAskCalls(live: AgentLike): Array<{ callId: string; questions: string[] }> {
+    const events = live.session.snapshotEvents() as Array<{ type: string; data?: unknown }>
+    const open = new Map<string, string[]>()
+    for (const e of events) {
+      const d = (e.data ?? {}) as {
+        callId?: unknown
+        name?: unknown
+        arguments?: unknown
+        message?: { source?: { callId?: unknown } }
+      }
+      if (e.type === 'tool/call') {
+        if (d.name !== ASK_TOOL_NAME) continue
+        const callId = typeof d.callId === 'string' ? d.callId : ''
+        if (callId === '') continue
+        open.set(callId, parseAskQuestions(d.arguments))
+      } else if (e.type === 'tool/result') {
+        const callId = typeof d.message?.source?.callId === 'string' ? d.message.source.callId : ''
+        if (callId !== '') open.delete(callId)
+      }
+    }
+    return [...open.entries()].map(([callId, questions]) => ({ callId, questions }))
+  }
+
+  /** 检测到挂起的 ask_user_question → 宽限期后转交给人（IM 任务才接管）。 */
+  function watchAskUserQuestion(task: TaskBoard, a: Assignee, live: AgentLike, open: readonly { callId: string }[]): void {
+    const key = `${task.taskId}\0${a.expertId}`
+    if (task.providerId === 'local' || open.length === 0) {
+      const t = askTimers.get(key)
+      if (t !== undefined) {
+        clearTimeout(t)
+        askTimers.delete(key)
+      }
+      return
+    }
+    if (askTimers.has(key)) return
+    const grace = options.askHandoffGraceMs ?? DEFAULT_ASK_HANDOFF_GRACE_MS
+    const timer = setTimeout(() => {
+      askTimers.delete(key)
+      void handOffAskToHuman(task.taskId, a.expertId, open.map((o) => o.callId))
+    }, grace)
+    askTimers.set(key, timer)
+  }
+
+  /**
+   * 把内置问卷转交给人（specs/12 §决策链路）：
+   *  1. **取消那一轮** —— 否则会话被这个 tool call 占着，人的 IM 回复永远排队进不来（死锁）
+   *  2. 写 `pendingHuman{toHuman:true}` + 该 assignee 标 `need_decision`
+   *  3. `deliver` 问卷 @sender 并顺延墙钟；人下次来消息时 LLM 认待决 → 答复并复活，或开新单
+   * local（Web）任务不接管：网页 answerer 正常处理。
+   */
+  async function handOffAskToHuman(taskId: string, expertId: string, callIds: readonly string[]): Promise<void> {
+    if (stopped) return
+    const task = readTask('running', taskId)
+    if (task === undefined || task.providerId === 'local') return
+    const a = task.assignees.find((x) => x.expertId === expertId)
+    if (a === undefined || isTerminal(a)) return
+    const live = host.agents()?.get(a.sessionId) as (AgentLike & { cancel?: (cause: unknown, options?: unknown) => void }) | undefined
+    if (live === undefined) return
+    const stillOpen = openAskCalls(live).filter((o) => callIds.includes(o.callId))
+    if (stillOpen.length === 0) return // 已经被网页答掉了，别多事
+    const questions = stillOpen.flatMap((o) => o.questions)
+    live.cancel?.({ kind: 'hook', reason: 'agent-bot: ask_user_question 改由人在 IM 回答' }, { keepInbox: true })
+    a.status = 'need_decision'
+    task.pendingHuman = {
+      questions: questions.length > 0 ? questions : ['（模型想问你一个问题）'],
+      askedBy: expertId,
+      askedAt: Date.now(),
+      toHuman: true,
+    }
+    writeTask('running', task)
+    await sendQuestionnaire(task, task.pendingHuman.questions, '需要你确认')
+    syncDeadline(task.taskId)
   }
 
   /** 该 assignee 的会话是否还活着（在跑）。 */
@@ -615,6 +725,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       // 等审批：标记 need_decision + 通知人去网页批准；批准/拒绝后回到 running
       const waitLive = host.agents()?.get(a.sessionId) as AgentLike | undefined
       if (waitLive !== undefined) {
+        watchAskUserQuestion(task, a, waitLive, openAskCalls(waitLive))
         const open = openApprovals(waitLive)
         if (open.length > 0 && a.status !== 'need_decision') {
           a.status = 'need_decision'
