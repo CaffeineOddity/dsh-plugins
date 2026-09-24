@@ -284,6 +284,23 @@ export async function waitIdleOrTimeout(whenIdle: Promise<void>, timeoutMs: numb
 }
 
 /**
+ * 只**投递**本轮（等上一轮先闲），不等它跑完 —— 返回本轮产出的起点 seq。
+ * 用于「通道有 deliver」的异步模式：立刻回执，产出等回合结束再由调用方推回去。
+ */
+export async function startFollowupTurn(agent: FollowupAgent, context: string): Promise<number> {
+  if (typeof context !== 'string') throw new Error('agent-bot: context 须为字符串')
+  await agent.whenIdle()
+  const firstSeq = agent.session.seq
+  agent.followup({
+    id: `agent-bot-${Date.now()}`,
+    role: 'user',
+    content: [{ type: 'text', text: context }],
+    source: { kind: 'user' },
+  })
+  return firstSeq
+}
+
+/**
  * 上一轮必须先闲，再 followup，超时从 followup 实际开始起算。
  */
 export async function runFollowupTurn(

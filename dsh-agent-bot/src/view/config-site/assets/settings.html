@@ -40,7 +40,7 @@
           <input id="st-timeout" type="number" min="1000" max="1800000" step="1000" style="width:220px;flex:0 0 auto"/>
           <span class="hint" style="margin:0">毫秒，范围 1000–1800000，默认 180000（3 分钟）</span>
         </div>
-        <p class="hint">超时未拿到回复时通道先回「处理中」，后台完成后再补发。保存后下次 ask 立即生效。</p>
+        <p class="hint">只用于两处：① 通道<b>没有 deliver</b> 时同步等这一轮的上限（到点先回当时的文本，余下补发）；② 巡检判断专家会话是否真的掉线的宽限。<b>通道有 deliver 时入站立刻回执，此值不参与。</b></p>
         <div class="row">
           <label>专家续期上限</label>
           <input id="st-renew" type="number" min="1" step="1" style="width:220px;flex:0 0 auto"/>

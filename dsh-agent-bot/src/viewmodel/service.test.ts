@@ -717,6 +717,41 @@ describe('ask 校验先于回合', () => {
   })
 })
 
+describe('出站按通道能力分档（specs/12 §入站出站）', () => {
+  it('通道有 deliver → 立刻回执；这一轮产出异步推回', async () => {
+    seedRunnableAgent(false, 180000)
+    const events = [
+      { seq: 1, type: 'turn/start' },
+      { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '答案在此' }] } } },
+    ]
+    const delivered: Array<{ providerId: string; text: string[] }> = []
+    const svc = createAgentBotService(fakeHost(events, idleNow))
+    svc.registerProvider({
+      id: 'demo',
+      label: '示例通道',
+      deliver: async (req) => { delivered.push({ providerId: 'demo', text: req.messages.map((m) => m.text) }) },
+    })
+    const r = await svc.ask(askReq('t1', 'alice'))
+    expect(r.messages.map((m) => m.text).join('')).toContain('已接')  // 立刻回执，不等回合
+    expect(r.pending).toBeNull()
+    await new Promise((res) => setTimeout(res, 30))                   // 等后台推回
+    expect(delivered[0]?.text[0]).toContain('答案在此')
+  })
+
+  it('通道没有 deliver → 保持同步：直接回这一轮的文本（退化路径）', async () => {
+    seedRunnableAgent(false, 180000)
+    const events = [
+      { seq: 1, type: 'turn/start' },
+      { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '同步答案' }] } } },
+    ]
+    const svc = createAgentBotService(fakeHost(events, idleNow))
+    svc.registerProvider({ id: 'demo', label: '示例通道' })
+    const r = await svc.ask(askReq('t1', 'alice'))
+    expect(r.messages.map((m) => m.text).join('')).toContain('同步答案')
+    expect(r.messages.map((m) => m.text).join('')).not.toContain('已接')
+  })
+})
+
 describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', () => {
   /** 两个 agent：a1（被 @ 的）+ a2（可派的专家）。 */
   function seedTwoAgents(useHubExperts: boolean): void {

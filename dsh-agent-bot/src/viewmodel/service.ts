@@ -9,7 +9,8 @@
  * G13：unload 时 dispose 全部 live handle。
  */
 import { randomUUID } from 'node:crypto'
-import { planSession, prepareAsk, settleAskRound } from '../model/ask.js'
+import { planSession, prepareAsk, settleAskRound, startFollowupTurn, summarizeOwnedInterval, toMarkdownMessages } from '../model/ask.js'
+import type { FollowupAgent as FollowupAgentLike } from '../model/ask.js'
 import { getAgent as getAgentConfig, listAgents as listAgentConfigs, touchSession } from '../model/agents.js'
 import { loadConfig } from '../model/config.js'
 import { appendLog } from './rpc.js'
@@ -153,6 +154,37 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
     },
   })
   const queue = createAskQueue()
+
+  /**
+   * 异步模式的收尾：等这一轮结束 → 取本轮产出 → 经通道 `deliver` 推回原会话。
+   * 两种收场：
+   *  - 这一轮**派了活**（绑定的任务上已有 assignee）→ 不推本轮文本（回执已覆盖；
+   *    spec：派发轮的助手长文本丢弃），最终结果由收口那一步 deliver。
+   *  - 没派活（直答）→ 把本轮文本推回去，那就是答案。
+   */
+  async function pushRoundResult(
+    agent: FollowupAgentLike,
+    req: AgentAskRequest,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      const firstSeq = agent.session.seq
+      await agent.whenIdle()
+      const bound = boundTaskId(sessionId)
+      const task = bound === undefined ? undefined : readTaskModel('running', bound)
+      if (task !== undefined && task.assignees.length > 0) return // 派了活：交给收口
+      const text = summarizeOwnedInterval(agent.session.snapshotEvents(), firstSeq)
+      if (text === '') return
+      const deliver = providerDeliver(req.meta.providerId)
+      if (deliver === undefined) return
+      await deliver({
+        sessionParts: { provider_id: req.meta.providerId, ...req.meta.sessionParts },
+        messages: toMarkdownMessages(text).map((m) => ({ ...m, atUserIds: req.meta.sender === '' ? [] : [req.meta.sender] })),
+      })
+    } catch (err) {
+      appendLog('deliver', `异步推回失败: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
 
   /** 某 provider + sessionParts 的「对话」标识（板可见性用）。 */
   function conversationKeyFor(providerId: string, parts: Record<string, string>): string {
@@ -395,6 +427,27 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
             ? appendPromptToUserContext(req.context, promptText, values)
             : req.context
         const contextWithBoard = boardCtx.text === '' ? followupContext : `${followupContext}\n\n${boardCtx.text}`
+        // 出站模式按**通道能力**分档（specs/12 §入站出站）：
+        //   通道有 deliver → 异步：立刻回一条回执，这一轮的产出等回合结束经 deliver 推回去
+        //                    （通道再也不会因为等 agent 而超时；本轮 W 不参与）
+        //   通道没 deliver → 同步：等这一轮（最多 W），拿文本当回复（退化路径）
+        const canPush = providers.get(req.meta.providerId)?.deliver !== undefined
+        if (canPush) {
+          await startFollowupTurn(agent, contextWithBoard)
+          void pushRoundResult(agent, req, decision.sessionId)
+          touchSession(
+            live.id,
+            sessionKey,
+            decision.sessionId,
+            Date.now(),
+            promptFingerprintFor(live.prompt, live.prompt_placement, live.skill_groups, live.prompt_append_skills),
+          )
+          service_notifyIdle(decision.sessionId)
+          return {
+            messages: [{ kind: 'text', text: `已接，正在处理（agent「${live.name}」）`, url: '', atUserIds: [], atAll: false }],
+            pending: null,
+          }
+        }
         const result = await settleAskRound(agent, contextWithBoard, loadConfig().agent_wait_timeout_ms)
         // 落的是**实际用的那条槽**（软路由可能把它放进了任务槽）
         touchSession(
