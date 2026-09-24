@@ -9,6 +9,10 @@ import { tmpdir } from 'node:os'
 import { resetConfigCache } from '../config.js'
 import { createAgent as createAgentConfig, saveAgent, type AgentWrite } from '../agents.js'
 import { buildExpertCards, hubMembers, resolveTargetWorkspace, type ExpertCard } from './board-tools.js'
+import { taskSlotKey } from './relay.js'
+import { registerBoardTools } from './board-tools.js'
+import { writeTask, type TaskBoard } from './task-board.js'
+import { getAgent } from '../agents.js'
 
 let dir: string
 let prevEnv: string | undefined
@@ -84,6 +88,51 @@ describe('buildExpertCards', () => {
     const alice = cards.find((c) => c.agentId === aliceId) as ExpertCard
     expect(alice.needs_target_workspace).toBe(true)
     expect(alice.workspaceCandidates?.some((w) => w.workspace === wsOf('Bob'))).toBe(true)
+  })
+})
+
+describe('open_task：把当前会话写进该单任务槽', () => {
+  it('捡起 running 单后，任务槽指向当前会话（后续入站/叫醒命中同一条）', async () => {
+    const tools: Array<{ name: string; execute: (a: unknown, e: unknown) => Promise<unknown> }> = []
+    const ctx = {
+      get: (n: string) =>
+        n === 'tools' ? { register: (d: { name: string; execute: (a: unknown, e: unknown) => Promise<unknown> }) => { tools.push(d); return () => undefined } } : undefined,
+      effect: () => undefined,
+    }
+    registerBoardTools(ctx as never, {
+      conversationKeyFor: (_p, parts) => parts.group_id ?? 'local',
+      agentIdentity: () => ({ agentId: bobId, agentName: 'Bob' }),
+      ensureAgent: async () => ({}) as never,
+      agents: () => undefined,
+    })
+    const openTask = tools.find((t) => t.name === 'open_task')
+    if (openTask === undefined) throw new Error('open_task 未注册')
+    const t: TaskBoard = {
+      taskId: 'task_ot',
+      taskLead: bobId,
+      sender: 'alice',
+      providerId: 'demo',
+      sessionParts: { bot_id: 'r1', group_id: 'g1' },
+      originContext: 'c',
+      access: 'write',
+      createdAt: 1,
+      deadlineAt: 2,
+      groupSnapshot: [],
+      assignees: [],
+      body: '',
+    }
+    writeTask('running', t)
+
+    await openTask.execute({ taskId: 'task_ot' }, { agent: { id: 'sess-1' } })
+    expect(getAgent(bobId)?.sessions[taskSlotKey('task_ot', bobId)]?.sessionId).toBe('sess-1')
+  })
+})
+
+describe('taskSlotKey（任务槽 key 不含 sender）', () => {
+  it('同一单同一 agent 一条槽；不同单/不同 agent 各自一条', () => {
+    expect(taskSlotKey('task_1', 'a1')).toBe('task:task_1:a1')
+    expect(taskSlotKey('task_1', 'a2')).not.toBe(taskSlotKey('task_1', 'a1'))
+    expect(taskSlotKey('task_2', 'a1')).not.toBe(taskSlotKey('task_1', 'a1'))
   })
 })
 

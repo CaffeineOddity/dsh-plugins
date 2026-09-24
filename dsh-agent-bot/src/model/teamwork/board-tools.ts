@@ -9,12 +9,12 @@
  * 工具输出不直接向模型隐藏：render 给纯文本，附完整能力卡片与任务摘要。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { getAgent as getAgentConfig, listAgents as listAgentConfigs } from '../agents.js'
+import { getAgent as getAgentConfig, listAgents as listAgentConfigs, touchSession } from '../agents.js'
 import { expandHomePath, loadConfig, type AgentConfig } from '../config.js'
 import { listSkills } from '../skills.js'
 import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
-import { buildRelay, type RelayHost } from './relay.js'
+import { buildRelay, taskSlotKey, type RelayHost } from './relay.js'
 import { bindSession, boundTaskId, bindIfAbsent } from './binding.js'
 import {
   readTask,
@@ -336,6 +336,9 @@ export function registerBoardTools(ctx: {
               throw new Error(`agent-bot: 本会话已绑定 ${existing}，不能同时绑 ${args.taskId}`)
             }
             bindSession(who.sessionId, args.taskId)
+            // 这一轮用的会话就是「本 agent 在该单的任务槽」：后续入站/叫醒都命中同一条，
+            // 记忆连续，也不会与后续消息并发改同一份 md（specs/12 §会话分层与入站路由）
+            touchSession(who.agentId, taskSlotKey(args.taskId, who.agentId), who.sessionId, Date.now(), '')
             return { taskId: args.taskId, text: `已绑定任务 ${args.taskId}（taskLead=${task.taskLead}）` }
           }
           // 新建：谁 open 谁是 taskLead（只在这个 agent 自己的上下文）
@@ -364,6 +367,7 @@ export function registerBoardTools(ctx: {
             groupSnapshot: inbound.groupSnapshot,
           })
           bindSession(who.sessionId, task.taskId)
+          touchSession(who.agentId, taskSlotKey(task.taskId, who.agentId), who.sessionId, Date.now(), '')
           return {
             taskId: task.taskId,
             text: `已新建任务 ${task.taskId}（taskLead=${who.agentName}，access=${task.access}）\n文件：${taskFilePath('running', task.taskId)}\n接下来可按 list_group_experts 的卡片 dispatch_expert，或直接自己做。`,

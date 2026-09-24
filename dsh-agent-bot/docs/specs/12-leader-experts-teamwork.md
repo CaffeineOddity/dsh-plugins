@@ -367,7 +367,10 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 
 `deliver({ sessionParts, messages })` 与 ask 出站同形；@ sender 写在 `atUserIds`。通道 markdown 若不吃 AT，正文同时写 `@name`。通道：`bot_id` 查 webhook（**按 robot.id**），`group_id` 当 toid。缺 `deliver`：只打日志。
 
-`deliver` **不走** 入站 FIFO。叫醒 / 综合的内部 followup 走该专家当时记下的 `sessionId`；**任务 lead 的综合 / 入站** 共用 `(taskLead, 通道 sessionKey)` FIFO：B 的派发 turn 进行中，A 的综合等 A 那路 idle。Alice 与 Bob 若 `session_by_sender=true` 则两路 session，互不占队列。
+`deliver` **不走** 入站 FIFO。叫醒 / 综合的内部 followup 走该专家当时记下的 `sessionId`。
+
+**按人隔离只作用在通道槽（前台）**：Alice 与 Bob 若该 agent `session_by_sender=true` 则两路前台会话，互不占队列。
+**任务槽一律不按人分**（key = `task:{taskId}:{agentId}`）：任务槽天生是「这一单」的共享工作上下文（一单一 md、同群一块板），单内两人共享记忆；人的区分在 md 的 `sender` 字段上。要按人隔离就调该 agent 的 `session_by_sender`，不引入新开关。
 
 ### 叫醒谁、用哪条会话、叫几次
 
