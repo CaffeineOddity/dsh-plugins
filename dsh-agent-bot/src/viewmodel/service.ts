@@ -359,13 +359,15 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
           decision = planSession({ ...current, sessionKey }, archived, Date.now(), randomUUID())
           sessionKey = current.sessionKey
         }
-        if (routed.taskId !== undefined) bindSession(decision.sessionId, routed.taskId)
+        // 注意：路由**不**自动绑定。绑定只由 LLM 的 open_task 决定（specs/12：任务归属由模型定），
+        // 否则路由判偏后 LLM 想改认另一单会被「本会话已绑定 X，不能同时绑 Y」挡住。
         const promptText = promptTextFor(live.id, live.prompt, live.skill_groups, live.prompt_append_skills)
         const values = variableValues(req, sessionKey)
         // 入站包装（specs/12 §入站怎么绑任务）：附本群 running 短摘要，让 LLM 认捡起/新建。
         const boardCtx = boardContextFor(live, req.meta.providerId, req.meta.sessionParts)
-        // 人的回填：入站前记下该会话绑定的任务与待决时间；这一轮结束后若待决没被换掉就清掉
-        const boundBefore = boundTaskId(decision.sessionId)
+        // 人的回填：入站前记下"这一轮归属的任务"与待决时间；结束后若待决没被换掉就清掉。
+        // 优先用路由结果（会话可能还没被 open_task 绑定），其次看已绑定任务。
+        const boundBefore = routed.taskId ?? boundTaskId(decision.sessionId)
         const pendingBefore = boundBefore === undefined
           ? undefined
           : readTaskModel('running', boundBefore)?.pendingHuman?.askedAt

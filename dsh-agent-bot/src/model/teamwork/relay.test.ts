@@ -8,7 +8,7 @@ import { homedir } from 'node:os'
 import { tmpdir } from 'node:os'
 import { loadConfig, resetConfigCache, type AgentConfig } from '../config.js'
 import { saveAgent, type AgentWrite } from '../agents.js'
-import { buildRelay, dirsConflict, isCollabSessionKey, resolveFenceDir, taskSlotKey, wrapDispatchFollowup, type RelayHost } from './relay.js'
+import { buildRelay, dirsConflict, isCollabSessionKey, resetWriteFence, resolveFenceDir, taskSlotKey, wrapDispatchFollowup, type RelayHost } from './relay.js'
 import { boundTaskId, resetBindingsCache } from './binding.js'
 
 let dir: string
@@ -50,11 +50,13 @@ beforeEach(() => {
   process.env.AGENT_BOT_CONFIG_DIR = dir
   resetConfigCache()
   resetBindingsCache()
+  resetWriteFence()
 })
 
 afterEach(() => {
   resetConfigCache()
   resetBindingsCache()
+  resetWriteFence()
   if (prevEnv === undefined) delete process.env.AGENT_BOT_CONFIG_DIR
   else process.env.AGENT_BOT_CONFIG_DIR = prevEnv
   rmSync(dir, { recursive: true, force: true })

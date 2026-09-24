@@ -11,7 +11,7 @@ import { getAgent as getAgentConfig, saveAgent, touchSession } from '../agents.j
 import { readTask, writeTask, type TaskBoard, type Assignee } from './task-board.js'
 import { bindSession, boundTaskId, resetBindingsCache } from './binding.js'
 import { assigneeOf, createPatrol, hasPendingDownstream, shouldDeliver, wakeSessionIdFor, wakeText } from './patrol.js'
-import { taskSlotKey } from './relay.js'
+import { resetWriteFence, taskSlotKey } from './relay.js'
 import type { AgentLike } from '../runtime.js'
 
 let dir: string
@@ -120,11 +120,13 @@ beforeEach(() => {
   process.env.AGENT_BOT_CONFIG_DIR = dir
   resetConfigCache()
   resetBindingsCache()
+  resetWriteFence()
 })
 
 afterEach(() => {
   resetConfigCache()
   resetBindingsCache()
+  resetWriteFence()
   if (prevEnv === undefined) delete process.env.AGENT_BOT_CONFIG_DIR
   else process.env.AGENT_BOT_CONFIG_DIR = prevEnv
   rmSync(dir, { recursive: true, force: true })
@@ -616,11 +618,10 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
     const { getWriteFence } = await import('./relay.js')
-    getWriteFence(() => undefined).begin('/proj', 'sess-b')
     const { host } = fakeHost(['sess-a', 'sess-b', 'sess-c'])
-    const patrol = createPatrol(host, { windowMs: 1 })
-    void patrol
-    const fence = getWriteFence(() => undefined)
+    // 必须先建 host：栅栏的"活性"靠 agents().get，占位会话不在线会被当作已死回收
+    const fence = getWriteFence(host.agents)
+    fence.begin('/proj', 'sess-b')
     expect(fence.occupied('/proj')).toBe(true)
     expect(fence.occupied('/proj/design')).toBe(true)   // 子目录也算冲突
     expect(fence.occupied('/other')).toBe(false)
@@ -653,6 +654,54 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     const back = readTask('running', 'task_t1')
     expect(back?.body).toContain('专家补的进展')      // 正文没被旧快照覆盖
     expect(back?.assignees.find((x) => x.expertId === b)?.wake).toBe(false) // 但 wake 消费照常落盘
+  })
+
+  it('锁被占时：等下游的中间层不被唤醒（否则两个 write 同写一个目录）', async () => {
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      target: '/proj',
+      assignees: [
+        assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'waiting', access: 'write', target: '/proj' }),
+        assignee({ expertId: c, expertName: 'C', dispatchedBy: b, sessionId: 'sess-c', status: 'idle', wake: true }),
+      ],
+    }))
+    const { getWriteFence } = await import('./relay.js')
+    const { host, woken } = fakeHost(['sess-a', 'sess-b', 'sess-c', 'sess-other'])
+    const fence = getWriteFence(host.agents)
+    fence.begin('/proj', 'sess-other') // 别人占着这个目标
+    const patrol = createPatrol(host, { windowMs: 1 })
+    await patrol.tickOnce()
+    expect(woken).toEqual([]) // B 不唤醒（在等锁），A 也不被上报
+    expect(readTask('running', 'task_t1')?.assignees.find((x) => x.expertId === b)?.status).toBe('waiting')
+  })
+
+  it('锁让出来后：等下游的中间层被唤醒并重新占锁', async () => {
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      target: '/proj',
+      assignees: [
+        assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'waiting', access: 'write', target: '/proj' }),
+        assignee({ expertId: c, expertName: 'C', dispatchedBy: b, sessionId: 'sess-c', status: 'idle', wake: true }),
+      ],
+    }))
+    const { getWriteFence } = await import('./relay.js')
+    const { host, woken } = fakeHost(['sess-a', 'sess-b', 'sess-c'], [], {}, ['sess-b'])
+    const fence = getWriteFence(host.agents) // 锁是空的
+    expect(fence.occupied('/proj')).toBe(false)
+    const patrol = createPatrol(host, { windowMs: 1 })
+    await patrol.tickOnce()
+    expect(woken.map((w) => w.sessionId)).toEqual(['sess-b']) // 叫醒 B 继续做
+    const back = readTask('running', 'task_t1')!
+    expect(back.assignees.find((x) => x.expertId === b)?.status).toBe('running')
+    expect(fence.occupied('/proj')).toBe(true) // 重新占住
   })
 
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {

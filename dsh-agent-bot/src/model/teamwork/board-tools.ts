@@ -9,12 +9,12 @@
  * 工具输出不直接向模型隐藏：render 给纯文本，附完整能力卡片与任务摘要。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { getAgent as getAgentConfig, listAgents as listAgentConfigs, touchSession } from '../agents.js'
+import { clearSession, getAgent as getAgentConfig, listAgents as listAgentConfigs, touchSession } from '../agents.js'
 import { expandHomePath, loadConfig, type AgentConfig } from '../config.js'
 import { listSkills } from '../skills.js'
 import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
-import { buildRelay, resolveFenceDir, taskSlotKey, type RelayHost } from './relay.js'
+import { buildRelay, resolveFenceDir, taskSlotKey, type Relay, type RelayHost } from './relay.js'
 import { bindSession, boundTaskId, bindIfAbsent } from './binding.js'
 import {
   readTask,
@@ -163,11 +163,17 @@ function upsertAssignee(
  * `waiting` 不算终态，因此不会被上报给 A；等 C 那几路终态后由上报链叫醒 B，
  * 那时再把 B 改回 `running` 让它接着做（见 patrol）。
  */
-function pauseSelfIfIntermediate(task: TaskBoard, callerAgentId: string): boolean {
+function pauseSelfIfIntermediate(task: TaskBoard, callerAgentId: string, relay: Relay): boolean {
   const self = task.assignees.find((a) => a.expertId === callerAgentId)
   if (self === undefined) return false
   if (self.status === 'waiting') return false
   self.status = 'waiting'
+  // 暂停期间没在写 → **必须让出目标锁**，否则：
+  // 它派到同一 target 的下游会一直排在队列里 → 下游永不完成 → 它永远不恢复 → 死锁
+  if (self.access === 'write') {
+    const cfg = getAgentConfig(callerAgentId)
+    relay.writeFence.release(resolveFenceDir(self.target, task.target, cfg?.workspace), self.sessionId)
+  }
   return true
 }
 
@@ -197,6 +203,15 @@ function myRunningTasks(
   const mine = myConversation(sessionId, keyFor)
   if (mine === undefined) return undefined
   return filterByConversation(listTasksIn('running'), mine, keyFor)
+}
+
+/** 旧单的任务槽若指向这条会话，清掉（换单时防"一槽两单"）。 */
+function clearTaskSlotIfPointingAt(taskId: string, agentId: string, sessionId: string): void {
+  const cfg = getAgentConfig(agentId)
+  if (cfg === undefined) return
+  const key = taskSlotKey(taskId, agentId)
+  if (cfg.sessions[key]?.sessionId !== sessionId) return
+  clearSession(agentId, key)
 }
 
 function notBoundError(): Error {
@@ -331,10 +346,12 @@ export function registerBoardTools(ctx: {
             if (!isTaskId(args.taskId)) throw new Error(`agent-bot: 非法 taskId ${args.taskId}`)
             const task = readTask('running', args.taskId)
             if (task === undefined) throw new Error(`agent-bot: 任务 ${args.taskId} 不在 running/`)
-            // 绑定：已绑别的任务 → 报错（防串单）
+            // 改认另一单：允许切换（路由判偏不该锁死 LLM 的最终决定权）。
+            // 但要防「一槽两单」：旧单的任务槽若指向本会话，先清掉它，
+            // 否则旧单的入站/叫醒还会进这条会话，而 binding 只认新单 → 串单。
             const existing = boundTaskId(who.sessionId)
             if (existing !== undefined && existing !== args.taskId) {
-              throw new Error(`agent-bot: 本会话已绑定 ${existing}，不能同时绑 ${args.taskId}`)
+              clearTaskSlotIfPointingAt(existing, who.agentId, who.sessionId)
             }
             bindSession(who.sessionId, args.taskId)
             // 这一轮用的会话就是「本 agent 在该单的任务槽」：后续入站/叫醒都命中同一条，
@@ -504,7 +521,7 @@ export function registerBoardTools(ctx: {
             instruction: args.instruction,
           }, args.wake !== false)
           // 中间层（B 派 C）：B 自己暂停等下游，等 C 那几路终态后由上报链叫醒它接着做
-          const paused = pauseSelfIfIntermediate(task, agentId)
+          const paused = pauseSelfIfIntermediate(task, agentId, relay)
           writeTask('running', task)
 
           if (args.wake === false) {

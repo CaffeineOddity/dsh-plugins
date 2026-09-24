@@ -402,6 +402,15 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     writeTask('running', fresh)
   }
 
+  /** 该中间层是否正卡在"等目标锁"上（waiting + write + 锁被占）。 */
+  function isWaitingForLock(task: TaskBoard, agentId: string): boolean {
+    const self = task.assignees.find((a) => a.expertId === agentId)
+    if (self === undefined || self.status !== 'waiting' || self.access !== 'write') return false
+    const cfg = getAgentConfig(agentId)
+    if (cfg === undefined) return false
+    return relay.writeFence.occupied(fenceDirOf(task, self, cfg))
+  }
+
   /** 该 assignee 的 write 串行目录（按目标目录；read 不占锁）。 */
   function fenceDirOf(task: TaskBoard, a: Assignee, cfg: AgentConfig): string {
     return resolveFenceDir(a.target, task.target, cfg.workspace)
@@ -578,15 +587,19 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
           wakers.set(a.dispatchedBy, list)
         }
         const consumed: Assignee[] = []
+        const resumedIds = new Set<string>()
         for (const [by, kids] of wakers) {
-          // 被叫醒的中间层若正 `waiting`（在等下游）→ 恢复 `running`：它要接着做自己的活
+          // 被叫醒的中间层若正 `waiting`（在等下游）→ 尝试恢复 `running`：它要接着做自己的活。
+          // 恢复不了（目标锁被别人占着）→ 继续等：**不要**叫醒它，等锁那一路推进队列时再启动。
+          const wasWaiting = task.assignees.find((a) => a.expertId === by)?.status === 'waiting'
           const resumed = resumeWaiting(task, by)
+          if (resumed) resumedIds.add(by)
+          else if (wasWaiting || isWaitingForLock(task, by)) continue
           const done = await wakeOnce(task, by, wakeFingerprint(task, by), wakeText(task, kids))
           if (done) consumed.push(...kids)
         }
         // 上报成功才消费 wake；目标不在线则留着，下一轮重试。恢复 waiting 也一并落盘。
         const consumedIds = new Set(consumed.map((a) => a.expertId))
-        const resumedIds = new Set(wakers.keys())
         if (consumedIds.size > 0 || resumedIds.size > 0) {
           patchTask(task.taskId, (t) => {
             for (const a of t.assignees) {
@@ -606,10 +619,21 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     }
   }
 
-  /** 把等待下游的中间层恢复成 running（它被叫醒、开始干活了）。返回是否改了。 */
+  /**
+   * 把"等下游"的中间层恢复成 running。返回是否真的恢复了。
+   * 若它这一路是 write 且目标锁已被别人占着 → **不恢复**（保持 waiting，
+   * 等那把锁的持有者结束、队列推进时再启动它），否则会出现两个 write 同写一个目录。
+   */
   function resumeWaiting(task: TaskBoard, agentId: string): boolean {
     const self = task.assignees.find((a) => a.expertId === agentId)
     if (self === undefined || self.status !== 'waiting') return false
+    if (self.access === 'write') {
+      const cfg = getAgentConfig(agentId)
+      if (cfg === undefined) return false
+      const dir = fenceDirOf(task, self, cfg)
+      if (relay.writeFence.occupied(dir)) return false // 锁还占着：继续等
+      relay.writeFence.begin(dir, self.sessionId)
+    }
     self.status = 'running'
     return true
   }

@@ -79,7 +79,13 @@ listGroupAgents(sessionParts: Record<string, string>): GroupAgentInfo[]
 deliver(req: { sessionParts: Record<string, string>; messages: AgentOutboundMessage[] }): Promise<void>
 ```
 
-`GroupAgentInfo`：`{ agentId, name, description }`。技能卡片由大脑按 `agents.json` + `skills-map.json` 补齐。通道从 `sessionParts` 取群身份（`group_id`）。
+`GroupAgentInfo`：`{ agentId, name, description }`。技能卡片由大脑按 `agents.json` + `skills-map.json` 补齐。
+
+**通道必须实现 `conversationKey(sessionParts)`**：把"这是哪个对话"压成一个字符串，用于**板可见性**过滤。
+- 必须返回**群身份**（IM 取 `group_id`，飞书取 `chat_id`），**不要带 `bot_id`**
+  —— 带上就同群各台 bot 各看各的板，直接破坏「直 @ 与协作派发看见同一块板」。
+- 缺省实现取 `group_id`，取不到就退化成"把 sessionParts 规范化拼接"（**含 `bot_id`**），
+  那等于按 bot 隔离 —— 所以用 `chat_id` 之类命名的通道**必须**实现这个钩子。
 
 约束：
 

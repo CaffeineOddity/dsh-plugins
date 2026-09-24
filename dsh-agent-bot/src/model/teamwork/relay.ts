@@ -129,6 +129,12 @@ export function createWriteFence(agents: () => { get(sessionId: string): unknown
 let sharedFence: WriteFence | null = null
 let sharedAgents: (() => { get(sessionId: string): unknown } | undefined) | null = null
 
+/** 测试用：丢掉共享栅栏（进程级单例，测试之间要隔离）。 */
+export function resetWriteFence(): void {
+  sharedFence = null
+  sharedAgents = null
+}
+
 export function getWriteFence(agents: () => { get(sessionId: string): unknown } | undefined): WriteFence {
   if (sharedFence === null) {
     sharedAgents = agents
