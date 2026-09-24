@@ -14,6 +14,17 @@ import { registerConfigSite } from './view/config-site/serve.js'
 
 export const name = 'agent-bot'
 
+/**
+ * DSH 的 agent 生命周期事件（`agent/status`）。本地声明，不 import `@deepseek-ai/dsh-agent`
+ * ——该包在插件运行时不可解析（profile 由 tarball 安装）。事件服务是 cordis 根级单例，
+ * 插件级 `ctx.on` 收得到全进程所有 agent 的状态迁移。
+ */
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'agent/status'(payload: { agent: { id: string }; status: 'idle' | 'running' }): void
+  }
+}
+
 export const inject = ['webServer', 'commands', 'tools']
 
 export type { AgentAskMeta, AgentAskRequest, AgentAskResponse, AgentBotService, AgentOutboundMessage, AgentSummary } from './types.js'
@@ -128,6 +139,12 @@ export function apply(ctx: Context, config: AgentBotConfig = {}): void {
   const tools = get?.('tools') as ToolRuntime | undefined
   appendLog('boot', `commands=${commands ? 'ok' : '缺失'} tools=${tools ? 'ok' : '缺失'}`)
 
+  // 事件驱动：专家会话一 idle 就立刻上报/收口（轮询只做兜底）。
+  const disposeAgentStatus = ctx.on('agent/status', ({ agent, status }) => {
+    if (status !== 'idle') return
+    service.notifyAgentIdle(String(agent.id))
+  })
+
   const disposeRpc = registerRpcRoute(ctx, { listProviders: () => service.listProviders(), localAsk: (rawInput: string, sessionKey?: string) => service.localAsk(rawInput, sessionKey) })
   const disposePage = registerConfigSite(ctx)
   const disposeTool = tools ? registerAgentAskTool(tools, service) : undefined
@@ -141,6 +158,7 @@ export function apply(ctx: Context, config: AgentBotConfig = {}): void {
   })
 
   ctx.effect(() => () => {
+    disposeAgentStatus()
     unwatch()
     if (disposeRpc) disposeRpc()
     if (disposePage) disposePage()

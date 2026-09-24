@@ -44,6 +44,11 @@ export interface Patrol {
   tickOnce(): Promise<void>
   /** 等所有在跑的收口交付落地（测试用）。 */
   flush(): Promise<void>
+  /**
+   * 事件入口：某个会话刚变为 idle（或外部要求复核）→ 转态并立即处理这一单。
+   * 这是「专家做完就通知」的快路径；低频轮询只做兜底。
+   */
+  reconcile(sessionId: string): Promise<void>
   stop(): void
 }
 
@@ -96,7 +101,8 @@ export function shouldDeliver(task: TaskBoard): boolean {
 interface ProbeState {
   renew: number
   sessionId: string
-  waiting: boolean
+  /** 首次发现该会话不在线的时间（0=在线）。用来「挂够一个窗口」才算一次续期。 */
+  missingSince: number
 }
 
 /**
@@ -110,7 +116,8 @@ interface ProbeState {
  *  - 全终态且无待决 → 叫醒 taskLead 综合
  */
 export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Patrol {
-  const intervalMs = options.intervalMs ?? 200
+  // 事件（agent/status）走快路径；轮询只做兜底（重启恢复、漏事件、墙钟），不必高频
+  const intervalMs = options.intervalMs ?? 2_000
   const probeRenew = new Map<string, ProbeState>() // `taskId\0expertId` -> 续期状态
   const notified = new Map<string, string>() // `taskId\0agentId` -> 已叫醒时的完成情况指纹
   const delivering = new Map<string, Promise<void>>() // taskId -> 在跑的收口交付（同任务只跑一次）
@@ -373,7 +380,8 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       const stillOpen = fresh.assignees.some((a) => !isTerminal(a)) || fresh.pendingHuman !== undefined
       if (stillOpen) return // 又派了活 / 又问了人：保持 running
       unbindDone(fresh)
-      moveTask('running', 'done', fresh.taskId)
+      // 期间可能已被人挪走（cancel/ 或 done/）：那就别再 move
+      if (readTask('running', fresh.taskId) !== undefined) moveTask('running', 'done', fresh.taskId)
     } catch (err) {
       console.warn(`agent-bot: 收口交付 ${task.taskId} 失败（文件留在 running/）: ${(err as Error).message}`)
     }
@@ -436,6 +444,12 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
    * 一轮一次 wait，避免 run() 循环被单份卡死；续期计数在内存里跨轮累积。
    * ——写进 md（status/收口文本）这一层交回普通巡逻（下轮 scan 收敛），本函数只管「该不该重启」。
    */
+  /**
+   * 活性探针（非阻塞）：不再 await whenIdle。
+   *  - 会话已 idle（读到 agent.status，或事件已转态）→ 转 status=idle，交给上报链
+   *  - 会话没了 → 续期计数；耗尽判 failed，否则重启重发
+   *  - 还在跑 → 什么都不做（做完会有 agent/status 事件通知）
+   */
   async function probeTask(task: TaskBoard): Promise<void> {
     // 同一轮里前面可能已把这份任务收口移走（done/ 或人手工挪走）→ 别再用旧快照写回去复活它
     if (readTask('running', task.taskId) === undefined) return
@@ -446,51 +460,39 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       const key = `${task.taskId}\0${a.expertId}`
       let st = probeRenew.get(key)
       if (st === undefined || st.sessionId !== a.sessionId) {
-        st = { renew: 0, sessionId: a.sessionId, waiting: false }
+        st = { renew: 0, sessionId: a.sessionId, missingSince: 0 }
         probeRenew.set(key, st)
       }
-      if (st.waiting) continue // 已在等，下一轮再看
       const live = host.agents()?.get(a.sessionId) as AgentLike | undefined
       if (live === undefined) {
-        // 挂/没拉起：算一次续期来重启。这里交给下次 scan：把 status 先回转 running，
-        // 由 scan 判定未齐逻辑；真正重启在 ensureAgent+followup（下走 followup 帮助函数）。
-        st.waiting = true
-        continue // 避免本轮 rush（重启由 scan 的 idle/wake 分支触发）
-      }
-      st.waiting = true
-      const W = windowFor(cfg)
-      const wait = await waitIdleOrTimeout(live.whenIdle(), W)
-      st.waiting = false
-      if (wait === 'idle') {
-        // idle：记 status=idle（收口文本已在吧；这里只转态，下一轮 scan 做 wake 叫醒/综合）
-        if (a.status === 'running' && readTask('running', task.taskId) !== undefined) {
-          a.status = 'idle'
-          writeTask('running', task)
+        // 非阻塞版：挂够一个窗口（W）才算一次续期，避免轮询变快后几秒内就把专家判死
+        const nowMs = Date.now()
+        if (st.missingSince === 0) {
+          st.missingSince = nowMs
+          continue
         }
-        probeRenew.delete(key)
-        continue
-      }
-      // 超时（窗口内没 idle）：还 live → renew++；否则重启再跑
-      st.renew++
-      if (host.agents()?.get(a.sessionId) === undefined) {
-        // 已挂：重启（ensureAgent + followup 上次未完成 + 原 instruction + md）
+        if (nowMs - st.missingSince < windowFor(cfg)) continue
+        st.missingSince = nowMs
+        st.renew++
         if (st.renew >= maxRenew()) {
           a.status = 'failed'
-          writeTask('running', task)
+          if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
           probeRenew.delete(key)
           continue
         }
         await restartExpert(task, cfg, a)
-        st.sessionId = a.sessionId // restartExpert 可能换 session（ensureAgent 兜底是同一 sessionId）
         continue
       }
-      if (st.renew >= maxRenew()) {
-        a.status = 'failed'
-        writeTask('running', task)
-        probeRenew.delete(key)
+      st.missingSince = 0
+      // 会话在且已 idle → 转态（漏掉事件时的兜底；快路径由 reconcile 处理）
+      if (live.status === 'idle') {
+        st.renew = 0
+        a.status = 'idle'
+        if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
         continue
       }
-      // 还 live 且未耗尽：重新等（留待下轮）
+      // 还在跑：不阻塞、不计数
+      st.renew = 0
     }
   }
 
@@ -552,7 +554,33 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     if (leadSessionId !== undefined && boundTaskId(leadSessionId) === task.taskId) unbindSession(leadSessionId)
   }
 
-  return { run, tickOnce, flush, stop }
+  /** 事件入口：把该会话对应的 assignee 转 idle，并立刻处理这一单。 */
+  async function reconcile(sessionId: string): Promise<void> {
+    if (sessionId === '') return
+    const taskId = boundTaskId(sessionId)
+    const targets = taskId === undefined
+      ? listTasksIn('running').filter((t) => t.assignees.some((a) => a.sessionId === sessionId))
+      : listTasksIn('running').filter((t) => t.taskId === taskId)
+    for (const task of targets) {
+      try {
+        let changed = false
+        for (const a of task.assignees) {
+          if (a.sessionId === sessionId && a.status === 'running') {
+            a.status = 'idle'
+            changed = true
+          }
+        }
+        if (changed && readTask('running', task.taskId) !== undefined) writeTask('running', task)
+        await patrolTask(task)
+        await probeTask(task)
+      } catch (err) {
+        console.warn(`agent-bot: 事件复核 ${task.taskId} 失败: ${(err as Error).message}`)
+      }
+    }
+    reconcileBindings()
+  }
+
+  return { run, tickOnce, flush, reconcile, stop }
 }
 
 /** 叫醒文本：先说清「谁做完/失败了」，再附 md 全文（不让人自己猜）。 */

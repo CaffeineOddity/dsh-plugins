@@ -20,6 +20,8 @@ export interface AgentLike {
   session: AgentSessionLike
   followup(input: unknown): void
   whenIdle(): Promise<void>
+  /** DSH 实时生命周期状态。事件驱动巡检读它代替阻塞等待；老宿主可能没有。 */
+  readonly status?: 'idle' | 'running'
 }
 
 /** 会话最小面：seq / snapshotEvents 供 G9–G10 截取；append 写 full-access。 */

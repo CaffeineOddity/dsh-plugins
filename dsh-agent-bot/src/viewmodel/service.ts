@@ -204,6 +204,12 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
       return toSummary(found)
     },
     providerDeliver,
+    notifyAgentIdle(sessionId: string): void {
+      // 事件驱动快路径：不 await（事件是同步 emit，别拖慢派发链）
+      void patrol.reconcile(sessionId).catch((err: unknown) => {
+        appendLog('patrol', `事件复核失败 sid=${sessionId}: ${err instanceof Error ? err.message : String(err)}`)
+      })
+    },
     listProviders() {
       const out: AgentChannelProviderInfo[] = []
       for (const [id, info] of providers) out.push({ id, label: info.label, listGroupAgents: info.listGroupAgents, deliver: info.deliver })

@@ -373,6 +373,24 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     expect(back?.assignees.find((x) => x.expertId === b)?.status).toBe('running') // 恢复了
   })
 
+  it('事件快路径：会话变 idle 立刻转态并上报（不等轮询）', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'running', wake: true })],
+    }))
+    // A 有自己的通道会话；B 的协作会话在跑（busy）→ 模拟「只有 B 做完」这一事件
+    const { host, woken } = fakeHost(['sess-a', 'sess-b'], [], {}, [])
+    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    await patrol.reconcile('sess-b')
+    // B 被转成 idle 并上报给 A（A 的通道会话被叫醒）
+    const back = readTask('running', 'task_t1')
+    expect(back?.assignees.find((x) => x.expertId === b)?.status).toBe('idle')
+    expect(woken.map((w) => w.sessionId)).toContain('sess-a')
+  })
+
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {
     mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
     bindSession('sess-a', 'task_t1')

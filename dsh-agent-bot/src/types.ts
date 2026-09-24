@@ -169,4 +169,9 @@ export interface AgentBotService {
   localAsk(rawInput: string, sessionKey?: string): Promise<{ messages: AgentOutboundMessage[]; error?: string }>
   /** 按 providerId 查已登记通道的收口能力。 */
   providerDeliver(providerId: string): ((req: AgentDeliverRequest) => Promise<void>) | undefined
+  /**
+   * 宿主事件入口：某会话变为 idle（`agent/status`）时调用，
+   * 让协作链「做完就上报/收口」，不依赖轮询。
+   */
+  notifyAgentIdle(sessionId: string): void
 }

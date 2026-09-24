@@ -2,8 +2,8 @@
 
 > **实现进度（SDD 标记）**：任务板模型（`task-board.ts`）、会话绑定（`binding.ts`）、中继（`relay.ts`）、六件看板工具（`board-tools.ts`）、巡检器（`patrol.ts` 含活性探针/超时/重启）、service 接线（toolsMount 挂载 + deliver 路由 + 入站 running 摘要包装）均已实现。测试见各 `*.test.ts`。
 > 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、deliver @sender 收口、重启按 `jobs/running/` 恢复；全局开关 `use_hub_experts`（默认 true=中枢全集）；`open_task` 新建任务（入站上下文提供 sender/providerId/群快照）；派发时 fiber 绑定协作槽 + prompt 带任务文件绝对路径；中间层派下游后 `waiting` 暂停、下游终态后恢复；**全终态 → 叫醒 taskLead 综合 → 取其该轮产出 deliver @sender → 移 `done/` + 解绑**；墙钟到点按会话状态分四种处理（顺延/进度反馈/救活/交回给人）；`jobs/cancel/` 人工取消；任务移走后自动解绑。
-> 未做：dsh-`user-questions/request` waterfall 拦截（本插件包无法导入 `dsh-user-questions`），`ask_task_lead` 仅 tools 实现，真实问卷走 Web answerer；`agent/status` 事件驱动唤醒（现仍为轮询巡检）。
-> 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）；巡检探针仍是阻塞式 `waitIdleOrTimeout`，有专家慢跑时会拖慢整轮。
+> 未做：dsh-`user-questions/request` waterfall 拦截（本插件包无法导入 `dsh-user-questions`），`ask_task_lead` 仅 tools 实现，真实问卷走 Web answerer。
+> 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）。
 
 ## 背景与目标
 
@@ -348,21 +348,39 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 3. 已综合但 `deliver` 未成功 → 只重试 deliver
 4. 多份文件各自恢复，互不取消
 
-### 活性探针
+### 唤醒路径：事件为主，轮询兜底
 
-窗口 `W` = 专家 `agent_wait_timeout_ms`；缺字段用全局；`0` fallback 全局。
+**快路径（事件）**：宿主订阅 cordis 的 `agent/status`（`idle` = 没有 driver 在跑），
+回调里按键 `agent.id`（= 会话 id）调 `service.notifyAgentIdle(sessionId)`
+→ `patrol.reconcile(sessionId)`：把该会话对应的 assignee 转 `idle` → 立刻跑这一单的
+`patrolTask`（上报/综合）+ 一轮探针。**专家做完即上报，不等轮询。**
+
+- 事件是**全进程**的：先按键 `boundTaskId(sessionId)` / 扫 `running/` 里 `assignees[].sessionId` 过滤，
+  不是本插件的会话（用户网页会话、cron-loop 会话）直接忽略。
+- 事件同步 emit，回调里**不 await 重活**（丢微任务，失败只打日志），免得拖慢派发链。
+- `agent/status` 事件名与 payload **本地声明**，不 import `@deepseek-ai/dsh-agent`
+  （该包在插件运行时不可解析；cordis 的 events 是根级单例，插件级 `ctx.on` 收得到全进程事件）。
+
+**兜底（低频轮询）**：巡检循环间隔放宽到 **2s**，只做三件事：
+1. 进程重启后的补扫（订阅生效前完成的工作没人通知，见 §重启）
+2. 漏掉事件时的转态（读 `agent.status === 'idle'` 兜底）
+3. 墙钟到点判定
+
+### 活性探针（非阻塞）
+
+窗口 `W` = 专家 `agent_wait_timeout_ms`；缺字段用全局；`0` fallback 全局。**不再 await `whenIdle`**：
 
 ```
-renew = 0
-loop renew < expert_liveness_max_renew:   # 默认 3
-  wait = waitIdleOrTimeout(agent.whenIdle(), W)
-  if idle: 记 status=idle，收口文本进 md
-  live = host.agents().get(sessionId)
-  if live != undefined: renew++; continue
-  else:
-    ensureAgent + followup(上次未完成 + 原 instruction + md)
-    renew++; continue
-续期用尽：该 assignee failed（带部分文本），不挡其它人
+每轮（2s）对 status=running 的 assignee:
+  live = agents.get(sessionId)
+  live == undefined:
+      首次发现 → 记 missingSince，先等
+      已挂 >= W → 算一次续期 renew++；renew >= expert_liveness_max_renew(默认3) → failed
+                  否则 ensureAgent + followup(重发 md) 重启
+      （「挂够一个窗口才算一次续期」：轮询变快后不会几秒内把专家误判死）
+  live != undefined:
+      live.status === 'idle' → 转 status=idle（漏事件的兜底），renew 清零
+      否则什么都不做（还在跑；做完有事件通知）
 ```
 
 「还在执行」= `agents.get(id) != undefined`。不用 seq 推进判断。
