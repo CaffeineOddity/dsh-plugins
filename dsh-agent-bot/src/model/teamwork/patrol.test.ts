@@ -798,6 +798,29 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     expect(readTask('done', 'task_t1')).toBeUndefined()
   })
 
+  it('投递连续失败到上限 → 文本落进 md 正文并停止重投（消息不丢、不空转）', async () => {
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      body: '初稿',
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: true })],
+    }))
+    const events = { 'sess-a': [{ seq: 0, type: 'turn/start' }, { seq: 1, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '最终结论' }] } } }] }
+    const { host } = fakeHost(['sess-a', 'sess-b'], [], events)
+    host.deliver = async () => { throw new Error('通道挂了') }
+    const patrol = createPatrol(host, { windowMs: 50, deliverMaxAttempts: 2 })
+    await patrol.tickOnce()
+    await patrol.flush()
+    await patrol.tickOnce()   // 第 2 次失败 → 到上限
+    await patrol.flush()
+    const back = readTask('running', 'task_t1')
+    expect(back?.body).toContain('最终结论')          // 落进正文，消息不丢
+    expect(back?.body).toContain('未能发到群')
+    expect(readTask('done', 'task_t1')).toBeUndefined() // 仍留在 running/
+  })
+
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {
     mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     bindSession('sess-a', 'task_t1')

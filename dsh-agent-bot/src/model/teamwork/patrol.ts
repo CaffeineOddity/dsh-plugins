@@ -39,6 +39,8 @@ export interface PatrolOptions {
   roundTimeoutMs?: number
   /** ask_user_question 转交人的宽限期（ms）。缺省 10s。 */
   askHandoffGraceMs?: number
+  /** 收口投递最多重试几次（缺省 5）；超了就把文本落进 md 正文并停止重投。 */
+  deliverMaxAttempts?: number
   /** 专家已 idle 但 wake 未消费时的收口等待（超时则按失败处理）。 */
   idleCollectMs?: number
 }
@@ -141,7 +143,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   const deciding = new Map<string, Promise<void>>() // taskId -> 在等 taskLead 拍板的 job
   const askTimers = new Map<string, ReturnType<typeof setTimeout>>() // `taskId\0expertId` -> 转交人的宽限定时器
   /** 收口进度（跨多轮）：firstSeq=综合那一轮的起点；text=已拿到但还没投出去的产出。 */
-  const collecting = new Map<string, { firstSeq: number; text?: string }>()
+  const collecting = new Map<string, { firstSeq: number; text?: string; attempts?: number }>()
   const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>() // taskId -> 墙钟定时器
   const lastScheduledDeadline = new Map<string, number>() // taskId -> 已排的 deadlineAt（避免重复排）
   let lastReconcileAt = 0
@@ -718,7 +720,23 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       return
     }
     const ok = await deliverToSender(fresh, text)
-    if (!ok) return // 留在 running/，下次触发再投（spec：deliver 失败不移动文件）
+    if (!ok) {
+      // 留在 running/，下次触发再投（spec：deliver 失败不移动文件）。
+      // 但要有上限：通道一直挂着时不能每轮空转 —— 超了就把文本落进 md 正文（消息不丢），停止重投。
+      const st = collecting.get(task.taskId)
+      const attempts = (st?.attempts ?? 0) + 1
+      const max = options.deliverMaxAttempts ?? 5
+      if (attempts >= max) {
+        console.warn(`agent-bot: 收口投递 ${task.taskId} 连续失败 ${attempts} 次，改写入 md 正文`)
+        patchTask(task.taskId, (t) => {
+          t.body = `${t.body}\n\n- ⚠️ 最终答复（未能发到群）：${text.replace(/\n+/g, ' ')}`
+        })
+        collecting.delete(task.taskId)
+        return
+      }
+      if (st !== undefined) st.attempts = attempts
+      return
+    }
     collecting.delete(task.taskId)
     const stillOpen = fresh.assignees.some((a) => !isTerminal(a)) || fresh.pendingHuman !== undefined
     if (stillOpen) return // 又派了活 / 又问了人：保持 running
