@@ -8,10 +8,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { join } from 'node:path'
 import { jobsRootPath, loadConfig } from '../config.js'
 
-/** 任务目录状态。todo=建好未开工；running=至少一路在做；done=结束/超时（保留文件）。 */
-export type TaskStatus = 'todo' | 'running' | 'done'
+/** 任务目录状态。todo=建好未开工；running=至少一路在做；done=已交付收口；cancel=人手工取消。 */
+export type TaskStatus = 'todo' | 'running' | 'done' | 'cancel'
 
-export const TASK_STATUSES: readonly TaskStatus[] = ['todo', 'running', 'done']
+export const TASK_STATUSES: readonly TaskStatus[] = ['todo', 'running', 'done', 'cancel']
 
 /** assignee 状态。 */
 export type AssigneeStatus = 'running' | 'idle' | 'failed' | 'waiting' | 'need_decision'
@@ -486,7 +486,7 @@ function mintTaskId(nowMs: number): string {
     `task_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}_${p3(d.getMilliseconds())}`
   const d = new Date(nowMs)
   let id = fmt(d)
-  while (readTask('running', id) !== undefined || readTask('done', id) !== undefined || readTask('todo', id) !== undefined) {
+  while (readTask('running', id) !== undefined || readTask('done', id) !== undefined || readTask('todo', id) !== undefined || readTask('cancel', id) !== undefined) {
     d.setMilliseconds(d.getMilliseconds() + 1)
     id = fmt(d)
   }

@@ -8,18 +8,21 @@
  */
 import type { AgentLike } from '../runtime.js'
 import { getAgent as getAgentConfig } from '../agents.js'
-import { listTasksIn, writeTask, moveTask, type TaskBoard, type Assignee } from './task-board.js'
-import { boundTaskId, unbindSession } from './binding.js'
+import { listTasksIn, readTask, writeTask, moveTask, type TaskBoard, type Assignee } from './task-board.js'
+import { boundTaskId, listBindings, unbindSession } from './binding.js'
 import type { RelayHost } from './relay.js'
 import { marshalText } from './board-tools.js'
 import { encodeSessionKey, sessionPartsForEncode, type AgentOutboundMessage } from '../../types.js'
-import { waitIdleOrTimeout } from '../ask.js'
+import { summarizeOwnedInterval, toMarkdownMessages, waitIdleOrTimeout } from '../ask.js'
 import { loadConfig, type AgentConfig } from '../config.js'
 
 export interface PatrolHost extends RelayHost {
   /** 路由到对应通道 provider 的 deliver（无则打日志）。 */
   deliver(providerId: string, sessionParts: Record<string, string>, messages: AgentOutboundMessage[]): Promise<void>
 }
+
+/** 解绑清理的最小间隔（ms）：任务被人挪走后不必每轮查。 */
+const RECONCILE_MS = 5_000
 
 export interface PatrolOptions {
   /** 活性探针每轮等待窗口（缺省用专家 agent_wait_timeout_ms，0 fallback 全局）。 */
@@ -39,6 +42,8 @@ export interface Patrol {
   run(): Promise<void>
   /** 跑一轮：先扫状态机、再做一轮活性探针。测试用；run() 内部也调它。 */
   tickOnce(): Promise<void>
+  /** 等所有在跑的收口交付落地（测试用）。 */
+  flush(): Promise<void>
   stop(): void
 }
 
@@ -108,7 +113,31 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   const intervalMs = options.intervalMs ?? 200
   const probeRenew = new Map<string, ProbeState>() // `taskId\0expertId` -> 续期状态
   const notified = new Map<string, string>() // `taskId\0agentId` -> 已叫醒时的完成情况指纹
+  const delivering = new Map<string, Promise<void>>() // taskId -> 在跑的收口交付（同任务只跑一次）
+  let lastReconcileAt = 0
   let stopped = false
+
+  /**
+   * 收口清理：任务文件被人挪走（进了 done/ 或手工 cancel/）后，把还指向它的会话解绑，
+   * 否则那些会话之后调看板工具会报「已绑的任务不在 running/」。低频做，不必每轮。
+   */
+  function reconcileBindings(): void {
+    const now = Date.now()
+    if (now - lastReconcileAt < RECONCILE_MS) return
+    lastReconcileAt = now
+    try {
+      for (const { sessionId, taskId } of listBindings()) {
+        if (readTask('running', taskId) === undefined) unbindSession(sessionId)
+      }
+    } catch (err) {
+      console.warn(`agent-bot: 解绑清理失败: ${(err as Error).message}`)
+    }
+  }
+
+  /** 等所有在跑的收口交付落地（测试用；也让调用方能确定性收尾）。 */
+  async function flush(): Promise<void> {
+    await Promise.allSettled([...delivering.values()])
+  }
 
   /** 跑一轮：先扫状态机，再做一轮活性探针。run() 与测试共用。 */
   async function tickOnce(): Promise<void> {
@@ -127,6 +156,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
         console.warn(`agent-bot: 活性探针任务 ${task.taskId} 失败: ${(err as Error).message}`)
       }
     }
+    reconcileBindings()
   }
 
   async function run(): Promise<void> {
@@ -159,6 +189,17 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   /** 任务墙钟。 */
   function roundTimeoutMs(): number {
     return options.roundTimeoutMs ?? loadConfig().task_round_timeout_ms
+  }
+
+  /** 该 assignee 的会话是否还活着（在跑）。 */
+  function agentAlive(a: Assignee): boolean {
+    return a.sessionId !== '' && host.agents()?.get(a.sessionId) !== undefined
+  }
+
+  /** 顺延墙钟：deadlineAt 推到「现在 + 一个墙钟」。 */
+  function deferDeadline(task: TaskBoard): void {
+    task.deadlineAt = Date.now() + roundTimeoutMs()
+    writeTask('running', task)
   }
 
   /**
@@ -202,22 +243,38 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     const allDone = task.assignees.length > 0 && task.assignees.every(isTerminal)
     const hadAssignees = task.assignees.length > 0
 
-    // 墙钟到点：只动这一份文件
+    // 墙钟到点：不一律判死，先分析各专家会话状态（specs/12 §超时分层）
     if (task.deadlineAt > 0 && now >= task.deadlineAt) {
       const pending = task.pendingHuman !== undefined
-      const stillRunning = task.assignees.some((a) => a.status === 'running' || a.status === 'waiting')
-      if (stillRunning && pending) {
-        // 问卷超时未答且还在跑：只作废待决，不整单超时
-        task.pendingHuman = undefined
-        writeTask('running', task)
-      } else if (stillRunning || pending) {
-        // 整单超时（还在跑无人待决 / 待决但无人在跑）
-        await deliverWithLead(task, [{ kind: 'markdown', text: '处理超时', url: '', atUserIds: [], atAll: false }])
-        unbindDone(task)
-        moveTask('running', 'done', task.taskId)
+      const unfinished = task.assignees.filter((a) => !isTerminal(a))
+      const someoneAlive = unfinished.some(agentAlive)
+
+      if (allDone && !pending) {
+        // ① 都做完了没综合 → 就走下面的正常收口（不是超时）
+      } else if (someoneAlive) {
+        // ② 还有人活着在做 → 顺延，只给进度反馈（同一 deadlineAt 指纹去重，不刷屏）
+        await notifyProgress(task, unfinished)
+        deferDeadline(task)
+        return
+      } else if (pending) {
+        // ⑥ 有问卷但没人在跑 → 交回给人拍板，留在 running/ 等人
+        await askHumanToDecide(task, '还有问题等你确认')
+        deferDeadline(task)
+        return
+      } else if (unfinished.length > 0) {
+        // ③ 没人在跑也没终态：先尝试救活（超时/网络一类）
+        const revived = await reviveDead(task, unfinished)
+        if (revived) {
+          await notifyProgress(task, unfinished)
+          deferDeadline(task)
+          return
+        }
+        // ④ 救不动（含权限/审批/需拍板）→ 交回给人，留在 running/
+        await askHumanToDecide(task, '有专家卡住、需要你确认后才能继续')
+        deferDeadline(task)
         return
       }
-      // 已齐且无待决：不超时，继续综合
+      // ⑤ 无 assignee 也无待决：无事可做，继续走收口判定
     }
 
     // 待决：叫醒 taskLead 拍板（只叫一次；人回填后 pendingHuman 清掉、指纹变了才会再叫）
@@ -231,17 +288,31 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       const pending = task.assignees.filter(
         (a) => a.wake && isTerminal(a) && a.dispatchedBy !== '' && !hasPendingDownstream(task, a.expertId),
       )
-      if (pending.length > 0) {
+      // 全终态时，报给 taskLead 的那一路本身就是「综合」——不能走普通上报，
+      // 否则综合那次会被同一指纹去重掉（上报已记过），结果永远不交付。
+      const toLead = allDone ? pending.filter((a) => a.dispatchedBy === task.taskLead) : []
+      const plain = allDone ? pending.filter((a) => a.dispatchedBy !== task.taskLead) : pending
+      if (toLead.length > 0 && plain.length === 0) {
+        if (!delivering.has(task.taskId)) {
+          const job = summarizeAndDeliver(task, toLead).finally(() => delivering.delete(task.taskId))
+          delivering.set(task.taskId, job)
+        }
+        return
+      }
+      if (plain.length > 0) {
         const wakers = new Map<string, Assignee[]>()
-        for (const a of pending) {
+        for (const a of plain) {
           const list = wakers.get(a.dispatchedBy) ?? []
           list.push(a)
           wakers.set(a.dispatchedBy, list)
         }
         const consumed: Assignee[] = []
         for (const [by, kids] of wakers) {
+          // 被叫醒的中间层若正 `waiting`（在等下游）→ 恢复 `running`：它要接着做自己的活
+          const resumed = resumeWaiting(task, by)
           const done = await wakeOnce(task, by, wakeFingerprint(task, by), wakeText(task, kids))
           if (done) consumed.push(...kids)
+          if (resumed && !done) writeTask('running', task)
         }
         // 上报成功才消费 wake；目标不在线则留着，下一轮重试
         if (consumed.length > 0) {
@@ -252,9 +323,111 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       }
     }
 
-    // 全终态且无待上报：叫醒 taskLead 综合（与上一分支共用同一指纹，天然去重）
-    if (allDone) {
-      await wakeOnce(task, task.taskLead, wakeFingerprint(task, task.taskLead), marshalText(task))
+    // 全终态且无待上报：叫醒 taskLead 综合 → 取它这一轮的产出交付回群 → done/
+    if (allDone && !delivering.has(task.taskId)) {
+      const running = summarizeAndDeliver(task).finally(() => delivering.delete(task.taskId))
+      delivering.set(task.taskId, running)
+    }
+  }
+
+  /** 把等待下游的中间层恢复成 running（它被叫醒、开始干活了）。返回是否改了。 */
+  function resumeWaiting(task: TaskBoard, agentId: string): boolean {
+    const self = task.assignees.find((a) => a.expertId === agentId)
+    if (self === undefined || self.status !== 'waiting') return false
+    self.status = 'running'
+    return true
+  }
+
+  /**
+   * 收口交付（specs/12 §谁改状态）：叫醒 taskLead 综合 → 等它这一轮结束 → 取产出 `deliver` @sender
+   * → 若没再派活、也没待决 → 移 `done/` + 解绑。
+   *
+   * 后台跑（不阻塞巡检循环）；同一任务同一时刻只跑一次（delivering 集合）。
+   */
+  async function summarizeAndDeliver(task: TaskBoard, leadBound: readonly Assignee[] = []): Promise<void> {
+    const cfg = getAgentConfig(task.taskLead)
+    const sessionId = wakeSessionIdFor(task, task.taskLead)
+    if (cfg === undefined || sessionId === undefined) return
+    const live = host.agents()?.get(sessionId) as (AgentLike & { session: { seq: number; snapshotEvents(): Array<{ seq: number; type: string; data?: unknown }> } }) | undefined
+    if (live === undefined) return
+    try {
+      const firstSeq = live.session.seq
+      const ok = await wakeOnce(task, task.taskLead, wakeFingerprint(task, task.taskLead), marshalText(task))
+      if (!ok) return
+      // 综合已开始：消费报给 lead 的 wake，后续要靠新的终态变化才会再触发
+      if (leadBound.length > 0) {
+        for (const a of leadBound) a.wake = false
+        const cur = readTask('running', task.taskId)
+        if (cur !== undefined) {
+          for (const a of cur.assignees) if (leadBound.some((x) => x.expertId === a.expertId)) a.wake = false
+          writeTask('running', cur)
+        }
+      }
+      const wait = await waitIdleOrTimeout(live.whenIdle(), windowFor(cfg))
+      if (wait !== 'idle') return // 综合还没完：下轮再来
+      const text = summarizeOwnedInterval(live.session.snapshotEvents(), firstSeq)
+      // 重新读盘：综合这一轮里它可能又派了活 / 写了正文
+      const fresh = readTask('running', task.taskId)
+      if (fresh === undefined) return // 人已挪走（done/ 或 cancel/）
+      await deliverToSender(fresh, toMarkdownMessages(text).map((m) => m.text).join('\n\n') || '（综合无输出）')
+      const stillOpen = fresh.assignees.some((a) => !isTerminal(a)) || fresh.pendingHuman !== undefined
+      if (stillOpen) return // 又派了活 / 又问了人：保持 running
+      unbindDone(fresh)
+      moveTask('running', 'done', fresh.taskId)
+    } catch (err) {
+      console.warn(`agent-bot: 收口交付 ${task.taskId} 失败（文件留在 running/）: ${(err as Error).message}`)
+    }
+  }
+
+  /** 进度反馈：给原发送者发一条「还在做」，同一 deadlineAt 只发一次（不刷屏）。 */
+  async function notifyProgress(task: TaskBoard, unfinished: readonly Assignee[]): Promise<void> {
+    const names = unfinished.map((a) => (a.expertName === '' ? a.expertId : a.expertName))
+    const fingerprint = `progress:${task.deadlineAt}:${names.join(',')}`
+    const key = `${task.taskId}\0__human__`
+    if (notified.get(key) === fingerprint) return
+    const ok = await deliverToSender(task, `还在做：${names.join('、')}。做完我会回来答复。`)
+    if (ok) notified.set(key, fingerprint)
+  }
+
+  /** 交回给人拍板：deliver 一条「需要你确认」，任务留在 running/ 等人（可答、可挪 cancel/）。 */
+  async function askHumanToDecide(task: TaskBoard, reason: string): Promise<void> {
+    const fingerprint = `decide:${task.deadlineAt}`
+    const key = `${task.taskId}\0__human__`
+    if (notified.get(key) === fingerprint) return
+    const tail = task.body.trim() === '' ? '' : `\n\n当前进展：\n${task.body.trim().slice(-300)}`
+    const ok = await deliverToSender(task, `需要你确认后才能继续：${reason}。${tail}\n\n（回一句 @${task.taskLead} 或直接答复即可；不想做了可把任务文件挪到 jobs/cancel/）`)
+    if (ok) notified.set(key, fingerprint)
+  }
+
+  /** 救活：对没终态又没会话的 assignee 重新 ensureAgent + 重发 md。返回是否救活了至少一个。 */
+  async function reviveDead(task: TaskBoard, unfinished: readonly Assignee[]): Promise<boolean> {
+    let revived = false
+    for (const a of unfinished) {
+      if (a.status === 'failed') continue // 已判死：不反复救，交给交回给人那一支
+      if (agentAlive(a)) continue
+      const cfg = getAgentConfig(a.expertId)
+      if (cfg === undefined) continue
+      await restartExpert(task, cfg, a)
+      if (a.status === 'waiting') {
+        a.status = 'running' // 重新投入
+        writeTask('running', task)
+      }
+      revived = true
+    }
+    return revived
+  }
+
+  /** 发一条给人（原发送者所在的会话/群）。返回是否真发出去了。 */
+  async function deliverToSender(task: TaskBoard, text: string): Promise<boolean> {
+    const sessionParts = { provider_id: task.providerId, ...task.sessionParts }
+    try {
+      await host.deliver(task.providerId, sessionParts, [
+        { kind: 'markdown', text, url: '', atUserIds: task.sender === '' ? [] : [task.sender], atAll: false },
+      ])
+      return true
+    } catch (err) {
+      console.warn(`agent-bot: deliver 失败（文件留在 running/）: ${(err as Error).message}`)
+      return false
     }
   }
 
@@ -264,6 +437,8 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
    * ——写进 md（status/收口文本）这一层交回普通巡逻（下轮 scan 收敛），本函数只管「该不该重启」。
    */
   async function probeTask(task: TaskBoard): Promise<void> {
+    // 同一轮里前面可能已把这份任务收口移走（done/ 或人手工挪走）→ 别再用旧快照写回去复活它
+    if (readTask('running', task.taskId) === undefined) return
     for (const a of task.assignees) {
       if (a.status !== 'running') continue
       const cfg = getAgentConfig(a.expertId)
@@ -288,7 +463,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       st.waiting = false
       if (wait === 'idle') {
         // idle：记 status=idle（收口文本已在吧；这里只转态，下一轮 scan 做 wake 叫醒/综合）
-        if (a.status === 'running') {
+        if (a.status === 'running' && readTask('running', task.taskId) !== undefined) {
           a.status = 'idle'
           writeTask('running', task)
         }
@@ -367,18 +542,6 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     }
   }
 
-  async function deliverWithLead(task: TaskBoard, messages: AgentOutboundMessage[]): Promise<void> {
-    const leadCfg = getAgentConfig(task.taskLead)
-    if (leadCfg === undefined) return
-    // 没有可定位的通道槽（人没 @ 过这个 lead）→ 收了也没处发
-    if (wakeSessionIdFor(task, task.taskLead) === undefined) return
-    const sessionParts = { provider_id: task.providerId, ...task.sessionParts }
-    try {
-      await host.deliver(task.providerId, sessionParts, messages)
-    } catch (err) {
-      console.warn(`agent-bot: deliver 失败（文件留在 running/）: ${(err as Error).message}`)
-    }
-  }
 
   /** 任务收口（移进 done/）时解绑本单各路的会话，避免之后调工具报「已绑的任务不在 running/」。 */
   function unbindDone(task: TaskBoard): void {
@@ -389,7 +552,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     if (leadSessionId !== undefined && boundTaskId(leadSessionId) === task.taskId) unbindSession(leadSessionId)
   }
 
-  return { run, tickOnce, stop }
+  return { run, tickOnce, flush, stop }
 }
 
 /** 叫醒文本：先说清「谁做完/失败了」，再附 md 全文（不让人自己猜）。 */

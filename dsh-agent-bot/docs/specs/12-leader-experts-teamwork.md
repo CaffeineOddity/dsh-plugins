@@ -1,9 +1,9 @@
 # 12. 群内专家协作（task board）
 
 > **实现进度（SDD 标记）**：任务板模型（`task-board.ts`）、会话绑定（`binding.ts`）、中继（`relay.ts`）、六件看板工具（`board-tools.ts`）、巡检器（`patrol.ts` 含活性探针/超时/重启）、service 接线（toolsMount 挂载 + deliver 路由 + 入站 running 摘要包装）均已实现。测试见各 `*.test.ts`。
-> 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、墙钟超时、待决作废、deliver @sender 收口、重启按 `jobs/running/` 恢复；全局开关 `use_hub_experts`（默认 true=中枢全集）；`open_task` 新建任务（入站上下文提供 sender/providerId/群快照）；派发时 fiber 绑定协作槽 + prompt 带任务文件绝对路径；任务进 `done/` 时解绑。
-> 未做：dsh-`user-questions/request` waterfall 拦截（本插件包无法导入 `dsh-user-questions`），`ask_task_lead` 仅 tools 实现，真实问卷走 Web answerer。
-> 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）。
+> 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、deliver @sender 收口、重启按 `jobs/running/` 恢复；全局开关 `use_hub_experts`（默认 true=中枢全集）；`open_task` 新建任务（入站上下文提供 sender/providerId/群快照）；派发时 fiber 绑定协作槽 + prompt 带任务文件绝对路径；中间层派下游后 `waiting` 暂停、下游终态后恢复；**全终态 → 叫醒 taskLead 综合 → 取其该轮产出 deliver @sender → 移 `done/` + 解绑**；墙钟到点按会话状态分四种处理（顺延/进度反馈/救活/交回给人）；`jobs/cancel/` 人工取消；任务移走后自动解绑。
+> 未做：dsh-`user-questions/request` waterfall 拦截（本插件包无法导入 `dsh-user-questions`），`ask_task_lead` 仅 tools 实现，真实问卷走 Web answerer；`agent/status` 事件驱动唤醒（现仍为轮询巡检）。
+> 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）；巡检探针仍是阻塞式 `waitIdleOrTimeout`，有专家慢跑时会拖慢整轮。
 
 ## 背景与目标
 
@@ -99,10 +99,13 @@ deliver(req: { sessionParts: Record<string, string>; messages: AgentOutboundMess
 jobs/
   todo/       # 已建、还没有人开工（少见；通常直接进 running）
   running/    # 至少一路在做、排队、或等人拍板
-  done/       # 结束 / 超时。保留文件、不自动删
+  done/       # 全部做完并已交付 / 人确认收口。保留文件、不自动删
+  cancel/     # 人手工把 task_xxx.md 挪进来 = 取消这一单
 ```
 
-一份任务一个文件 `task_{id}.md`。移动目录 = 改状态（`todo` → `running` → `done`），不另写 status 库。`done` / 超时 **保留文件**。运维自行清理。
+一份任务一个文件 `task_{id}.md`。移动目录 = 改状态（`todo` → `running` → `done`），不另写 status 库。`done` / `cancel` **保留文件**。运维自行清理。
+
+**`cancel/` 由人手工搬文件**（`mv jobs/running/task_x.md jobs/cancel/`）：巡检只扫 `running/`，文件一挪走就自然不再被叫醒、不再超时；对应会话一并解绑。不需要新工具，也不需要动 `taskLead`。
 
 ### frontmatter（运行时写，模型可读不可直接改关键键）
 
@@ -264,6 +267,22 @@ LLM 拿到的判据就三样：running 摘要、自己的技能、专家卡片�
 
 专家也可以在本轮把自身 assignee 标 `waiting`（更新 md 后收口）：中继不视为失败，等派发方再次 `dispatch_expert` 或 FIFO 轮到再叫醒。占着仍可派，不报错。
 
+#### 中间层暂停与恢复（B 派 C）
+
+被派专家 B 自己**还能再派** C。B 派完 C 后不是「做完」，而是**暂停等下游**：
+
+| 时机 | B 的 `assignees[].status` | 说明 |
+|---|---|---|
+| A 派 B | `running` | B 开工 |
+| B 派了 C（B 是这单的 assignee） | **`waiting`** | B 本轮收尾 → 暂停。`waiting` **不算终态**，所以不会上报给 A |
+| C（及 B 派出的全部下游）都终态 | `running` | 上报链叫醒 B，B **恢复继续做自己的活** |
+| B 自己这一轮真正结束 | `idle`（巡检探针转态） | 这时才算做完，才上报给 A |
+
+要点：
+- 一个中间层可能有多路下游，**全部**终态才恢复它。
+- 恢复时把它的状态从 `waiting` 改回 `running`（它开始干活了），否则巡检不再探它、它永远停在 `waiting`。
+- 若中间层派下游时用的是 `wake=false`，语义同上：仍然进 `waiting`，等下游终态后恢复。
+
 直 @ 没有 `dispatch_expert.access`：该专家本轮先 `open_task`；未声明 access 当 `write` + cwd。磁盘锁仍按声明后的 access / target。
 
 ## 派发 turn 与 deliver
@@ -293,7 +312,9 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 | 事件 | 动作 |
 |---|---|
 | 某 assignee 终态且 `wake=true`、非 `need_decision` | **先**内部 followup 叫醒 `dispatchedBy`（可合并同一被叫醒方的多路刚终态）。禁止抢先让任务 lead 综合。这轮后又派 → 文件保持 running；问人 → `pendingHuman`；既没再派也无待决 → 若还有上游，再叫醒上游；若被叫醒的就是 taskLead 且专家已齐 → 综合。**该 assignee 自己还有未终态的下游**（它派出去的人仍 `running`/`waiting`/`need_decision`）时不算「终态」，本轮不叫醒它的 `dispatchedBy`——否则上级会被提前叫醒、赶在下游出结果前答复 |
-| 全部 assignee 终态、无 `pendingHuman`、无未消费 wake | 内部 followup **taskLead**（带 md 全文）。这轮又 `dispatch_expert`：当真启动，保持 running，这轮不 `deliver`。没再派、没问人 → idle 后 `deliver` @sender → 移到 `done/` |
+| 全部 assignee 终态、无 `pendingHuman`、无未消费 wake | 内部 followup **taskLead**（带 md 全文）。这轮又 `dispatch_expert`：当真启动，保持 running，这轮不 `deliver`。没再派、没问人、也没待决 → **取 taskLead 这一轮的产出 `deliver` @sender，然后移到 `done/` 并解绑** |
+| taskLead 综合完成（交付） | **收口**：把 taskLead 这一轮（被叫醒那一轮）的 assistant 文本经 `deliver` 发回**原发送者所在的会话**（`providerId` + 任务里的 `sessionParts`），`@sender`；随后 `moveTask('running','done')` + 解绑该任务所有会话。综合后又派了活 → 不交付，保持 `running` |
+| 交付面（deliver 目标） | 优先发回这一单**原发送者所在的那条会话/群**（任务 frontmatter 里记的 `providerId` + `sessionParts`）。人不在群里 / 通道不支持 deliver → 退化为写日志，任务仍收口 |
 | 被派专家 `ask_user_question` / `ask_task_lead` | 只交给巡检器：写入 md，叫醒 taskLead。该专家即使 `wake=true` 也只走本行，wake 留着 |
 | 入站里 taskLead 自己 `ask_user_question` | 本轮 `messages` 带回问卷；写 `pendingHuman`。不经 `deliver` |
 | 人 @ 某专家 | 一律 followup 该专家（带 running 摘要）。LLM 捡起并处理待决 → 改 md，叫醒当时在等的人；不捡 → 旧文件还挂着，本轮可新建 |
@@ -357,15 +378,20 @@ loop renew < expert_liveness_max_renew:   # 默认 3
 
 问卷发出时（本轮 `messages` 或 `deliver`）把 **该文件** 的 `deadlineAt` 改成「发出时刻 + `task_round_timeout_ms`」。`ask_task_lead` 只叫醒 A、人还没被问：**不**改 `deadlineAt`。回填后回到 running：不再改回 createdAt。
 
-到点：
+到点**不一律判死**：先分析这单各专家的会话状态，再决定顺延、继续、综合还是交回给人。
 
-| 当时 | 动作 |
+| 分析结果（按序判定） | 动作 |
 |---|---|
-| 还有 assignee 未终态 | 整单超时，`deliver`「处理超时」@sender，移到 `done/`。专家 turn 不强制 dispose |
-| 有 `pendingHuman` 且还有人在跑 | **只作废待决**（正文记「问卷超时未答」）。还在跑的继续，齐了再综合。**不**整单超时 |
-| 有 `pendingHuman` 且已齐 / 0 专家 | 整单超时，`deliver`「处理超时」@sender |
+| ① 全部 assignee 终态、无 `pendingHuman` | **顺延墙钟**并走综合：叫醒 taskLead 综合 → 交付 → `done/`（即正常收口，不是超时） |
+| ② 还有专家会话**在跑**（`agents.get(assignee.sessionId) != undefined`，或状态仍 `running`/`waiting`） | **顺延墙钟**（`deadlineAt = now + task_round_timeout_ms`），继续等。同时给人/lead 一次**进度反馈**（「还在做：{name}」）。不判超时、不移文件 |
+| ③ 没人在跑、也没终态（卡住了） | 先**尝试救活**：能重启/重发的继续做（超时、网络一类）→ 回到 ②；救不动 → 走 ④ |
+| ④ 救不动，或原因属**权限 / 审批 / 需人拍板** | **交回给人**：`deliver` 一条「需要你确认」（带 md 摘要 + 卡在哪），任务**留在 `running/`** 等人（人可答、可挪 `cancel/`）；不判 failed |
+| ⑤ 有 `pendingHuman` 且还有人在跑 | 只作废待决（正文记「问卷超时未答」），继续等，**不**整单超时 |
+| ⑥ 有 `pendingHuman` 且没人在跑 | 交回给人（同 ④） |
 
-到点只动 **这一份文件**。已在综合、或 wake 已在 FIFO：做完这次内部 followup，不截杀。
+- 「顺延」= 把 `deadlineAt` 往后推一个 `task_round_timeout_ms`，并**记一次进度**，避免「活得好好地被判超时」。
+- 到点只动 **这一份文件**。已在综合、或 wake 已在 FIFO：做完这次内部 followup，不截杀。
+- 进度反馈的频次由「顺延一次只发一条」保证（同 `deadlineAt` 指纹去重），不刷屏。
 
 ## 数据流
 

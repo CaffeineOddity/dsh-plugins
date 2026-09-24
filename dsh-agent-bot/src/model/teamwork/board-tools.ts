@@ -167,6 +167,7 @@ function getBoundTask(sessionId: string): { task: TaskBoard; status: 'running' }
 function upsertAssignee(
   task: TaskBoard,
   expert: { agentId: string; name: string; sessionId: string; dispatchedBy: string; dispatchedByName: string; access: Access; target?: string; status: AssigneeStatus },
+  wake = true,
 ): void {
   const idx = task.assignees.findIndex((a) => a.expertId === expert.agentId)
   const record = {
@@ -178,10 +179,23 @@ function upsertAssignee(
     access: expert.access,
     target: expert.target,
     status: expert.status,
-    wake: true,
+    wake,
   }
   if (idx < 0) task.assignees.push(record)
   else task.assignees[idx] = record
+}
+
+/**
+ * 派发方自己是这单的 assignee（中间层 B 再派 C）→ 把自己标 `waiting`（暂停等下游）。
+ * `waiting` 不算终态，因此不会被上报给 A；等 C 那几路终态后由上报链叫醒 B，
+ * 那时再把 B 改回 `running` 让它接着做（见 patrol）。
+ */
+function pauseSelfIfIntermediate(task: TaskBoard, callerAgentId: string): boolean {
+  const self = task.assignees.find((a) => a.expertId === callerAgentId)
+  if (self === undefined) return false
+  if (self.status === 'waiting') return false
+  self.status = 'waiting'
+  return true
 }
 
 function notBoundError(): Error {
@@ -451,11 +465,17 @@ export function registerBoardTools(ctx: {
             access: args.access,
             target: target.path !== '' ? target.path : task.target,
             status,
-          })
+          }, args.wake !== false)
+          // 中间层（B 派 C）：B 自己暂停等下游，等 C 那几路终态后由上报链叫醒它接着做
+          const paused = pauseSelfIfIntermediate(task, agentId)
           writeTask('running', task)
 
           if (args.wake === false) {
-            return { kind: 'waiting', sessionId, text: `已把 ${expertName} 记为待命（wake=false），未叫醒` }
+            return {
+              kind: 'waiting',
+              sessionId,
+              text: `已把 ${expertName} 记为待命（wake=false），未叫醒${paused ? '；你已记为等下游，等它做完再继续' : ''}`,
+            }
           }
           const mdText = marshalText(task)
           await relay.startTurn({
@@ -472,7 +492,11 @@ export function registerBoardTools(ctx: {
             permissionMode: expertCfg.permission_mode,
             targetWorkspace: target.path !== '' ? target.path : undefined,
           })
-          return { kind: 'running', sessionId, text: `已派给 ${expertName}，正在处理` }
+          return {
+            kind: 'running',
+            sessionId,
+            text: `已派给 ${expertName}，正在处理${paused ? `；你已记为等下游（waiting），等 ${expertName} 做完会再叫醒你继续` : ''}`,
+          }
         },
       }),
     ),

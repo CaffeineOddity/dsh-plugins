@@ -96,6 +96,11 @@ export function unbindSession(sessionId: string): void {
   persist(map)
 }
 
+/** 当前全部绑定（供收口清理：任务已被挪走时解绑其会话）。 */
+export function listBindings(): Array<{ sessionId: string; taskId: string }> {
+  return Object.entries(load()).map(([sessionId, v]) => ({ sessionId, taskId: v.taskId }))
+}
+
 /** 测试用：清内存缓存。 */
 export function resetBindingsCache(): void {
   cache = undefined

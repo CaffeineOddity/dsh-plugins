@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { resetConfigCache } from '../config.js'
 import { getAgent as getAgentConfig, saveAgent, touchSession } from '../agents.js'
-import { writeTask, type TaskBoard, type Assignee } from './task-board.js'
+import { readTask, writeTask, type TaskBoard, type Assignee } from './task-board.js'
 import { bindSession, boundTaskId, resetBindingsCache } from './binding.js'
 import { assigneeOf, createPatrol, hasPendingDownstream, shouldDeliver, wakeSessionIdFor, wakeText } from './patrol.js'
 import type { AgentLike } from '../runtime.js'
@@ -71,7 +71,12 @@ function assignee(over: Partial<Assignee> = {}): Assignee {
 }
 
 /** 假 host：记录 followup 到的 sessionId；agents().get 只看注册过的 id。 */
-function fakeHost(live: string[], delivered: Array<{ providerId: string; text: string[] }> = []) {
+function fakeHost(
+  live: string[],
+  delivered: Array<{ providerId: string; text: string[] }> = [],
+  eventsBySession: Record<string, Array<{ seq: number; type: string; data?: unknown }>> = {},
+  busy: string[] = [],
+) {
   const woken: Array<{ sessionId: string; text: string }> = []
   const host = {
     async ensureAgent(input: { sessionId: string }): Promise<AgentLike> {
@@ -79,26 +84,21 @@ function fakeHost(live: string[], delivered: Array<{ providerId: string; text: s
       return {} as AgentLike
     },
     agents: () => ({
-      get: (sessionId: string) => (live.includes(sessionId) ? ({ whenIdle: () => Promise.resolve() } as unknown as AgentLike) : undefined),
+      get: (sessionId: string) => {
+        if (!live.includes(sessionId)) return undefined
+        return {
+          whenIdle: () => (busy.includes(sessionId) ? new Promise<void>(() => undefined) : Promise.resolve()),
+          followup: (msg: { content: Array<{ text: string }> }) => {
+            woken.push({ sessionId, text: msg.content[0]?.text ?? '' })
+          },
+          session: { seq: 0, snapshotEvents: () => eventsBySession[sessionId] ?? [] },
+        } as unknown as AgentLike
+      },
     }),
     async deliver(providerId: string, _sessionParts: Record<string, string>, messages: Array<{ text: string }>) {
       delivered.push({ providerId, text: messages.map((m) => m.text) })
     },
   }
-  // followup 由 patrol 内部 live.followup 调用 → 用 whenIdle 对象挂 followup
-  const origAgents = host.agents
-  host.agents = () => ({
-    get: (sessionId: string) => {
-      if (!live.includes(sessionId)) return undefined
-      return {
-        whenIdle: () => Promise.resolve(),
-        followup: (msg: { content: Array<{ text: string }> }) => {
-          woken.push({ sessionId, text: msg.content[0]?.text ?? '' })
-        },
-      } as unknown as AgentLike
-    },
-  })
-  void origAgents
   return { host, woken, delivered }
 }
 
@@ -291,20 +291,95 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     expect(woken.map((w) => w.sessionId)).toEqual(['sess-a'])
   })
 
-  it('墙钟到点 → deliver「处理超时」并移进 done/，同时解绑', async () => {
+  it('墙钟到点但专家还在跑 → 顺延墙钟 + 一条进度反馈，不移 done', async () => {
     const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
-    bindSession('sess-b', 'task_t1')
+    const past = Date.now() - 1
     writeTask('running', task({
       taskId: 'task_t1',
       taskLead: a,
-      deadlineAt: Date.now() - 1,
+      deadlineAt: past,
       assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'running', wake: true })],
     }))
     const { host, delivered } = fakeHost(['sess-a', 'sess-b'])
     const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
     await patrol.tickOnce()
-    expect(delivered[0]?.text[0]).toBe('处理超时')
+    expect(delivered[0]?.text[0]).toContain('还在做')
+    const back = readTask('running', 'task_t1')
+    expect(back).toBeDefined() // 没被移走
+    expect(back!.deadlineAt).toBeGreaterThan(past)
+    // 同一 deadlineAt 再跑不重复发
+    await patrol.tickOnce()
+    expect(delivered).toHaveLength(1)
+  })
+
+  it('墙钟到点、专家救不动（不在 agents.json）→ 交回给人拍板，任务留在 running/', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      deadlineAt: Date.now() - 1,
+      assignees: [assignee({ expertId: 'ghost', expertName: '幽灵', dispatchedBy: a, sessionId: 'sess-x', status: 'running', wake: true })],
+    }))
+    const { host, delivered } = fakeHost(['sess-a']) // 专家会话不在线且救不动
+    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    await patrol.tickOnce()
+    expect(delivered[0]?.text[0]).toContain('需要你确认')
+    expect(readTask('running', 'task_t1')).toBeDefined()
+  })
+
+  it('全终态 → 收口：叫醒 lead、取它这轮产出交付、移 done/ 并解绑', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    bindSession('sess-b', 'task_t1')
+    bindSession('sess-a', 'task_t1')
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: true })],
+    }))
+    const { host, delivered } = fakeHost(['sess-a', 'sess-b'], [], {
+      'sess-a': [
+        { seq: 1, type: 'turn/start' },
+        { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '海报已出好，见附件' }] } } },
+      ],
+    })
+    const patrol = createPatrol(host, { windowMs: 50, intervalMs: 1 })
+    await patrol.tickOnce()
+    await patrol.flush()
+    expect(delivered[0]?.text[0]).toContain('海报已出好')
+    expect(readTask('running', 'task_t1')).toBeUndefined()
+    expect(readTask('done', 'task_t1')).toBeDefined()
     expect(boundTaskId('sess-b')).toBeUndefined()
+  })
+
+  it('中间层在等下游（waiting）→ 下游终态后恢复 running 并叫醒它，不叫 A', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      assignees: [
+        assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'waiting', wake: true }),
+        assignee({ expertId: c, expertName: 'C', dispatchedBy: b, sessionId: 'sess-c', status: 'idle', wake: true }),
+      ],
+    }))
+    const { host, woken } = fakeHost(['sess-a', 'sess-b', 'sess-c'], [], {}, ['sess-b'])
+    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    await patrol.tickOnce()
+    expect(woken.map((w) => w.sessionId)).toEqual(['sess-b'])
+    const back = readTask('running', 'task_t1')
+    expect(back?.assignees.find((x) => x.expertId === b)?.status).toBe('running') // 恢复了
+  })
+
+  it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {
+    mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    bindSession('sess-a', 'task_t1')
+    // running/ 里没有这份任务（相当于人已 mv 到 cancel/）
+    const { host } = fakeHost(['sess-a'])
+    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    await patrol.tickOnce()
+    expect(boundTaskId('sess-a')).toBeUndefined()
   })
 })
