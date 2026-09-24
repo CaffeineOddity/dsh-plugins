@@ -9,6 +9,7 @@ import { getAgent } from '../model/agents.js'
 import { resetConfigCache, saveConfig } from '../model/config.js'
 import type { AgentLike, AgentsService, HostServices } from '../model/runtime.js'
 import { createAgentBotService, emptyHostServices } from './service.js'
+import { inboundFor, resetInboundCache } from '../model/teamwork/inbound.js'
 
 function fakeHost(
   events: Array<{ seq: number; type: string; data?: unknown }>,
@@ -107,6 +108,7 @@ function seedRunnableAgent(sessionBySender: boolean, timeoutMs: number): void {
     agent_wait_timeout_ms: timeoutMs,
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
   })
 }
 
@@ -135,10 +137,12 @@ beforeEach(() => {
   configDir = mkdtempSync(join(tmpdir(), 'agentbot-service-'))
   process.env.AGENT_BOT_CONFIG_DIR = configDir
   resetConfigCache()
+  resetInboundCache()
 })
 
 afterEach(() => {
   resetConfigCache()
+  resetInboundCache()
   if (prevEnv === undefined) delete process.env.AGENT_BOT_CONFIG_DIR
   else process.env.AGENT_BOT_CONFIG_DIR = prevEnv
   rmSync(configDir, { recursive: true, force: true })
@@ -173,6 +177,7 @@ describe('listAgents / getAgent', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const svc = createAgentBotService(emptyHostServices())
     expect(svc.listAgents()).toEqual([
@@ -265,6 +270,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
@@ -304,6 +310,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const svc = createAgentBotService(
       fakeHost(
@@ -365,6 +372,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
@@ -408,6 +416,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
@@ -427,6 +436,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     await svc.ask({ ...req, meta: { ...req.meta, traceId: 't2' } })
     const second = getAgent('a1')?.sessions.r1_1
@@ -463,6 +473,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const followups: unknown[] = []
     const svc = createAgentBotService(fakeHost([], idleNow, { followups }))
@@ -502,6 +513,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const followups: unknown[] = []
     const svc = createAgentBotService(fakeHost([], idleNow, { followups }))
@@ -541,6 +553,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const followups: unknown[] = []
     const svc = createAgentBotService(fakeHost([], idleNow, { followups }))
@@ -580,6 +593,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const svc = createAgentBotService(emptyHostServices())
     svc.registerProvider({ id: 'demo', label: '示例通道' })
@@ -626,6 +640,7 @@ describe('ask 校验先于回合', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     let disposed = 0
     const host = fakeHost([], idleNow)
@@ -694,5 +709,96 @@ describe('ask 校验先于回合', () => {
     expect(result.pending).not.toBeNull()
     expect(JSON.stringify(result.pending)).toBe('{}')
     await expect(result.pending).rejects.toThrow(/pending 安全阀超时/)
+  })
+})
+
+describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', () => {
+  /** 两个 agent：a1（被 @ 的）+ a2（可派的专家）。 */
+  function seedTwoAgents(useHubExperts: boolean): void {
+    mkdirSync(join(configDir, 'ws'), { recursive: true })
+    const base = {
+      description: '',
+      workspace: join(configDir, 'ws'),
+      prompt: '',
+      prompt_placement: 'system' as const,
+      skill_groups: [] as string[],
+      prompt_append_skills: true,
+      reuse_session: true,
+      session_by_sender: false,
+      permission_mode: 'danger-full-access' as const,
+      session_timeout_minutes: 30,
+      concurrency: 'serial' as const,
+      needs_target_workspace: false,
+      sessions: {},
+    }
+    saveConfig({
+      skill_roots: [],
+      skill_groups: {},
+      prompts: {},
+      agents: [
+        { ...base, id: 'a1', name: '联运' },
+        { ...base, id: 'a2', name: '设计师' },
+      ],
+      skill_apply: {},
+      agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
+      use_hub_experts: useHubExperts,
+    })
+  }
+
+  it('ask 后登记 sender / providerId / sessionParts / originContext', async () => {
+    seedTwoAgents(true)
+    const svc = createAgentBotService(fakeHost([], idleNow))
+    svc.registerProvider({ id: 'demo', label: '示例通道' })
+    await svc.ask(askReq('t1', 'alice'))
+    const sid = getAgent('a1')?.sessions.r1_1?.sessionId ?? ''
+    const ctx = inboundFor(sid)
+    expect(ctx?.sender).toBe('alice')
+    expect(ctx?.providerId).toBe('demo')
+    expect(ctx?.sessionParts).toEqual({ bot_id: 'r1', group_id: '1' })
+    expect(ctx?.originContext).toBe('用户[alice]: 你好')
+  })
+
+  it('开关默认开：快照 = agents.json 全集，且去掉自己', async () => {
+    seedTwoAgents(true)
+    let asked = false
+    const svc = createAgentBotService(fakeHost([], idleNow))
+    svc.registerProvider({
+      id: 'demo',
+      label: '示例通道',
+      listGroupAgents: () => {
+        asked = true
+        return [{ agentId: 'a2', name: '设计师', description: '' }]
+      },
+    })
+    await svc.ask(askReq('t1', 'alice'))
+    const sid = getAgent('a1')?.sessions.r1_1?.sessionId ?? ''
+    const snap = inboundFor(sid)?.groupSnapshot ?? []
+    expect(snap.map((m) => m.agentId)).toEqual(['a2'])
+    expect(asked).toBe(false) // hub 模式不问通道
+  })
+
+  it('开关关闭：问 listGroupAgents，过滤幽灵成员与自己', async () => {
+    seedTwoAgents(false)
+    let asked = 0
+    const svc = createAgentBotService(fakeHost([], idleNow))
+    svc.registerProvider({
+      id: 'demo',
+      label: '示例通道',
+      listGroupAgents: () => {
+        asked += 1
+        return [
+          { agentId: 'a2', name: '设计师', description: '' },
+          { agentId: 'a1', name: '自己', description: '' },   // 自己 → 去掉
+          { agentId: 'ghost', name: '幽灵', description: '' }, // 不在 agents.json → 丢掉
+        ]
+      },
+    })
+    await svc.ask(askReq('t1', 'alice'))
+    const sid = getAgent('a1')?.sessions.r1_1?.sessionId ?? ''
+    const snap = inboundFor(sid)?.groupSnapshot ?? []
+    expect(asked).toBe(1)
+    expect(snap.map((m) => m.agentId)).toEqual(['a2'])
   })
 })

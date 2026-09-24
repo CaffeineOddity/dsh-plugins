@@ -6,7 +6,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { jobsRootPath } from '../config.js'
+import { jobsRootPath, loadConfig } from '../config.js'
 
 /** 任务目录状态。todo=建好未开工；running=至少一路在做；done=结束/超时（保留文件）。 */
 export type TaskStatus = 'todo' | 'running' | 'done'
@@ -173,11 +173,11 @@ export function marshalTaskYaml(task: SerializeTask, body: string): string {
   const lines: string[] = ['---']
   lines.push(`taskId: ${task.taskId}`)
   lines.push(`taskLead: ${task.taskLead}`)
-  lines.push(`sender: ${task.sender}`)
+  lines.push(`sender: ${yamlScalar(task.sender)}`)
   lines.push(`providerId: ${task.providerId}`)
   lines.push('sessionParts:')
   for (const [k, v] of Object.entries(task.sessionParts)) {
-    lines.push(`  ${k}: ${String(v)}`)
+    lines.push(`  ${k}: ${yamlScalar(String(v))}`)
   }
   lines.push(`originContext: ${yamlScalar(task.originContext)}`)
   lines.push(`access: ${task.access}`)
@@ -215,9 +215,15 @@ export function marshalTaskYaml(task: SerializeTask, body: string): string {
 }
 
 /** YAML 单行标量：不裸释放冒号/井号，空则空引号。 */
+/**
+ * 字符串标量出码。会被 YAML 回读成 number / boolean / null 的（纯数字、true/false/null/~）
+ * **必须加引号**，否则往返后变成非字符串——`sender` / `sessionParts` 的值常是纯数字用户 id、
+ * 群 id（如 `6031348`），不加引号会被 `parseSessionParts` / `reqString` 丢掉或直接读失败。
+ */
 function yamlScalar(v: string): string {
   if (v === '') return "''"
-  if (/^[A-Za-z0-9_./:+=@-]+$/.test(v)) return v
+  const looksNonString = /^-?\d+(\.\d+)?$/.test(v) || v === 'true' || v === 'false' || v === 'null' || v === '~'
+  if (!looksNonString && /^[A-Za-z0-9_./:+=@-]+$/.test(v)) return v
   const escaped = String(v).replace(/\\/g, '\\\\').replace(/'/g, "''")
   return `'${escaped}'`
 }
@@ -415,8 +421,76 @@ export function isTaskId(v: string): boolean {
   return /^task_[A-Za-z0-9_-]+$/.test(v)
 }
 
+/** 任务文件绝对路径（派发时告知专家去读；也是运维排查入口）。 */
+export function taskFilePath(status: TaskStatus, taskId: string): string {
+  return taskFile(status, taskId)
+}
+
 function taskFile(status: TaskStatus, taskId: string): string {
   return join(jobsRootPath(), status, `${taskId}.md`)
+}
+
+/** 新建任务的入参（sender / providerId / sessionParts / 群快照由入站上下文提供）。 */
+export interface CreateTaskInput {
+  /** 谁被 @，谁就是这一单的 lead。 */
+  taskLead: string
+  sender: string
+  providerId: string
+  sessionParts: Record<string, string>
+  originContext: string
+  access: Access
+  target?: string
+  groupSnapshot: GroupMember[]
+  /** 任务墙钟毫秒；<=0 用全局 task_round_timeout_ms。 */
+  roundTimeoutMs?: number
+  /** 正文初值（缺省空）。 */
+  body?: string
+  nowMs?: number
+}
+
+/**
+ * 新建一份任务并落 `running/`（specs/12：建好即开工，「todo/」少见）。
+ * taskId = `task_<本地时间戳>`；同毫秒冲突时递增毫秒，保证唯一。
+ */
+export function createTask(input: CreateTaskInput): TaskBoard {
+  const now = input.nowMs ?? Date.now()
+  const timeout = input.roundTimeoutMs !== undefined && input.roundTimeoutMs > 0
+    ? input.roundTimeoutMs
+    : loadConfig().task_round_timeout_ms
+  ensureJobsDirs()
+  const taskId = mintTaskId(now)
+  const task: TaskBoard = {
+    taskId,
+    taskLead: input.taskLead,
+    sender: input.sender,
+    providerId: input.providerId,
+    sessionParts: { ...input.sessionParts },
+    originContext: input.originContext,
+    access: input.access,
+    target: input.target === undefined || input.target === '' ? undefined : input.target,
+    createdAt: now,
+    deadlineAt: now + timeout,
+    groupSnapshot: input.groupSnapshot.map((m) => ({ ...m })),
+    assignees: [],
+    body: input.body ?? '',
+  }
+  writeTask('running', task)
+  return task
+}
+
+/** 生成不撞车的 taskId：`task_<年月日时分秒>_<毫秒>`（只含 [A-Za-z0-9_-]），撞了就往后推毫秒。 */
+function mintTaskId(nowMs: number): string {
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const p3 = (n: number) => String(n).padStart(3, '0')
+  const fmt = (d: Date) =>
+    `task_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}_${p3(d.getMilliseconds())}`
+  const d = new Date(nowMs)
+  let id = fmt(d)
+  while (readTask('running', id) !== undefined || readTask('done', id) !== undefined || readTask('todo', id) !== undefined) {
+    d.setMilliseconds(d.getMilliseconds() + 1)
+    id = fmt(d)
+  }
+  return id
 }
 
 function ensureJobsDirs(): void {

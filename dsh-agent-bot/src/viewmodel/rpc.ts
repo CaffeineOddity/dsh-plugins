@@ -263,6 +263,7 @@ export async function handleRpc(
             agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
             expert_liveness_max_renew: cfg.expert_liveness_max_renew,
             task_round_timeout_ms: cfg.task_round_timeout_ms,
+            use_hub_experts: cfg.use_hub_experts,
             configDir: configDirPath(),
             providers: host.listProviders(),
           },
@@ -292,6 +293,8 @@ export async function handleRpc(
           }
           round = n
         }
+        const hubRaw = asRecord(payload).use_hub_experts
+        const hub = hubRaw === undefined ? cfg.use_hub_experts : (hubRaw === true || hubRaw === 'true')
         saveConfig({
           skill_roots: cfg.skill_roots,
           skill_groups: cfg.skill_groups,
@@ -301,6 +304,7 @@ export async function handleRpc(
           agent_wait_timeout_ms: ms,
           expert_liveness_max_renew: renew,
           task_round_timeout_ms: round,
+          use_hub_experts: hub,
         })
         return { ok: true, value: { saved: true, agent_wait_timeout_ms: ms } }
       }

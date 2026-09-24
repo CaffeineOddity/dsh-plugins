@@ -14,6 +14,7 @@ import {
   loadSkillsMap,
   normalize,
   parseAgentWaitTimeoutMs,
+  parseUseHubExperts,
   promptsFilePath,
   resetConfigCache,
   saveConfig,
@@ -65,6 +66,16 @@ describe('parseAgentWaitTimeoutMs', () => {
     expect(parseAgentWaitTimeoutMs(1800001)).toBe(null)
     expect(parseAgentWaitTimeoutMs(1.5)).toBe(null)
     expect(parseAgentWaitTimeoutMs('abc')).toBe(null)
+  })
+})
+
+describe('parseUseHubExperts', () => {
+  it('只接受布尔；缺省/非法回退 true（中枢全集）', () => {
+    expect(parseUseHubExperts(true)).toBe(true)
+    expect(parseUseHubExperts(false)).toBe(false)
+    expect(parseUseHubExperts(undefined)).toBe(true)
+    expect(parseUseHubExperts('false')).toBe(true)
+    expect(parseUseHubExperts(0)).toBe(true)
   })
 })
 
@@ -215,6 +226,7 @@ describe('loadConfig / saveConfig', () => {
       agent_wait_timeout_ms: 60000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     }
     saveConfig(data)
     expect(existsSync(configFilePath())).toBe(true)
@@ -229,12 +241,23 @@ describe('loadConfig / saveConfig', () => {
     expect(disk.agent_wait_timeout_ms).toBe(60000)
     expect(disk.expert_liveness_max_renew).toBe(3)
     expect(disk.task_round_timeout_ms).toBe(7200000)
+    expect(disk.use_hub_experts).toBe(true)
+    expect(loaded.use_hub_experts).toBe(true)
     expect(disk.skill_groups).toBeUndefined()
     expect(disk.prompts).toBeUndefined()
     expect(disk.agents).toBeUndefined()
     expect(JSON.parse(readFileSync(skillGroupsFilePath(), 'utf8')).rd.id).toBe('rd')
     expect(JSON.parse(readFileSync(promptsFilePath(), 'utf8')).default.tools).toEqual(['bash'])
     expect(JSON.parse(readFileSync(agentsFilePath(), 'utf8'))[0].id).toBe('a1')
+  })
+
+  it('use_hub_experts=false 落盘并 reload 后仍为 false（关=群快照）', () => {
+    const base = loadConfig()
+    saveConfig({ ...base, use_hub_experts: false })
+    resetConfigCache()
+    expect(loadConfig().use_hub_experts).toBe(false)
+    const disk = JSON.parse(readFileSync(configFilePath(), 'utf8')) as Record<string, unknown>
+    expect(disk.use_hub_experts).toBe(false)
   })
 
   it('分文件优先；缺分文件时回退旧 config.json 嵌套字段', () => {
@@ -304,6 +327,7 @@ describe('skills-map.json', () => {
       agent_wait_timeout_ms: 180000,
       expert_liveness_max_renew: 3,
       task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
     })
     const disk = JSON.parse(readFileSync(configFilePath(), 'utf8')) as Record<string, unknown>
     expect(disk.skills).toBeUndefined()

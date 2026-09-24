@@ -14,6 +14,8 @@ import { randomUUID } from 'node:crypto'
 import type { AgentConfig } from '../config.js'
 import { touchSession } from '../agents.js'
 import type { EnsureAgentInput, AgentLike } from '../runtime.js'
+import { bindSession } from './binding.js'
+import { taskFilePath } from './task-board.js'
 
 export const COLLAB_SESSION_PREFIX = 'task:'
 
@@ -111,18 +113,23 @@ export interface Relay {
   writeFence: WriteFence
 }
 
-/** 包装 followup：被派做共享任务板上的一单，不是对群友说话；注入 md 全文。 */
+/** 包装 followup：被派做共享任务板上的一单，不是对群友说话；注入 md 全文 + 文件绝对路径。 */
 export function wrapDispatchFollowup(input: {
   instruction: string
   mdText: string
   access: 'read' | 'write'
   targetWorkspace?: string
+  /** 任务文件绝对路径（专家可随时自己重读最新版本）。 */
+  taskPath?: string
 }): string {
   const lines: string[] = [
     '你是被派做共享任务板上的一单，不是在对群友说话；本任务 access 见 md。',
     '缺信息时：你不是任务 lead 就调 ask_task_lead 把问题上抛，或把问题写进结果摘要后收口；不要在正文里只提问。',
     '做完把进展写回 md（update_task）后收口。',
   ]
+  if (input.taskPath !== undefined && input.taskPath !== '') {
+    lines.push(`任务文件（可随时重读最新版本）：${input.taskPath}`)
+  }
   if (input.access === 'write' && input.targetWorkspace !== undefined && input.targetWorkspace !== '') {
     lines.push(`产出写到目标目录 ${input.targetWorkspace}，不要写到自己的 cwd。`)
   }
@@ -143,11 +150,14 @@ export function buildRelay(host: RelayHost): Relay {
     },
     async startTurn(input) {
       const sessionId = this.resolveSession(input.agent, input.taskId, input.expertId, input.session, input.nowMs)
+      // fiber 绑定：被派专家一进来就已经在做这一单，不必自己填 taskId（specs/12 §中继驱动）。
+      bindSession(sessionId, input.taskId)
       const followupText = wrapDispatchFollowup({
         instruction: input.instruction,
         mdText: input.mdText,
         access: input.access,
         targetWorkspace: input.targetWorkspace,
+        taskPath: taskFilePath('running', input.taskId),
       })
       const ensureInput: EnsureAgentInput = {
         sessionId,

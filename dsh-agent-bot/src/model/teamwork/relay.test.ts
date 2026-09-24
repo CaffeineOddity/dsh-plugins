@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { loadConfig, resetConfigCache, type AgentConfig } from '../config.js'
 import { saveAgent, type AgentWrite } from '../agents.js'
 import { buildRelay, isCollabSessionKey, taskSlotKey, wrapDispatchFollowup, writeFenceKey, type RelayHost } from './relay.js'
+import { boundTaskId, resetBindingsCache } from './binding.js'
 
 let dir: string
 let prevEnv: string | undefined
@@ -47,10 +48,12 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'relay-test-'))
   process.env.AGENT_BOT_CONFIG_DIR = dir
   resetConfigCache()
+  resetBindingsCache()
 })
 
 afterEach(() => {
   resetConfigCache()
+  resetBindingsCache()
   if (prevEnv === undefined) delete process.env.AGENT_BOT_CONFIG_DIR
   else process.env.AGENT_BOT_CONFIG_DIR = prevEnv
   rmSync(dir, { recursive: true, force: true })
@@ -78,6 +81,15 @@ describe('wrapDispatchFollowup', () => {
     expect(out).toContain('task_1')
     expect(out).toContain('/proj')
     expect(out).not.toContain('你的 cwd')
+  })
+
+  it('给了任务文件绝对路径就写进 prompt（让专家自己重读）', () => {
+    const out = wrapDispatchFollowup({
+      instruction: '做 X', mdText: 'md', access: 'read',
+      taskPath: '/cfg/jobs/running/task_1.md',
+    })
+    expect(out).toContain('/cfg/jobs/running/task_1.md')
+    expect(out).toContain('可随时重读')
   })
 })
 
@@ -130,5 +142,32 @@ describe('buildRelay', () => {
     expect(r.kind).toBe('running')
     expect(r.sessionId).toBeTruthy()
     void calledText
+  })
+
+  it('startTurn 把协作槽绑到本任务（fiber 绑定，专家不必自己填 taskId）', async () => {
+    let calledId = ''
+    const host: RelayHost = {
+      ensureAgent: async (input) => {
+        calledId = input.sessionId
+        return { session: { seq: 0, snapshotEvents: () => [] }, followup: () => undefined, whenIdle: async () => undefined }
+      },
+      agents: () => ({ get: (id: string) => (id === calledId ? { followup: () => undefined } : undefined) }),
+    }
+    const relay = buildRelay(host)
+    persistAgent()
+    const r = await relay.startTurn({
+      agent: actAgent(),
+      taskId: 'task_1',
+      expertId: bobId,
+      instruction: '做 X',
+      mdText: 'md',
+      access: 'read',
+      session: 'reuse',
+      nowMs: 1000,
+      variables: { sender: 'alice', provider_id: 'demo' },
+      promptText: '',
+      permissionMode: 'danger-full-access',
+    })
+    expect(boundTaskId(r.sessionId)).toBe('task_1')
   })
 })

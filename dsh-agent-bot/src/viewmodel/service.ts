@@ -19,7 +19,8 @@ import { createAgentRuntime, type HostServices } from '../model/runtime.js'
 import type { AgentConfig } from '../model/config.js'
 import { registerBoardTools } from '../model/teamwork/board-tools.js'
 import { createPatrol } from '../model/teamwork/patrol.js'
-import { describeTasks, listTasksIn } from '../model/teamwork/task-board.js'
+import { describeTasks, listTasksIn, type GroupMember } from '../model/teamwork/task-board.js'
+import { rememberInbound } from '../model/teamwork/inbound.js'
 import type {
   AgentAskRequest,
   AgentAskResponse,
@@ -111,9 +112,9 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
   providers.set(LOCAL_PROVIDER.id, { ...LOCAL_PROVIDER, token: Symbol('agent-bot:builtin-local') })
   const queue = createAskQueue()
 
-  /** 入站绑定点：包入站 running 摘要 + 群快照；缺省（无 provider）只给空摘要。 */
+  /** 入站绑定点：包入站 running 摘要；群快照由组员发现函数单独登记（见 rememberInbound）。 */
   function boardContextFor(live: AgentConfig): { text: string; variables: Record<string, string> } {
-    // 群快照只在已绑任务时随卡片提供；这里只带 running 摘要引导认捡起/新建。
+    // 卡片按需由 list_group_experts 取（hub 模式可能很多，不塞进 prompt）；这里只带 running 摘要。
     const running = describeTasks(listTasksIn('running'))
     const lines: string[] = ['——本群任务板（specs/12）——']
     if (running.length === 0) {
@@ -127,6 +128,30 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
     }
     void live
     return { text: lines.join('\n'), variables: {} }
+  }
+
+  /**
+   * 本轮群成员快照（供 open_task 新建时写进任务文件）。
+   * 开关 `use_hub_experts=true`（默认）：中枢全集；否则问本通道 `listGroupAgents`。
+   * 两种都按 agents.json 过滤幽灵成员、去掉调用方自己（specs/12 §专家清单来源）。
+   */
+  function groupSnapshotFor(providerId: string, sessionParts: Record<string, string>, selfAgentId: string): GroupMember[] {
+    const cfgMap = new Map(listAgentConfigs().map((a) => [a.id, a]))
+    if (loadConfig().use_hub_experts !== false) {
+      return listAgentConfigs()
+        .filter((a) => a.id !== selfAgentId)
+        .map((a) => ({ agentId: a.id, name: a.name, description: a.description }))
+    }
+    const provider = providers.get(providerId)
+    const listed = provider?.listGroupAgents?.(sessionParts) ?? []
+    const out: GroupMember[] = []
+    for (const m of listed) {
+      if (m.agentId === '' || m.agentId === selfAgentId) continue
+      const cfg = cfgMap.get(m.agentId)
+      if (cfg === undefined) continue // 不在 agents.json：幽灵成员，丢掉
+      out.push({ agentId: m.agentId, name: cfg.name, description: cfg.description })
+    }
+    return out
   }
 
   // 看板工具挂载：每个 agent 会话 setup 时 scoped 注册。identity 从运行时会话映射解析。
@@ -215,6 +240,15 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         const values = variableValues(req, current.sessionKey)
         // 入站包装（specs/12 §入站怎么绑任务）：附本群 running 短摘要，让 LLM 认捡起/新建。
         const boardCtx = boardContextFor(live)
+        // 入站上下文（specs/12 §入站怎么绑任务）：记下 sender/providerId/群快照，
+        // 供本轮模型调 open_task 新建任务时取用（工具作用域里本来没有这些）。
+        rememberInbound(decision.sessionId, {
+          sender: req.meta.sender,
+          providerId: req.meta.providerId,
+          sessionParts: req.meta.sessionParts,
+          originContext: req.context,
+          groupSnapshot: groupSnapshotFor(req.meta.providerId, req.meta.sessionParts, live.id),
+        })
         const promptTextForAgent = live.prompt_placement === 'user' ? '' : promptText
         const agent = await runtime.ensureAgent({
           sessionId: decision.sessionId,

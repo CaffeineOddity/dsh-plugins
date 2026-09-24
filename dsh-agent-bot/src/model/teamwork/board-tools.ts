@@ -23,10 +23,13 @@ import {
   describeTasks,
   isTaskId,
   marshalTaskYaml,
+  createTask,
+  taskFilePath,
   type Access,
   type TaskBoard,
   type AssigneeStatus,
 } from './task-board.js'
+import { inboundFor } from './inbound.js'
 
 /** 调用方 agent 身份解析。sessionId → { agentId, agentName }。 */
 export interface AgentIdentity {
@@ -52,6 +55,11 @@ export interface ExpertCard {
 /** 群快照（由 Provider 在派发 / 入站时发现；任务创建时缓存一份写进 frontmatter）。 */
 export interface GroupSnapshotInput {
   members: Array<{ agentId: string; name: string; description: string }>
+}
+
+/** 路线 b：中枢全集成员投影（agents.json），不带技能（技能由 buildExpertCards 补齐）。 */
+export function hubMembers(): Array<{ agentId: string; name: string; description: string }> {
+  return listAgentConfigs().map((a) => ({ agentId: a.id, name: a.name, description: a.description }))
 }
 
 /** 组装专家卡片（从 agents.json + skills-map 补齐 description / skills）。 */
@@ -228,12 +236,21 @@ export function registerBoardTools(ctx: {
         },
         async execute(_args, exec) {
           const who = caller(exec.agent?.id)
-          const got = getBoundTask(who.sessionId)
-          if (got === undefined) {
-            return { text: '未绑定任务，暂无本群专家清单' }
+          const useHub = loadConfig().use_hub_experts !== false
+          let members: Array<{ agentId: string; name: string; description: string }>
+          if (useHub) {
+            members = hubMembers()
+          } else {
+            const got = getBoundTask(who.sessionId)
+            if (got === undefined) {
+              return { text: '未绑定任务，暂无本群专家清单' }
+            }
+            members = got.task.groupSnapshot
           }
-          const cards = buildExpertCards(got.task.groupSnapshot)
-          const runningIds = runningExpertIds(got.task.groupSnapshot)
+          // 两种来源都不含调用方自己（派活给自己无意义）
+          members = members.filter((m) => m.agentId !== who.agentId)
+          const cards = buildExpertCards(members)
+          const runningIds = runningExpertIds(members)
           const lines: string[] = []
           for (const c of cards) {
             const parts = [`- ${c.name} (${c.agentId})`]
@@ -249,7 +266,7 @@ export function registerBoardTools(ctx: {
             if (runningIds.includes(c.agentId)) parts.push('(运行中)')
             lines.push(parts.join('；'))
           }
-          return { text: lines.join('\n') || '（群快照为空）' }
+          return { text: lines.join('\n') || (useHub ? '（中枢没有其它 agent，自己答）' : '（群快照为空，自己答）') }
         },
       }),
     ),
@@ -279,9 +296,11 @@ export function registerBoardTools(ctx: {
     tools.register(
       defineTool({
         name: 'open_task',
-        description: '打开一份任务：有 taskId 则绑定那份（必须是本群 running），无则新建并绑定。',
+        description: '打开一份任务：有 taskId 则绑定那份（必须是本群 running），无则新建并绑定（本 agent 成为 taskLead）。',
         parameters: {
           taskId: { type: 'string', description: '要绑定的任务 id（task_xxx）。缺省新建。' },
+          access: { type: 'string', description: '新建时的访问级别：read 或 write（缺省 write）' },
+          target: { type: 'string', description: '新建时的目标目录（绝对路径；write 产出写这里）' },
         },
         output: {
           schema: { type: 'object', additionalProperties: false, properties: { taskId: { type: 'string', required: true }, text: { type: 'string', required: true } } },
@@ -308,7 +327,29 @@ export function registerBoardTools(ctx: {
             if (task !== undefined) return { taskId: existing, text: `已绑定任务 ${existing}，无需新建` }
             bindIfAbsent(who.sessionId, existing)
           }
-          throw new Error('agent-bot: 新建任务需要 sender / providerId / 群快照，当前上下文未提供')
+          const inbound = inboundFor(who.sessionId)
+          if (inbound === undefined) {
+            throw new Error('agent-bot: 新建任务只在入站回合可用（缺 sender / providerId / 群快照）；中继回合请带 taskId 捡起已存在的任务')
+          }
+          const access = args.access === undefined ? 'write' : args.access
+          if (access !== 'read' && access !== 'write') throw new Error('agent-bot: access 只能是 read 或 write')
+          const rawTarget = args.target === undefined ? '' : expandHomePath(args.target.trim())
+          if (rawTarget !== '' && !rawTarget.startsWith('/')) throw new Error('agent-bot: target 必须是绝对路径')
+          const task = createTask({
+            taskLead: who.agentId,
+            sender: inbound.sender,
+            providerId: inbound.providerId,
+            sessionParts: inbound.sessionParts,
+            originContext: inbound.originContext,
+            access,
+            target: rawTarget === '' ? undefined : rawTarget,
+            groupSnapshot: inbound.groupSnapshot,
+          })
+          bindSession(who.sessionId, task.taskId)
+          return {
+            taskId: task.taskId,
+            text: `已新建任务 ${task.taskId}（taskLead=${who.agentName}，access=${task.access}）\n文件：${taskFilePath('running', task.taskId)}\n接下来可按 list_group_experts 的卡片 dispatch_expert，或直接自己做。`,
+          }
         },
       }),
     ),
@@ -380,14 +421,21 @@ export function registerBoardTools(ctx: {
         },
         async execute(args, exec) {
           const { task, agentId, agentName } = bound(exec.agent?.id)
-          const snapshot = task.groupSnapshot.find((m) => m.agentId === args.expert_id)
-          if (snapshot === undefined) {
-            throw new Error(`agent-bot: 专家 ${args.expert_id} 不在本任务快照内（见 list_group_experts）`)
-          }
           if (args.expert_id === agentId) throw new Error('agent-bot: 不能派活给自己')
           if (args.access !== 'read' && args.access !== 'write') throw new Error('agent-bot: access 只能是 read 或 write')
           const expertCfg = getAgentConfig(args.expert_id)
           if (expertCfg === undefined) throw new Error(`agent-bot: 未知 agent ${args.expert_id}`)
+          const useHub = loadConfig().use_hub_experts !== false
+          let expertName: string
+          if (useHub) {
+            expertName = expertCfg.name
+          } else {
+            const snapshot = task.groupSnapshot.find((m) => m.agentId === args.expert_id)
+            if (snapshot === undefined) {
+              throw new Error(`agent-bot: 专家 ${args.expert_id} 不在本任务快照内（见 list_group_experts）`)
+            }
+            expertName = snapshot.name
+          }
           const target = resolveTargetWorkspace(expertCfg, args.target_workspace)
           if (!target.ok) throw new Error(`agent-bot: ${target.reason}`)
 
@@ -396,7 +444,7 @@ export function registerBoardTools(ctx: {
           const sessionId = relay.resolveSession(expertCfg, task.taskId, args.expert_id, args.session === 'new' ? 'new' : 'reuse', Date.now())
           upsertAssignee(task, {
             agentId: args.expert_id,
-            name: snapshot.name,
+            name: expertName,
             sessionId,
             dispatchedBy: agentId,
             dispatchedByName: agentName,
@@ -407,7 +455,7 @@ export function registerBoardTools(ctx: {
           writeTask('running', task)
 
           if (args.wake === false) {
-            return { kind: 'waiting', sessionId, text: `已把 ${snapshot.name} 记为待命（wake=false），未叫醒` }
+            return { kind: 'waiting', sessionId, text: `已把 ${expertName} 记为待命（wake=false），未叫醒` }
           }
           const mdText = marshalText(task)
           await relay.startTurn({
@@ -424,7 +472,7 @@ export function registerBoardTools(ctx: {
             permissionMode: expertCfg.permission_mode,
             targetWorkspace: target.path !== '' ? target.path : undefined,
           })
-          return { kind: 'running', sessionId, text: `已派给 ${snapshot.name}，正在处理` }
+          return { kind: 'running', sessionId, text: `已派给 ${expertName}，正在处理` }
         },
       }),
     ),

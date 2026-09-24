@@ -43,6 +43,7 @@ beforeEach(() => {
     skill_apply: {},
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
     agent_wait_timeout_ms: 180000,
   })
 })
@@ -111,6 +112,7 @@ describe('prepareAsk 校验', () => {
       skill_apply: {},
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
       agent_wait_timeout_ms: 180000,
     })
     expect(() => prepareAsk(req({ agentId: 'a2' }), providers)).toThrow(/workspace 不存在/)
@@ -124,6 +126,7 @@ describe('prepareAsk 校验', () => {
       skill_apply: {},
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
       agent_wait_timeout_ms: 180000,
     })
     expect(() => prepareAsk(req({ agentId: 'a3' }), providers)).toThrow(/workspace 不是目录/)
@@ -162,6 +165,7 @@ describe('prepareAsk sessionKey', () => {
       skill_apply: {},
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
       agent_wait_timeout_ms: 180000,
     })
     expect(prepareAsk(req(), providers).sessionKey).toBe('r1_6031348_alice')
@@ -274,6 +278,7 @@ describe('resolveSessionReuse', () => {
       skill_apply: {},
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
       agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({
@@ -301,6 +306,7 @@ describe('resolveSessionReuse', () => {
       skill_apply: {},
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
       agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({
@@ -329,6 +335,7 @@ describe('resolveSessionReuse', () => {
       skill_apply: {},
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
       agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({
@@ -357,6 +364,7 @@ describe('resolveSessionReuse', () => {
       skill_apply: {},
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
       agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({
@@ -390,6 +398,7 @@ describe('resolveSessionReuse', () => {
       skill_apply: {},
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
       agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({

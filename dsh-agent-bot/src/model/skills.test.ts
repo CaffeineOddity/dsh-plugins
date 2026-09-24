@@ -52,6 +52,7 @@ function emptyCfg(overrides: Partial<AgentBotFileConfig> = {}): AgentBotFileConf
     agent_wait_timeout_ms: 180000,
     expert_liveness_max_renew: 3,
     task_round_timeout_ms: 7200000,
+    use_hub_experts: true,
     ...overrides,
   }
 }

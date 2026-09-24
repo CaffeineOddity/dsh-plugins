@@ -27,6 +27,9 @@ export const DEFAULT_EXPERT_LIVENESS_MAX_RENEW = 3
 /** 任务墙钟默认值（毫秒，2h）。 */
 export const DEFAULT_TASK_ROUND_TIMEOUT_MS = 7_200_000
 
+/** 专家清单来源默认值：true=中枢全集（路线 b），false=群快照（Provider 投影）。 */
+export const DEFAULT_USE_HUB_EXPERTS = true
+
 /** 空闲超时默认值（分钟）。 */
 export const DEFAULT_SESSION_TIMEOUT_MINUTES = 30
 
@@ -133,6 +136,8 @@ export interface AgentBotFileConfig {
   agent_wait_timeout_ms: number
   expert_liveness_max_renew: number
   task_round_timeout_ms: number
+  /** 专家清单来源：true=中枢全集（路线 b）；false=群快照（Provider listGroupAgents）。 */
+  use_hub_experts: boolean
 }
 
 /** 扫描产物 skills-map.json；不进 config.json。 */
@@ -202,6 +207,7 @@ function defaultConfig(): AgentBotFileConfig {
     agent_wait_timeout_ms: DEFAULT_AGENT_WAIT_TIMEOUT_MS,
     expert_liveness_max_renew: DEFAULT_EXPERT_LIVENESS_MAX_RENEW,
     task_round_timeout_ms: DEFAULT_TASK_ROUND_TIMEOUT_MS,
+    use_hub_experts: DEFAULT_USE_HUB_EXPERTS,
   }
 }
 
@@ -256,6 +262,7 @@ export function loadConfig(): AgentBotFileConfig {
     agent_wait_timeout_ms: core.agent_wait_timeout_ms,
     expert_liveness_max_renew: core.expert_liveness_max_renew,
     task_round_timeout_ms: core.task_round_timeout_ms,
+    use_hub_experts: core.use_hub_experts,
     skill_groups: existsSync(groupsPath) ? readJsonFile(groupsPath) : core.skill_groups,
     prompts: existsSync(promptsPath) ? readJsonFile(promptsPath) : core.prompts,
     agents: existsSync(agentsPath) ? readJsonFile(agentsPath) : core.agents,
@@ -275,6 +282,7 @@ export function saveConfig(data: AgentBotFileConfig): void {
     agent_wait_timeout_ms: normalized.agent_wait_timeout_ms,
     expert_liveness_max_renew: normalized.expert_liveness_max_renew,
     task_round_timeout_ms: normalized.task_round_timeout_ms,
+    use_hub_experts: normalized.use_hub_experts,
   })
   writeJsonFile(skillGroupsFilePath(), normalized.skill_groups)
   writeJsonFile(promptsFilePath(), normalized.prompts)
@@ -361,6 +369,12 @@ export function parseTaskRoundTimeoutMs(raw: unknown): number {
   return raw
 }
 
+/** 专家清单来源：布尔；缺省/非法回退 true（中枢全集）。 */
+export function parseUseHubExperts(raw: unknown): boolean {
+  if (typeof raw !== 'boolean') return DEFAULT_USE_HUB_EXPERTS
+  return raw
+}
+
 /** 将运行时结构规范化到 AgentBotFileConfig（补默认值、忽略无关字段）。 */
 export function normalize(raw: unknown): AgentBotFileConfig {
   const d = defaultConfig()
@@ -375,6 +389,7 @@ export function normalize(raw: unknown): AgentBotFileConfig {
     agent_wait_timeout_ms: parseAgentWaitTimeoutMs(o.agent_wait_timeout_ms) ?? d.agent_wait_timeout_ms,
     expert_liveness_max_renew: parseExpertLivenessMaxRenew(o.expert_liveness_max_renew),
     task_round_timeout_ms: parseTaskRoundTimeoutMs(o.task_round_timeout_ms),
+    use_hub_experts: parseUseHubExperts(o.use_hub_experts),
   }
 }
 

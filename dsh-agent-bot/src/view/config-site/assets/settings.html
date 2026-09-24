@@ -52,6 +52,11 @@
           <span class="hint" style="margin:0">正整数毫秒，默认 7200000（2 小时），禁止 0 表示永不超时</span>
         </div>
         <p class="hint">墙钟从任务创建／问卷发出起算，到点收口「处理超时」或只作废待决。</p>
+        <div class="row">
+          <label>专家清单来源</label>
+          <label class="checkbox-row" style="margin:0"><input type="checkbox" id="st-hub-experts"/> 中枢全集（开 = 所有 agent 可被看到/派活；关 = 本群 Provider listGroupAgents）</label>
+        </div>
+        <p class="hint">默认开启。开启走「中枢全集」路线（不依赖群快照，没绑任务也能列）；关闭走「本群快照」路线。</p>
         <button type="button" id="st-save" class="primary">保存</button>
       </div>
     </section>
@@ -64,6 +69,7 @@ async function loadSettings() {
     $('st-timeout').value = String(r.value.agent_wait_timeout_ms ?? 180000)
     $('st-renew').value = String(r.value.expert_liveness_max_renew ?? 3)
     $('st-round').value = String(r.value.task_round_timeout_ms ?? 7200000)
+    $('st-hub-experts').checked = r.value.use_hub_experts !== false
     if (r.value.configDir) setText('st-configDir', r.value.configDir)
     if (Array.isArray(r.value.providers)) {
       setText('st-providers', r.value.providers.length === 0
@@ -77,6 +83,7 @@ $('st-save').onclick = async () => {
     agent_wait_timeout_ms: $('st-timeout').value.trim(),
     expert_liveness_max_renew: $('st-renew').value.trim(),
     task_round_timeout_ms: $('st-round').value.trim(),
+    use_hub_experts: $('st-hub-experts').checked,
   })
   setMsg(r.ok ? '✅ 已保存' : '❌ ' + (r.error || '保存失败'), !r.ok)
   if (r.ok) loadSettings()

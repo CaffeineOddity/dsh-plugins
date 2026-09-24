@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { resetConfigCache } from '../config.js'
+import { resetConfigCache, loadConfig } from '../config.js'
 import {
   marshalTaskYaml,
   unmarshalTask,
@@ -15,6 +15,8 @@ import {
   listTasksIn,
   isTaskId,
   describeTasks,
+  createTask,
+  taskFilePath,
   type TaskBoard,
 } from './task-board.js'
 
@@ -139,5 +141,80 @@ describe('isTaskId', () => {
     expect(isTaskId('task_a-1_x')).toBe(true)
     expect(isTaskId('abc')).toBe(false)
     expect(isTaskId('')).toBe(false)
+  })
+})
+
+describe('createTask（新建任务落 running/）', () => {
+  it('生成合法 taskId、写 running/、算 deadlineAt、留群快照', () => {
+    const before = Date.now()
+    const t = createTask({
+      taskLead: 'a1',
+      sender: 'alice',
+      providerId: 'demo',
+      sessionParts: { bot_id: 'r1', group_id: 'g9' },
+      originContext: '@A 出一张海报',
+      access: 'write',
+      target: '/tmp/proj',
+      groupSnapshot: [{ agentId: 'b1', name: 'B', description: '' }],
+      roundTimeoutMs: 60_000,
+    })
+    expect(isTaskId(t.taskId)).toBe(true)
+    expect(t.taskLead).toBe('a1')
+    expect(t.access).toBe('write')
+    expect(t.assignees).toEqual([])
+    expect(t.groupSnapshot).toEqual([{ agentId: 'b1', name: 'B', description: '' }])
+    expect(t.deadlineAt - t.createdAt).toBe(60_000)
+    expect(t.createdAt).toBeGreaterThanOrEqual(before)
+    // 真落盘在 running/
+    const back = readTask('running', t.taskId)
+    expect(back?.taskId).toBe(t.taskId)
+    expect(back?.originContext).toBe('@A 出一张海报')
+    expect(taskFilePath('running', t.taskId)).toBe(join(dir, 'jobs', 'running', `${t.taskId}.md`))
+  })
+
+  it('同一毫秒连续新建不撞号', () => {
+    const now = 1_700_000_000_000
+    const a = createTask({ taskLead: 'a1', sender: 's', providerId: 'p', sessionParts: { x: '1' }, originContext: 'c', access: 'read', groupSnapshot: [], nowMs: now })
+    const b = createTask({ taskLead: 'a1', sender: 's', providerId: 'p', sessionParts: { x: '1' }, originContext: 'c', access: 'read', groupSnapshot: [], nowMs: now })
+    expect(a.taskId).not.toBe(b.taskId)
+    expect(readTask('running', b.taskId)).toBeDefined()
+  })
+
+  it('target 空串不写字段；缺 roundTimeoutMs 用全局', () => {
+    const t = createTask({
+      taskLead: 'a1', sender: 's', providerId: 'p',
+      sessionParts: { x: '1' }, originContext: 'c', access: 'read',
+      target: '', groupSnapshot: [],
+    })
+    expect(t.target).toBeUndefined()
+    expect(t.deadlineAt - t.createdAt).toBe(loadConfig().task_round_timeout_ms)
+  })
+})
+
+describe('YAML 往返：纯数字字符串字段不被写成 number', () => {
+  it('sessionParts / sender 是纯数字也要原样读回', () => {
+    const t = createTask({
+      taskLead: 'a1',
+      sender: '6031348',                                  // 数字用户 id
+      providerId: 'demo',
+      sessionParts: { bot_id: 'r1', group_id: '6031348' }, // 数字群 id
+      originContext: '@A 出一张海报',
+      access: 'write',
+      groupSnapshot: [],
+    })
+    const back = readTask('running', t.taskId)
+    expect(back?.sender).toBe('6031348')
+    expect(back?.sessionParts).toEqual({ bot_id: 'r1', group_id: '6031348' })
+  })
+
+  it('true / 空串 / 带空格的值也能往返', () => {
+    const t = createTask({
+      taskLead: 'a1', sender: 'true', providerId: 'demo',
+      sessionParts: { a: 'true', b: 'null', c: 'x y' },
+      originContext: 'c', access: 'read', groupSnapshot: [],
+    })
+    const back = readTask('running', t.taskId)
+    expect(back?.sender).toBe('true')
+    expect(back?.sessionParts).toEqual({ a: 'true', b: 'null', c: 'x y' })
   })
 })

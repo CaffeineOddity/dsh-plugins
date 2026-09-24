@@ -1,8 +1,9 @@
 # 12. 群内专家协作（task board）
 
 > **实现进度（SDD 标记）**：任务板模型（`task-board.ts`）、会话绑定（`binding.ts`）、中继（`relay.ts`）、六件看板工具（`board-tools.ts`）、巡检器（`patrol.ts` 含活性探针/超时/重启）、service 接线（toolsMount 挂载 + deliver 路由 + 入站 running 摘要包装）均已实现。测试见各 `*.test.ts`。
-> 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、墙钟超时、待决作废、deliver @sender 收口、重启按 `jobs/running/` 恢复。
-> 未做（见 §边界与不做项）：dsh-`user-questions/request` waterfall 拦截（本插件包无法导入 `dsh-user-questions`）；进程级 `listGroupAgents` 已接入、缺则回退到「同组卡片缺失，自己答」。
+> 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、墙钟超时、待决作废、deliver @sender 收口、重启按 `jobs/running/` 恢复；全局开关 `use_hub_experts`（默认 true=中枢全集）；`open_task` 新建任务（入站上下文提供 sender/providerId/群快照）；派发时 fiber 绑定协作槽 + prompt 带任务文件绝对路径；任务进 `done/` 时解绑。
+> 未做：dsh-`user-questions/request` waterfall 拦截（本插件包无法导入 `dsh-user-questions`），`ask_task_lead` 仅 tools 实现，真实问卷走 Web answerer。
+> 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）。
 
 ## 背景与目标
 
@@ -53,7 +54,20 @@ Alice 的任务与 Bob 的任务各一份 md（`sender` 不同），互不取消
 
 不设 `is_lead` / `delegate_reuse_session`。`session_by_sender` **不强制**：通道会话仍按该 agent 自己的开关。任务隔离靠 md 的 `sender`，不靠专职 lead。协作群建议打开按人隔离，避免 Alice / Bob 共用任务 lead 的对话记忆导致捡单串台。
 
-不存 `children`、不存群 ID。群里有哪些专家由 Provider 按本轮 `sessionParts` 发现。
+不存 `children`、不存群 ID。
+
+### 专家清单来源（全局开关 `use_hub_experts`，默认 `true`）
+
+`config.json` 全局字段 `use_hub_experts`（布尔，默认 `true`）决定 `list_group_experts` / `dispatch_expert` 的专家清单来源：
+
+| 值 | 来源 | 语义 |
+|---|---|---|
+| `true`（默认） | `agents.json` 全集 | 路线 b：中枢里所有 agent 都可被看到 / 派活，不看群快照。即使没绑任务，`list_group_experts` 也能列全集 + 技能卡片 |
+| `false` | 群快照（Provider `listGroupAgents` 的投影） | 路线 a：专家 = 本任务 frontmatter 缓存的群快照，不含群外 agent；没绑任务时清单为空 |
+
+- 列表 / 派发都按开关即时读配置（`loadConfig()` 有缓存语义），保存后下次调用工具即生效。
+- 两种来源最终都用 `agents.json` + `skills-map.json` 补齐 `name` / `description` / 技能；不在 `agents.json` 的 id 仍丢掉。
+- `dispatch_expert` 的目标校验跟着开关走：`true` 时目标必须在 `agents.json` 全集且不能是自己；`false` 时目标必须在本任务群快照内且不能是自己。
 
 ## Provider 协议
 
@@ -146,9 +160,9 @@ pendingHuman:                 # 无则省略
 
 | 工具 | schema | 行为 |
 |---|---|---|
-| `list_group_experts` | 无参 | 本任务快照的能力卡片 `experts[]`，以及 `running_experts[]`：本群卡片里此刻有未 idle 会话的专家（通道槽或任务槽都算）。跨群只给 `{ expertId, source }`，不带别人的 taskId |
+| `list_group_experts` | 无参 | 专家能力卡片（含 name / description / 技能），以及此刻未 idle 的专家（通道槽或任务槽都算）。来源随全局开关 `use_hub_experts`：开=`agents.json` 全集（没绑任务也能列）；关=本任务缓存的群快照。都不含调用方自己 |
 | `list_tasks` | 无参 | 本群、本 Provider 下 `running/` 全部任务的短摘要（`taskId, taskLead, sender, access, summary, assignees, pendingHuman?`）。入站包装会带同样一份，工具供中途再查 |
-| `open_task` | `{ taskId? }` | 有 `taskId`：绑那份（必须是本群 running）。无：新建并绑。未 open / 未因入站绑上就 `dispatch_expert`：工具报错 |
+| `open_task` | `{ taskId?, access?, target? }` | 有 `taskId`：绑那份（必须是本群 running）。无：**新建并绑**（本 agent = taskLead；`access` 缺省 `write`，`target` 可空），sender / providerId / sessionParts / 群快照取自入站上下文。未 open / 未因入站绑上就 `dispatch_expert`：工具报错 |
 | `update_task` | `{ markdown?, access?, target?, summary? }` | 改本轮已绑任务的正文或允许字段。改不了 `taskLead` / `sender` |
 | `dispatch_expert` | `{ expert_id, instruction, access, session?, title?, target_workspace?, wake? }` | 启动专家，尽快返回 `{ kind: 'running', sessionId }`，**不等** idle。`access` 必填。目标必须在本任务快照内且不是自己。运行时据快照 / `AgentConfig` 填 `expertName` / `dispatchedByName` 写入 `assignees[]`。缺合法 `target_workspace` 见下 |
 | `ask_task_lead` | `{ questions }` | **仅当本 agent 不是 taskLead。** 写入 md 待决，拒绝在瀑布里干等，叫醒 `taskLead`。taskLead 自己调：工具报错（应走 `ask_user_question`） |
@@ -177,12 +191,26 @@ pendingHuman:                 # 无则省略
 
 入站 **不**在 followup 前绑文件。包装 prompt 带上本群 running 短摘要（含待决题）。模型调 `open_task` / `dispatch_expert` / 改待决 才绑。
 
+入站时把本轮的 **sender / providerId / sessionParts / 群成员快照** 记进「入站上下文」（按 sessionId 存内存），供本轮里的 `open_task` 新建时取用——工具作用域里本来没有这些。
+
+LLM 拿到的判据就三样：running 摘要、自己的技能、专家卡片。决策：
+
+| 判断 | 动作 |
+|---|---|
+| 这条消息属于正在做的那一单 | 捡起：`open_task(taskId)` 绑上，**复用该单的会话**继续（通道槽 `reuse_session` 不强制重开） |
+| 不是已有单，但自己的技能能做 | 直接做，不建文件（普通 `settleAskRound`） |
+| 不是已有单，自己也做不了 | `open_task` 无 id → **新建** `running/task_{id}.md`（本 agent = taskLead），再按卡片 `dispatch_expert` 或 `ask_user_question` |
+
+新建的 `groupSnapshot` 来源随全局开关 `use_hub_experts`：开=`agents.json` 全集；关=本轮 `listGroupAgents` 投影。两种都按 `agents.json` 过滤幽灵成员、去掉调用方自己。
+
 | 谁发起 | 绑哪份 | 群快照 |
 |---|---|---|
 | 人 @ 某专家（不论像不像答问卷） | LLM 捡起 → 那份；`open_task` 无 id → 新建（本 agent = taskLead）。只自己答完、没派、没问人：不建文件，走普通单 agent `settleAskRound` | 新建本轮扫一份；捡起用文件里缓存的 |
-| 中继叫醒（内部 followup） | 文件里那份 | 该文件已缓存的 |
+| 中继叫醒（内部 followup） | 文件里那份（派发时已 fiber 绑定） | 该文件已缓存的 |
 
 内部 followup 必须带 `taskId`（fiber 绑定，不是让模型填）。A 的派发只写入 A 那份；B 再派 C 仍写入 **同一份**。
+
+`open_task` 无 id 且当前不是入站回合（没有入站上下文，如中继内部 followup）→ 显式报错，让它带 `taskId` 捡起。
 
 入站 turn 结束时文件必须在 `running/`，当且仅当：本轮成功 `dispatch_expert`，**或** 本 agent 作为 taskLead 调了 `ask_user_question`（允许 `assignees=[]`）。只自己答完：不写文件。
 
@@ -207,7 +235,9 @@ pendingHuman:                 # 无则省略
 
 内部驱动把本轮 IM meta 只读注入专家 prompt 变量（`sender` / `provider_id` / `sessionParts` 各键）。另注入 `{{target_workspace}}`（未传则为 `-`）。
 
-包装 followup：你是被派做共享任务板上的一单，不是在对群友说话；本任务 `access` 见 md；缺信息调 `ask_task_lead`（你不是 taskLead）或把问题写进结果后收口；不要只在正文里提问。然后才是派发方的 `instruction`。把 **该 md 全文**（frontmatter + 正文）一并注入。
+包装 followup：你是被派做共享任务板上的一单，不是在对群友说话；本任务 `access` 见 md；缺信息调 `ask_task_lead`（你不是 taskLead）或把问题写进结果后收口；不要只在正文里提问。然后才是派发方的 `instruction`。把 **该 md 全文**（frontmatter + 正文）一并注入，**并给出该任务文件的绝对路径**（`{configDir}/jobs/running/{taskId}.md`），让专家可以随时自己重读最新版本。
+
+**派发时 fiber 绑定**：`startTurn` 在解析出协作槽 sessionId 后，把它绑到本 `taskId`（`binding`）。被派专家因此不必自己填 `taskId`——它一进来就「已经在做这一单」，`update_task` / `ask_task_lead` / 再 `dispatch_expert` 直接可用。任务移入 `done/` 时解绑。
 
 专家 `cwd` = 该专家 `workspace`，**永不**改成目标项目。
 
@@ -262,7 +292,7 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 
 | 事件 | 动作 |
 |---|---|
-| 某 assignee 终态且 `wake=true`、非 `need_decision` | **先**内部 followup 叫醒 `dispatchedBy`（可合并同一被叫醒方的多路刚终态）。禁止抢先让任务 lead 综合。这轮后又派 → 文件保持 running；问人 → `pendingHuman`；既没再派也无待决 → 若还有上游，再叫醒上游；若被叫醒的就是 taskLead 且专家已齐 → 综合 |
+| 某 assignee 终态且 `wake=true`、非 `need_decision` | **先**内部 followup 叫醒 `dispatchedBy`（可合并同一被叫醒方的多路刚终态）。禁止抢先让任务 lead 综合。这轮后又派 → 文件保持 running；问人 → `pendingHuman`；既没再派也无待决 → 若还有上游，再叫醒上游；若被叫醒的就是 taskLead 且专家已齐 → 综合。**该 assignee 自己还有未终态的下游**（它派出去的人仍 `running`/`waiting`/`need_decision`）时不算「终态」，本轮不叫醒它的 `dispatchedBy`——否则上级会被提前叫醒、赶在下游出结果前答复 |
 | 全部 assignee 终态、无 `pendingHuman`、无未消费 wake | 内部 followup **taskLead**（带 md 全文）。这轮又 `dispatch_expert`：当真启动，保持 running，这轮不 `deliver`。没再派、没问人 → idle 后 `deliver` @sender → 移到 `done/` |
 | 被派专家 `ask_user_question` / `ask_task_lead` | 只交给巡检器：写入 md，叫醒 taskLead。该专家即使 `wake=true` 也只走本行，wake 留着 |
 | 入站里 taskLead 自己 `ask_user_question` | 本轮 `messages` 带回问卷；写 `pendingHuman`。不经 `deliver` |
@@ -274,6 +304,19 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 `deliver({ sessionParts, messages })` 与 ask 出站同形；@ sender 写在 `atUserIds`。通道 markdown 若不吃 AT，正文同时写 `@name`。通道：`bot_id` 查 webhook（**按 robot.id**），`group_id` 当 toid。缺 `deliver`：只打日志。
 
 `deliver` **不走** 入站 FIFO。叫醒 / 综合的内部 followup 走该专家当时记下的 `sessionId`；**任务 lead 的综合 / 入站** 共用 `(taskLead, 通道 sessionKey)` FIFO：B 的派发 turn 进行中，A 的综合等 A 那路 idle。Alice 与 Bob 若 `session_by_sender=true` 则两路 session，互不占队列。
+
+### 叫醒谁、用哪条会话、叫几次
+
+「走该专家当时记下的 `sessionId`」的取法（**必须是 sessionId，不是槽 key**）：
+
+| 被叫醒方 | 用哪条会话 |
+|---|---|
+| 被派专家（在这份 md 的 `assignees[]` 里） | **协作槽**会话 = `assignees[].sessionId`。纯被派、从没被人直 @ 过的中间层也照样叫得醒 |
+| taskLead（人 @ 进来的） | 用本任务记的 `providerId` + `sessionParts`（`session_by_sender=true` 时再加 `sender`）反推出**通道槽 key**，再取该槽的 `sessionId`。禁止「随便取第一条非协作槽」——一个 agent 可能在多个群 / 多条按人会话，会叫错群、叫错人 |
+
+去重：巡检每轮（缺省 200ms）都会扫同一份文件，**必须有「已叫醒」记忆**，否则会对同一个被叫醒方反复灌 followup。判定用「被叫醒方相关的完成情况指纹」（它那几路下游/全部 assignee 的 `expertId:status` 集合）；指纹没变就不再叫，变了才叫。指纹存**内存**：进程重启后按 §重启 补叫一次，正是想要的恢复行为。
+
+多级链（A → B → C）：C 终态 → 按协作槽叫醒 B；B 收口后再终态 → 按通道槽叫醒 A（taskLead）；A 综合后 `deliver`。中间层不需要是人 @ 过的。
 
 ### 重启
 
@@ -394,7 +437,7 @@ DSH waterfall `user-questions/request`（agent-scoped）。Web GUI 是现成 ans
 - `@A` 入站带 running 摘要。未 `open_task` / 未捡起就 `dispatch_expert` 报错。
 - 直 @ 不强制发现；清单空则自己答，不报错。taskLead 入站问人：本轮 messages，落 0 专家 running 文件。
 - 卡片含 name / description / 技能；不注入专家 system prompt。`running_experts` 按 agent 自身未 idle 会话。
-- 清单来自 Provider 配置投影，不是 `agents.json` 全集，不含调用方自己。
+- 清单来源全局开关 `use_hub_experts`（默认 `true`）：`true` 时来自 `agents.json` 全集（路线 b，没绑任务也能列）；`false` 时来自本任务群快照（Provider 投影）。两种来源都不含调用方自己，且都按 `agents.json`+`skills-map` 补描述 / 技能。
 - `dispatch_expert` 成功返回 `{ kind: 'running', sessionId }`，不等 idle。再派写入 **同一份 md**，不改 `taskLead`。`assignees[]` 含 `expertName` / `dispatchedByName`（派发时从快照解析）。做完叫醒 `dispatchedBy`，最后才叫醒 taskLead 综合。
 - 同一目标 `write` 执行 FIFO；`read` 并行。占着仍可派。
 - 派发 turn `pending=null`，出站运行时模板「已接」，不采用助手长文本。缺 `deliver` 只打日志。

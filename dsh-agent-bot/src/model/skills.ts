@@ -225,6 +225,7 @@ export function saveSkillRoots(skillRoots: string[]): void {
     agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
     expert_liveness_max_renew: cfg.expert_liveness_max_renew,
     task_round_timeout_ms: cfg.task_round_timeout_ms,
+    use_hub_experts: cfg.use_hub_experts,
   })
 }
 
@@ -419,6 +420,7 @@ function persistGroups(groups: Record<string, SkillGroupConfig>): void {
     agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
     expert_liveness_max_renew: cfg.expert_liveness_max_renew,
     task_round_timeout_ms: cfg.task_round_timeout_ms,
+    use_hub_experts: cfg.use_hub_experts,
   }
   saveConfig(next)
 }

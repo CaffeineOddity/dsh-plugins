@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { resetConfigCache } from '../config.js'
 import { createAgent as createAgentConfig, saveAgent, type AgentWrite } from '../agents.js'
-import { buildExpertCards, resolveTargetWorkspace, runningSummaries, type ExpertCard } from './board-tools.js'
+import { buildExpertCards, hubMembers, resolveTargetWorkspace, runningSummaries, type ExpertCard } from './board-tools.js'
 
 let dir: string
 let prevEnv: string | undefined
@@ -84,6 +84,18 @@ describe('buildExpertCards', () => {
     const alice = cards.find((c) => c.agentId === aliceId) as ExpertCard
     expect(alice.needs_target_workspace).toBe(true)
     expect(alice.workspaceCandidates?.some((w) => w.workspace === wsOf('Bob'))).toBe(true)
+  })
+})
+
+describe('hubMembers（路线 b：中枢全集来源）', () => {
+  it('列出 agents.json 全集，不经群快照；可被 buildExpertCards 补齐技能', () => {
+    const hub = hubMembers()
+    const ids = hub.map((m) => m.agentId).sort()
+    expect(ids).toEqual([bobId, aliceId].sort())
+    expect(hub.find((m) => m.agentId === bobId)?.name).toBe('Bob')
+    // 与群快照无关：全集里也有 Bob（即使没人把它放进群）
+    const cards = buildExpertCards(hub)
+    expect(cards.find((c) => c.agentId === bobId)?.skills?.[0].name).toBe('design.md')
   })
 })
 
