@@ -118,8 +118,40 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
   /** 交互动兜底入口（ask 结束后调用，定义见下）。 */
   let service_notifyIdle: (sessionId: string) => void = () => undefined
   const providers = new Map<string, StoredProvider>()
+  /**
+   * 本地收件箱：网页对话没有推送通道，patrol 的异步消息（问卷 / 进度 / 提醒）
+   * 按「哪次对话」存下来，由 chat 页轮询取走。key = 该轮 sessionParts 的对话标识。
+   */
+  const localInbox = new Map<string, AgentOutboundMessage[]>()
+  /** 单次对话最多滞留多少条（防止没人开页面时无限增长）。 */
+  const LOCAL_INBOX_MAX = 50
+  const localInboxKey = (parts: Record<string, string>): string => parts.session ?? parts.group_id ?? 'local'
   // 预置内置 local provider：不走 registerProvider（无 disposer、固定）。
-  providers.set(LOCAL_PROVIDER.id, { ...LOCAL_PROVIDER, token: Symbol('agent-bot:builtin-local') })
+  providers.set(LOCAL_PROVIDER.id, {
+    ...LOCAL_PROVIDER,
+    token: Symbol('agent-bot:builtin-local'),
+    // local 的 deliver：回给**发起这一单的那条 DSH 会话**（`/agent_xxx` 是在那条会话里敲的）。
+    // 会话还活着 → 直接往里推一条消息（和 delegateViaTool 同一条路）；不在线 → 落收件箱兜底。
+    deliver: async (req) => {
+      const key = localInboxKey(req.sessionParts)
+      const text = req.messages.map((m) => m.text).filter((t) => t !== '').join('\n\n')
+      const live = key === 'local' ? undefined : host.agents()?.get(key)
+      if (live !== undefined && text !== '') {
+        const agent = live as unknown as { followup(input: unknown): void }
+        agent.followup({
+          id: `agent-bot-local-${Date.now()}`,
+          role: 'user',
+          content: [{ type: 'text', text: `【agent-bot】${text}` }],
+          source: { kind: 'user' },
+        })
+        return
+      }
+      const list = localInbox.get(key) ?? []
+      list.push(...req.messages)
+      while (list.length > LOCAL_INBOX_MAX) list.shift()
+      localInbox.set(key, list)
+    },
+  })
   const queue = createAskQueue()
 
   /** 某 provider + sessionParts 的「对话」标识（板可见性用）。 */
@@ -145,6 +177,9 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
     const mine = { providerId, key: conversationKeyFor(providerId, sessionParts) }
     const tasks = filterByConversation(listTasksIn('running'), mine, conversationKeyFor)
       .filter((t) => t.sender === sender)
+      // local：可见性是"整台中枢一块板"，但**路由只续这条会话起过的单** ——
+      // 否则 sender 恒为 'local'，会让你在网页/会话里开个新话题也被吸进上一单。
+      .filter((t) => providerId !== 'local' || t.sessionParts.session === sessionParts.session)
       .sort((a, b) => b.createdAt - a.createdAt)
     const pending = tasks.filter((t) => t.pendingHuman !== undefined)
     if (pending.length > 0) {
@@ -254,6 +289,12 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
       const found = getAgentConfig(id)
       if (found === undefined) return undefined
       return toSummary(found)
+    },
+    drainLocalInbox(sessionKey: string): AgentOutboundMessage[] {
+      const key = sessionKey === '' ? 'local' : sessionKey
+      const list = localInbox.get(key) ?? []
+      localInbox.delete(key)
+      return list
     },
     providerDeliver,
     notifyAgentDisposed(sessionId: string): void {

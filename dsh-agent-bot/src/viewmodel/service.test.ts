@@ -65,6 +65,11 @@ function fakeHost(
   }
 }
 
+/** listProviders 的 id/label 投影（能力字段是可选的，不参与这些断言）。 */
+function summary(svc: { listProviders(): Array<{ id: string; label: string }> }): Array<{ id: string; label: string }> {
+  return svc.listProviders().map((p) => ({ id: p.id, label: p.label }))
+}
+
 function idleNow(): Promise<void> {
   return Promise.resolve()
 }
@@ -198,11 +203,11 @@ describe('registerProvider', () => {
     const svc = createAgentBotService(emptyHostServices())
     expect(() => svc.registerProvider({ id: '', label: 'x' })).toThrow(/非空 id/)
     const local = { id: 'local', label: '本地' }
-    expect(svc.listProviders()).toEqual([local])
+    expect(summary(svc)).toEqual([local])
     const dispose = svc.registerProvider({ id: 'demo', label: '示例通道' })
-    expect(svc.listProviders()).toEqual([local, { id: 'demo', label: '示例通道' }])
+    expect(summary(svc)).toEqual([local, { id: 'demo', label: '示例通道' }])
     dispose()
-    expect(svc.listProviders()).toEqual([local])
+    expect(summary(svc)).toEqual([local])
   })
 
   it('重复注册后写覆盖；旧 disposer 不删新代；内置 local 不受影响', () => {
@@ -210,17 +215,17 @@ describe('registerProvider', () => {
     const local = { id: 'local', label: '本地' }
     const oldDispose = svc.registerProvider({ id: 'demo', label: '旧' })
     const newDispose = svc.registerProvider({ id: 'demo', label: '新' })
-    expect(svc.listProviders()).toEqual([local, { id: 'demo', label: '新' }])
+    expect(summary(svc)).toEqual([local, { id: 'demo', label: '新' }])
     oldDispose()
-    expect(svc.listProviders()).toEqual([local, { id: 'demo', label: '新' }])
+    expect(summary(svc)).toEqual([local, { id: 'demo', label: '新' }])
     newDispose()
-    expect(svc.listProviders()).toEqual([local])
+    expect(summary(svc)).toEqual([local])
   })
 
   it('label 空则回退为 id', () => {
     const svc = createAgentBotService(emptyHostServices())
     svc.registerProvider({ id: 'feishu', label: '' })
-    expect(svc.listProviders()).toEqual([{ id: 'local', label: '本地' }, { id: 'feishu', label: 'feishu' }])
+    expect(summary(svc)).toEqual([{ id: 'local', label: '本地' }, { id: 'feishu', label: 'feishu' }])
   })
 })
 
@@ -795,6 +800,38 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     await svc.ask(askReq('t1', 'alice')) // 人回话（软路由进该单任务槽 → 已绑定）
     expect(readTask('running', t.taskId)?.pendingHuman).toBeUndefined()
+  })
+
+  it('local 的 deliver：回给发起那一单的 DSH 会话（活着就推进去）', async () => {
+    seedRunnableAgent(false, 180000)
+    const pushed: string[] = []
+    // 假 host：把发起会话 id 当成一条活会话
+    const host = {
+      ...emptyHostServices(),
+      agents: () => ({
+        get: (id: string) =>
+          id === 'dsh-1' ? ({ followup: (m: unknown) => pushed.push(JSON.stringify(m)) } as unknown as AgentLike) : undefined,
+      }),
+    } as HostServices
+    const svc = createAgentBotService(host)
+    const deliver = svc.providerDeliver('local')
+    expect(deliver).toBeDefined()
+    await deliver!({
+      sessionParts: { provider_id: 'local', session: 'dsh-1' },
+      messages: [{ kind: 'markdown', text: '需要你确认：尺寸？', url: '', atUserIds: [], atAll: false }],
+    })
+    expect(pushed.join('')).toContain('需要你确认')
+    // 推进会话了就不落收件箱（不重复）
+    expect(svc.drainLocalInbox('dsh-1')).toEqual([])
+  })
+
+  it('local 的 deliver：会话不在线 → 落收件箱兜底，可被取走', async () => {
+    seedRunnableAgent(false, 180000)
+    const svc = createAgentBotService(fakeHost([], idleNow))
+    const deliver = svc.providerDeliver('local')!
+    await deliver({ sessionParts: { provider_id: 'local', session: 'gone' }, messages: [{ kind: 'markdown', text: '还在做：B', url: '', atUserIds: [], atAll: false }] })
+    expect(svc.drainLocalInbox('gone').map((m) => m.text)).toEqual(['还在做：B'])
+    expect(svc.drainLocalInbox('gone')).toEqual([]) // 取走即清空
   })
 
   it('开关关闭：问 listGroupAgents，过滤幽灵成员与自己', async () => {

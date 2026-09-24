@@ -132,8 +132,28 @@ $('input').addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); send() }
 })
 
+/**
+ * 轮询本地收件箱：patrol 的异步消息（待决问卷 / 进度 / 到点提醒 / 等审批通知）
+ * 没法主动推到网页，按对话存在服务端，这里定期取走并追加到对话里。
+ */
+async function pollInbox() {
+  try {
+    const r = await rpc('inbox', { sessionKey: pageSession() })
+    if (!r.ok || !r.value) return
+    const list = Array.isArray(r.value.messages) ? r.value.messages : []
+    for (const m of list) {
+      const text = m.text || ''
+      if (text) bubble('assistant', text)
+    }
+  } catch {
+    // 轮询失败不打扰用户：下一轮再试
+  }
+}
+
 loadAgents()
 refreshStatus()
+pollInbox()
+setInterval(pollInbox, 4000)
 </script>
 </body>
 </html>

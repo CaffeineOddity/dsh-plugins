@@ -44,6 +44,8 @@ export interface AgentBotRpcHost {
   listProviders(): AgentChannelProviderInfo[]
   /** 本地对话页 / agent 命令共用：解析 rawInput 调本地 ask，展平 pending。 */
   localAsk(rawInput: string, sessionKey?: string): Promise<{ messages: AgentOutboundMessage[]; error?: string }>
+  /** 取走该网页对话待发的异步消息（问卷 / 进度 / 提醒）。缺省视为无。 */
+  drainLocalInbox?(sessionKey: string): AgentOutboundMessage[]
   /** 打开系统选文件夹；未注入则走本机 osascript/zenity。测试注入假实现。 */
   pickDirectory?(): Promise<string | null>
 }
@@ -236,6 +238,10 @@ export async function handleRpc(
         if (r.error) { appendLog('ask', `ask ${agentId} 失败: ${r.error}`); return { ok: false, error: r.error } }
         appendLog('ask', `ask ${agentId} -> ${r.messages.length} 条`)
         return { ok: true, value: { messages: r.messages } }
+      }
+      case 'inbox': {
+        const sessionKey = asString(asRecord(payload).sessionKey)
+        return { ok: true, value: { messages: host.drainLocalInbox?.(sessionKey) ?? [] } }
       }
       case 'saveAgent': {
         const result = saveAgent(parseAgentWrite(asRecord(payload)))

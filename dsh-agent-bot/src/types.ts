@@ -210,4 +210,9 @@ export interface AgentBotService {
   notifyAgentDisposed(sessionId: string): void
   /** 宿主事件入口：会话日志追加了审批审计事件（`session/event`）时调用。 */
   notifySessionEvent(sessionId: string): void
+  /**
+   * 取走本地（网页对话）待发的异步消息：patrol 想给人的问卷 / 进度 / 提醒
+   * 没法主动推给网页，就按对话存进收件箱，网页轮询取走。取走即清空。
+   */
+  drainLocalInbox(sessionKey: string): AgentOutboundMessage[]
 }

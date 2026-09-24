@@ -85,10 +85,13 @@ function registerAgentAskTool(tools: ToolRuntime, service: AgentBotService): () 
       },
       render: (_args, value) => [{ type: 'text', text: value.reply }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       const started = Date.now()
       appendLog('ask', `agent_ask 入口: agent=${args.agent} question=${args.question.slice(0, 60)}`)
-      const r = await service.localAsk(`${args.agent} ${args.question}`)
+      // 调用方那条 DSH 会话 = 这一单的「对话」：patrol 之后的异步消息（问卷/进度/提醒）
+      // 会往这条会话推（specs/12 §会话分层），所以这里必须把 sessionId 传下去。
+      const callerSessionId = exec.agent?.id === undefined ? '' : String(exec.agent.id)
+      const r = await service.localAsk(`${args.agent} ${args.question}`, callerSessionId)
       const elapsed = Date.now() - started
       const text = r.messages.map((m) => m.text).filter((t) => t !== '').join('\n\n')
       if (r.error) {
@@ -160,7 +163,11 @@ export function apply(ctx: Context, config: AgentBotConfig = {}): void {
     service.notifySessionEvent(String(session.id))
   })
 
-  const disposeRpc = registerRpcRoute(ctx, { listProviders: () => service.listProviders(), localAsk: (rawInput: string, sessionKey?: string) => service.localAsk(rawInput, sessionKey) })
+  const disposeRpc = registerRpcRoute(ctx, {
+    listProviders: () => service.listProviders(),
+    localAsk: (rawInput: string, sessionKey?: string) => service.localAsk(rawInput, sessionKey),
+    drainLocalInbox: (sessionKey: string) => service.drainLocalInbox(sessionKey),
+  })
   const disposePage = registerConfigSite(ctx)
   const disposeTool = tools ? registerAgentAskTool(tools, service) : undefined
   if (tools === undefined) appendLog('boot', 'tools 服务不可用，agent_ask 工具未注册')

@@ -202,6 +202,7 @@ pendingHuman:                 # 无则省略
 **板可见性按「对话」隔离**：列出 `running/` 时只给**同一个对话**的任务 —— 判据 = 同 `providerId` **且** 同 `conversationKey(sessionParts)`。
 `conversationKey` 由通道定义（IM 取 `group_id` / 飞书 `chat_id`；**不含 `bot_id`**，否则同群各台 bot 会各看各的板）；缺省实现取 `group_id`，没有则把 `sessionParts` 规范化拼接。
 内置 `local` 的 `conversationKey` **恒为一个常量**（本地没有"群"概念，整台中枢的 local 共用一块板），避免"换个网页会话就看不见旧单 → 重复建单"。
+但**路由**对 local 更细：只续「**这条会话**起过的单」（`task.sessionParts.session === 本轮 session 值`）——`sender` 在 local 恒为 `'local'`，不收紧的话开个新话题也会被吸进上一单。
 定位不了自己的对话（既无入站上下文也无绑定任务）→ **不列**并提示，不返回全部。
 
 LLM 拿到的判据就三样：running 摘要、自己的技能、专家卡片。决策：
@@ -440,6 +441,19 @@ DSH 自带的 `ask_user_question` 会**阻塞**发起它的那一轮，等网页
 而答案来自人的 IM 回复（同会话下一次入站）⇒ 死锁；绕开就得自建「回复↔问题」配对、超时、
 取消与选项解码 —— 即 §边界与不做项 明禁的那套。取消回合 + 非阻塞 `ask_human` 语义，
 用现成的入站链路就绕过了整个问题。
+
+### local（DSH 会话里的 `/agent_xxx`）的 deliver
+
+`/agent_xxx <问题>` 的真实链路：命令 handler 在**发起它的那条 DSH 会话**上下文里跑 → `delegateViaTool`
+给该会话自己的 agent 投一条 followup → 它调 `agent_ask` 工具 → 工具内 `localAsk` → 返回文本。
+
+所以 local 的 **deliver 目标 = 发起这一单的那条 DSH 会话**：
+
+- `agent_ask` 把调用方会话 id（`exec.agent.id`）当 `sessionKey` 传给 `localAsk` → 任务 `sessionParts = { session: <该 DSH 会话 id> }`
+- 内置 local provider 的 `deliver`：该会话**还活着** → 往里推一条 `【agent-bot】…`（与 `delegateViaTool` 同一条路，
+  人一定能看见）；**不在线** → 落收件箱兜底，由配置站对话页轮询取走（`rpc('inbox')`）
+
+这样 patrol 的问卷 / 进度 / 到点提醒 / 等审批通知对 local 任务也能到人，不再是静默日志。
 
 ### 等人拍板 / 等审批的状态标记（`need_decision`）
 
