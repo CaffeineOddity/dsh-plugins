@@ -10,7 +10,7 @@ import type { AgentLike } from '../runtime.js'
 import { getAgent as getAgentConfig } from '../agents.js'
 import { listTasksIn, readTask, writeTask, moveTask, type TaskBoard, type Assignee } from './task-board.js'
 import { boundTaskId, listBindings, unbindSession } from './binding.js'
-import type { RelayHost } from './relay.js'
+import { taskSlotKey, type RelayHost } from './relay.js'
 import { marshalText } from './board-tools.js'
 import { encodeSessionKey, sessionPartsForEncode, type AgentOutboundMessage } from '../../types.js'
 import { summarizeOwnedInterval, toMarkdownMessages, waitIdleOrTimeout } from '../ask.js'
@@ -87,6 +87,9 @@ export function wakeSessionIdFor(task: TaskBoard, agentId: string): string | und
   if (own !== undefined) return own.sessionId === '' ? undefined : own.sessionId
   const cfg = getAgentConfig(agentId)
   if (cfg === undefined) return undefined
+  // 该 agent 在这单的任务槽（入站软路由可能把它放进来了）优先于通道槽
+  const slot = cfg.sessions[taskSlotKey(task.taskId, agentId)]
+  if (slot !== undefined && slot.sessionId !== '') return slot.sessionId
   try {
     const parts = sessionPartsForEncode(task.sessionParts, task.sender, cfg.session_by_sender)
     const slot = cfg.sessions[encodeSessionKey(parts, task.providerId)]

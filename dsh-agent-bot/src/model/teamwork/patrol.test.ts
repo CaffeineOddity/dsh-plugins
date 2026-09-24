@@ -11,6 +11,7 @@ import { getAgent as getAgentConfig, saveAgent, touchSession } from '../agents.j
 import { readTask, writeTask, type TaskBoard, type Assignee } from './task-board.js'
 import { bindSession, boundTaskId, resetBindingsCache } from './binding.js'
 import { assigneeOf, createPatrol, hasPendingDownstream, shouldDeliver, wakeSessionIdFor, wakeText } from './patrol.js'
+import { taskSlotKey } from './relay.js'
 import type { AgentLike } from '../runtime.js'
 
 let dir: string
@@ -162,6 +163,13 @@ describe('wakeSessionIdFor', () => {
     ])
     const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })
     expect(wakeSessionIdFor(t, id)).toBe('sess-right-group')
+  })
+
+  it('有任务槽 → 优先用任务槽（入站软路由把它放进来的那条）', () => {
+    const id = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-chan' }])
+    touchSession(id, taskSlotKey('task_t1', id), 'sess-task', 1, '')
+    const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })
+    expect(wakeSessionIdFor(t, id)).toBe('sess-task')
   })
 
   it('没有对应槽 → undefined（调用方跳过）', () => {

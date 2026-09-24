@@ -20,7 +20,8 @@ import type { AgentConfig } from '../model/config.js'
 import { registerBoardTools } from '../model/teamwork/board-tools.js'
 import { createPatrol } from '../model/teamwork/patrol.js'
 import { describeTasks, listTasksIn, filterByConversation, readTask as readTaskModel, writeTask as writeTaskModel, type GroupMember } from '../model/teamwork/task-board.js'
-import { boundTaskId } from '../model/teamwork/binding.js'
+import { bindSession, boundTaskId } from '../model/teamwork/binding.js'
+import { taskSlotKey } from '../model/teamwork/relay.js'
 import { rememberInbound } from '../model/teamwork/inbound.js'
 import { conversationKeyOf } from '../types.js'
 import type {
@@ -124,6 +125,37 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
   /** 某 provider + sessionParts 的「对话」标识（板可见性用）。 */
   function conversationKeyFor(providerId: string, parts: Record<string, string>): string {
     return conversationKeyOf(parts, providers.get(providerId)?.conversationKey)
+  }
+
+  /**
+   * 入站软路由（specs/12 §会话分层与入站路由）：决定这条消息进哪条会话槽。
+   * 只用客观状态，不抠任务号：
+   *   ① 该 sender 在某 running 单上有未回填待决 → 进「本 agent 在该单的任务槽」
+   *   ② 否则该对话里该 sender 最近的一单还在跑 → 进那单的任务槽
+   *   ③ 都没有 → 前台槽（对话级）
+   * 任务归属仍由 LLM 的 `open_task` 定（含 `new`），所以这里判偏不锁死。
+   */
+  function routeInbound(
+    agentId: string,
+    channelKey: string,
+    providerId: string,
+    sessionParts: Record<string, string>,
+    sender: string,
+  ): { sessionKey: string; taskId?: string } {
+    const mine = { providerId, key: conversationKeyFor(providerId, sessionParts) }
+    const tasks = filterByConversation(listTasksIn('running'), mine, conversationKeyFor)
+      .filter((t) => t.sender === sender)
+      .sort((a, b) => b.createdAt - a.createdAt)
+    const pending = tasks.filter((t) => t.pendingHuman !== undefined)
+    if (pending.length > 0) {
+      const t = pending[0]!
+      return { sessionKey: taskSlotKey(t.taskId, agentId), taskId: t.taskId }
+    }
+    if (tasks.length > 0) {
+      const t = tasks[0]!
+      return { sessionKey: taskSlotKey(t.taskId, agentId), taskId: t.taskId }
+    }
+    return { sessionKey: channelKey }
   }
 
   /** 入站绑定点：包入站 running 摘要（**只列本群**）；群快照由组员发现函数单独登记。 */
@@ -268,11 +300,26 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         const live = getAgentConfig(prepared.agent.id)
         if (live === undefined) throw new Error(`agent-bot: 未知 agent ${prepared.agent.id}`)
         const current = { ...prepared, agent: live }
-        const slot = live.sessions[current.sessionKey]
-        const archived = slot === undefined ? false : runtime.isArchived(slot.sessionId)
-        const decision = planSession(current, archived, Date.now(), randomUUID())
+        // 会话分层：先软路由（可能进「本 agent 在该单的任务槽」），再按该槽的规则定 sessionId
+        const routed = routeInbound(live.id, current.sessionKey, req.meta.providerId, req.meta.sessionParts, req.meta.sender)
+        let sessionKey = routed.sessionKey
+        let decision: { sessionId: string }
+        if (routed.taskId !== undefined) {
+          const slot = live.sessions[sessionKey]
+          const archived = slot === undefined ? false : runtime.isArchived(slot.sessionId)
+          decision = archived || slot === undefined || slot.sessionId === ''
+            ? { sessionId: randomUUID() }
+            : { sessionId: slot.sessionId }
+          touchSession(live.id, sessionKey, decision.sessionId, Date.now(), '')
+        } else {
+          const slot = live.sessions[sessionKey]
+          const archived = slot === undefined ? false : runtime.isArchived(slot.sessionId)
+          decision = planSession({ ...current, sessionKey }, archived, Date.now(), randomUUID())
+          sessionKey = current.sessionKey
+        }
+        if (routed.taskId !== undefined) bindSession(decision.sessionId, routed.taskId)
         const promptText = promptTextFor(live.id, live.prompt, live.skill_groups, live.prompt_append_skills)
-        const values = variableValues(req, current.sessionKey)
+        const values = variableValues(req, sessionKey)
         // 入站包装（specs/12 §入站怎么绑任务）：附本群 running 短摘要，让 LLM 认捡起/新建。
         const boardCtx = boardContextFor(live, req.meta.providerId, req.meta.sessionParts)
         // 人的回填：入站前记下该会话绑定的任务与待决时间；这一轮结束后若待决没被换掉就清掉
@@ -305,9 +352,10 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
             : req.context
         const contextWithBoard = boardCtx.text === '' ? followupContext : `${followupContext}\n\n${boardCtx.text}`
         const result = await settleAskRound(agent, contextWithBoard, loadConfig().agent_wait_timeout_ms)
+        // 落的是**实际用的那条槽**（软路由可能把它放进了任务槽）
         touchSession(
           live.id,
-          current.sessionKey,
+          sessionKey,
           decision.sessionId,
           Date.now(),
           promptFingerprintFor(live.prompt, live.prompt_placement, live.skill_groups, live.prompt_append_skills),

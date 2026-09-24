@@ -313,9 +313,10 @@ export function registerBoardTools(ctx: {
     tools.register(
       defineTool({
         name: 'open_task',
-        description: '打开一份任务：有 taskId 则绑定那份（必须是本群 running），无则新建并绑定（本 agent 成为 taskLead）。',
+        description: '打开一份任务：有 taskId 则绑定那份（必须是本群 running）；无则新建并绑定（本 agent 成为 taskLead）。已绑着别的单又想开新单时传 new=true。',
         parameters: {
           taskId: { type: 'string', description: '要绑定的任务 id（task_xxx）。缺省新建。' },
+          new: { type: 'boolean', description: 'true = 强制新建一单（即使本会话已绑着别的 running 单）' },
           access: { type: 'string', description: '新建时的访问级别：read 或 write（缺省 write）' },
           target: { type: 'string', description: '新建时的目标目录（绝对路径；write 产出写这里）' },
         },
@@ -339,7 +340,7 @@ export function registerBoardTools(ctx: {
           }
           // 新建：谁 open 谁是 taskLead（只在这个 agent 自己的上下文）
           const existing = boundTaskId(who.sessionId)
-          if (existing !== undefined) {
+          if (existing !== undefined && args.new !== true) {
             const task = readTask('running', existing)
             if (task !== undefined) return { taskId: existing, text: `已绑定任务 ${existing}，无需新建` }
             bindIfAbsent(who.sessionId, existing)
