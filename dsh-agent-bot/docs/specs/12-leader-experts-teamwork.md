@@ -335,43 +335,47 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 | 被派专家（在这份 md 的 `assignees[]` 里） | **协作槽**会话 = `assignees[].sessionId`。纯被派、从没被人直 @ 过的中间层也照样叫得醒 |
 | taskLead（人 @ 进来的） | 用本任务记的 `providerId` + `sessionParts`（`session_by_sender=true` 时再加 `sender`）反推出**通道槽 key**，再取该槽的 `sessionId`。禁止「随便取第一条非协作槽」——一个 agent 可能在多个群 / 多条按人会话，会叫错群、叫错人 |
 
-去重：巡检每轮（缺省 200ms）都会扫同一份文件，**必须有「已叫醒」记忆**，否则会对同一个被叫醒方反复灌 followup。判定用「被叫醒方相关的完成情况指纹」（它那几路下游/全部 assignee 的 `expertId:status` 集合）；指纹没变就不再叫，变了才叫。指纹存**内存**：进程重启后按 §重启 补叫一次，正是想要的恢复行为。
+去重：同一份任务会被多个触发（事件、墙钟、入站复核）反复处理，**必须有「已叫醒」记忆**，否则会对同一个被叫醒方反复灌 followup。判定用「被叫醒方相关的完成情况指纹」（它那几路下游/全部 assignee 的 `expertId:status` 集合）；指纹没变就不再叫，变了才叫。指纹存**内存**：进程重启后按 §重启 补叫一次，正是想要的恢复行为。
 
 多级链（A → B → C）：C 终态 → 按协作槽叫醒 B；B 收口后再终态 → 按通道槽叫醒 A（taskLead）；A 综合后 `deliver`。中间层不需要是人 @ 过的。
 
 ### 重启
 
-进程起来扫 `jobs/running/`：
+进程起来 `patrol.start()` 扫一次 `jobs/running/`（并重建墙钟定时器）：
 
 1. 专家还 live → 继续等 idle
 2. 专家已 idle 但未叫醒上游 / 未综合 → 按叫醒链补 followup
 3. 已综合但 `deliver` 未成功 → 只重试 deliver
 4. 多份文件各自恢复，互不取消
 
-### 唤醒路径：事件为主，轮询兜底
+### 唤醒路径：纯事件驱动（无周期轮询）
 
-**快路径（事件）**：宿主订阅 cordis 的 `agent/status`（`idle` = 没有 driver 在跑），
-回调里按键 `agent.id`（= 会话 id）调 `service.notifyAgentIdle(sessionId)`
-→ `patrol.reconcile(sessionId)`：把该会话对应的 assignee 转 `idle` → 立刻跑这一单的
-`patrolTask`（上报/综合）+ 一轮探针。**专家做完即上报，不等轮询。**
+**没有任何周期扫描循环。** 只在四件事上醒来：
 
-- 事件是**全进程**的：先按键 `boundTaskId(sessionId)` / 扫 `running/` 里 `assignees[].sessionId` 过滤，
+| 触发 | 来源 | 做什么 |
+|---|---|---|
+| 专家会话变 idle | cordis `agent/status` 事件 | `notifyAgentIdle(sessionId)` → `patrol.reconcile`：转 `idle` → 跑这一单（上报/综合/交付） |
+| 专家会话被销毁 | cordis `agent/disposed` 事件 | `notifyAgentDisposed(sessionId)` → 重启那一路；续期耗尽则判 `failed` 并走状态机 |
+| 任务墙钟到点 | **每份任务一个 `setTimeout(deadlineAt - now)`** | 跑这一单的超时分析（顺延/救活/交回给人/收口）；顺延后重排定时器 |
+| 进程启动 | `patrol.start()` | **一次性**扫 `running/`：补上报（订阅生效前完成的工作）+ 重建墙钟定时器 |
+| 有人入站互动 | `ask` 结束后 | **交互兜底**：顺手 `reconcile(该会话)`，漏掉的事件在这一刻补上 |
+
+约束与取舍：
+- 事件是**全进程**的：先按键 `boundTaskId(sessionId)` / 扫 `running/` 里 `assignees[].sessionId` 过滤；
   不是本插件的会话（用户网页会话、cron-loop 会话）直接忽略。
 - 事件同步 emit，回调里**不 await 重活**（丢微任务，失败只打日志），免得拖慢派发链。
-- `agent/status` 事件名与 payload **本地声明**，不 import `@deepseek-ai/dsh-agent`
+- `agent/status` / `agent/disposed` 的事件名与 payload **本地声明**，不 import `@deepseek-ai/dsh-agent`
   （该包在插件运行时不可解析；cordis 的 events 是根级单例，插件级 `ctx.on` 收得到全进程事件）。
-
-**兜底（低频轮询）**：巡检循环间隔放宽到 **2s**，只做三件事：
-1. 进程重启后的补扫（订阅生效前完成的工作没人通知，见 §重启）
-2. 漏掉事件时的转态（读 `agent.status === 'idle'` 兜底）
-3. 墙钟到点判定
+- 墙钟定时器是**内存态**：进程重启会丢，由 `start()` 的补扫重建。
+- 没有任何兜底扫描 ⇒ 漏事件的唯一自愈路径是「启动扫一次」与「入站互动时复核」。
+  这是去掉轮询的代价：若事件丢失且无人再与这单互动，该单会停在原地等下一次互动。
 
 ### 活性探针（非阻塞）
 
 窗口 `W` = 专家 `agent_wait_timeout_ms`；缺字段用全局；`0` fallback 全局。**不再 await `whenIdle`**：
 
 ```
-每轮（2s）对 status=running 的 assignee:
+在被唤起的时刻（事件 / 启动补扫 / 墙钟）对 status=running 的 assignee:
   live = agents.get(sessionId)
   live == undefined:
       首次发现 → 记 missingSince，先等

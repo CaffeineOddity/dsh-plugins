@@ -235,7 +235,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
       ],
     }))
     const { host, woken } = fakeHost(['sess-a', 'sess-b', 'sess-c'])
-    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
 
     // B 的下游 C 已终态 → 叫醒 B；A 不该被叫（B 自己还没做综合）
@@ -256,7 +256,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
       ],
     }))
     const { host, woken } = fakeHost(['sess-a', 'sess-b', 'sess-c'])
-    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
     expect(woken).toEqual([])
   })
@@ -270,7 +270,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
       assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: true })],
     }))
     const { host, woken } = fakeHost(['sess-a', 'sess-b'])
-    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
     await patrol.tickOnce()
     await patrol.tickOnce()
@@ -285,7 +285,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
       pendingHuman: { questions: ['要哪个尺寸？'], askedBy: 'B', askedAt: 7 },
     }))
     const { host, woken } = fakeHost(['sess-a'])
-    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
     await patrol.tickOnce()
     expect(woken.map((w) => w.sessionId)).toEqual(['sess-a'])
@@ -302,7 +302,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
       assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'running', wake: true })],
     }))
     const { host, delivered } = fakeHost(['sess-a', 'sess-b'])
-    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
     expect(delivered[0]?.text[0]).toContain('还在做')
     const back = readTask('running', 'task_t1')
@@ -322,7 +322,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
       assignees: [assignee({ expertId: 'ghost', expertName: '幽灵', dispatchedBy: a, sessionId: 'sess-x', status: 'running', wake: true })],
     }))
     const { host, delivered } = fakeHost(['sess-a']) // 专家会话不在线且救不动
-    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
     expect(delivered[0]?.text[0]).toContain('需要你确认')
     expect(readTask('running', 'task_t1')).toBeDefined()
@@ -344,7 +344,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
         { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '海报已出好，见附件' }] } } },
       ],
     })
-    const patrol = createPatrol(host, { windowMs: 50, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 50 })
     await patrol.tickOnce()
     await patrol.flush()
     expect(delivered[0]?.text[0]).toContain('海报已出好')
@@ -366,7 +366,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
       ],
     }))
     const { host, woken } = fakeHost(['sess-a', 'sess-b', 'sess-c'], [], {}, ['sess-b'])
-    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
     expect(woken.map((w) => w.sessionId)).toEqual(['sess-b'])
     const back = readTask('running', 'task_t1')
@@ -383,7 +383,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     }))
     // A 有自己的通道会话；B 的协作会话在跑（busy）→ 模拟「只有 B 做完」这一事件
     const { host, woken } = fakeHost(['sess-a', 'sess-b'], [], {}, [])
-    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.reconcile('sess-b')
     // B 被转成 idle 并上报给 A（A 的通道会话被叫醒）
     const back = readTask('running', 'task_t1')
@@ -391,12 +391,31 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     expect(woken.map((w) => w.sessionId)).toContain('sess-a')
   })
 
+  it('墙钟由定时器触发（无轮询）：到点自动顺延并给人进度反馈', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const past = Date.now() - 1
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      deadlineAt: past,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'running', wake: true })],
+    }))
+    const { host, delivered } = fakeHost(['sess-a', 'sess-b'], [], {}, ['sess-b'])
+    const patrol = createPatrol(host, { windowMs: 1 })
+    await patrol.start() // 启动补扫 + 建定时器；之后没有任何轮询
+    await new Promise((r) => setTimeout(r, 30))
+    expect(delivered[0]?.text[0]).toContain('还在做')
+    expect(readTask('running', 'task_t1')!.deadlineAt).toBeGreaterThan(past)
+    patrol.stop()
+  })
+
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {
     mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
     bindSession('sess-a', 'task_t1')
     // running/ 里没有这份任务（相当于人已 mv 到 cancel/）
     const { host } = fakeHost(['sess-a'])
-    const patrol = createPatrol(host, { windowMs: 1, intervalMs: 1 })
+    const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
     expect(boundTaskId('sess-a')).toBeUndefined()
   })

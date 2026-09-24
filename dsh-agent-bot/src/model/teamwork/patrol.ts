@@ -33,13 +33,13 @@ export interface PatrolOptions {
   roundTimeoutMs?: number
   /** 专家已 idle 但 wake 未消费时的收口等待（超时则按失败处理）。 */
   idleCollectMs?: number
-  /** run() 每轮间隔。缺省 200。 */
-  intervalMs?: number
 }
 
 export interface Patrol {
-  /** 常驻循环（service 用）。 */
-  run(): Promise<void>
+  /**
+   * 启动：**一次性**扫一遍 `running/`（补上报 + 重建墙钟定时器）。不再有周期轮询。
+   */
+  start(): Promise<void>
   /** 跑一轮：先扫状态机、再做一轮活性探针。测试用；run() 内部也调它。 */
   tickOnce(): Promise<void>
   /** 等所有在跑的收口交付落地（测试用）。 */
@@ -49,6 +49,8 @@ export interface Patrol {
    * 这是「专家做完就通知」的快路径；低频轮询只做兜底。
    */
   reconcile(sessionId: string): Promise<void>
+  /** 事件入口：会话被销毁（`agent/disposed`）→ 重启或判死那一路。 */
+  handleDisposed(sessionId: string): Promise<void>
   stop(): void
 }
 
@@ -116,11 +118,11 @@ interface ProbeState {
  *  - 全终态且无待决 → 叫醒 taskLead 综合
  */
 export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Patrol {
-  // 事件（agent/status）走快路径；轮询只做兜底（重启恢复、漏事件、墙钟），不必高频
-  const intervalMs = options.intervalMs ?? 2_000
   const probeRenew = new Map<string, ProbeState>() // `taskId\0expertId` -> 续期状态
   const notified = new Map<string, string>() // `taskId\0agentId` -> 已叫醒时的完成情况指纹
   const delivering = new Map<string, Promise<void>>() // taskId -> 在跑的收口交付（同任务只跑一次）
+  const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>() // taskId -> 墙钟定时器
+  const lastScheduledDeadline = new Map<string, number>() // taskId -> 已排的 deadlineAt（避免重复排）
   let lastReconcileAt = 0
   let stopped = false
 
@@ -166,18 +168,67 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     reconcileBindings()
   }
 
-  async function run(): Promise<void> {
+  /**
+   * 启动补扫（替代原周期轮询）：扫一遍 `running/` 处理「订阅生效前已完成的工作」，
+   * 并为每份任务重建墙钟定时器。之后完全由事件驱动（agent/status / agent/disposed）。
+   */
+  async function start(): Promise<void> {
     stopped = false
-    // run() 常驻循环：一轮一轮跑 tickOnce；间隔由调用方停/起。
-    while (!stopped) {
-      await tickOnce()
-      if (stopped) return
-      await delay(intervalMs)
+    await tickOnce()
+    for (const task of listTasksIn('running')) scheduleDeadline(task)
+  }
+
+  /** 墙钟定时器：每份任务一个，到点触发一次（不再靠轮询比较 deadlineAt）。 */
+  function scheduleDeadline(task: TaskBoard): void {
+    clearDeadline(task.taskId)
+    if (task.deadlineAt <= 0 || stopped) return
+    const ms = Math.max(0, task.deadlineAt - Date.now())
+    const timer = setTimeout(() => {
+      deadlineTimers.delete(task.taskId)
+      void onDeadline(task.taskId)
+    }, ms)
+    deadlineTimers.set(task.taskId, timer)
+    lastScheduledDeadline.set(task.taskId, task.deadlineAt)
+  }
+
+  function clearDeadline(taskId: string): void {
+    const timer = deadlineTimers.get(taskId)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      deadlineTimers.delete(taskId)
     }
+    lastScheduledDeadline.delete(taskId)
+  }
+
+  /** 到点：处理这一单；若顺延了墙钟，重排定时器。 */
+  async function onDeadline(taskId: string): Promise<void> {
+    if (stopped) return
+    const task = readTask('running', taskId)
+    if (task === undefined) {
+      clearDeadline(taskId)
+      return
+    }
+    try {
+      await patrolTask(task)
+      await probeTask(task)
+    } catch (err) {
+      console.warn(`agent-bot: 墙钟到点处理 ${taskId} 失败: ${(err as Error).message}`)
+    }
+    const after = readTask('running', taskId)
+    if (after === undefined) clearDeadline(taskId)
+    else scheduleDeadline(after)
+  }
+
+  /** 任务状态变过之后同步定时器：还在 running 就重排，否则清掉。 */
+  function syncDeadline(taskId: string): void {
+    const task = readTask('running', taskId)
+    if (task === undefined) clearDeadline(taskId)
+    else if (task.deadlineAt !== lastScheduledDeadline.get(taskId)) scheduleDeadline(task)
   }
 
   function stop(): void {
     stopped = true
+    for (const taskId of [...deadlineTimers.keys()]) clearDeadline(taskId)
   }
 
   function windowFor(agent: AgentConfig): number {
@@ -207,6 +258,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   function deferDeadline(task: TaskBoard): void {
     task.deadlineAt = Date.now() + roundTimeoutMs()
     writeTask('running', task)
+    scheduleDeadline(task)
   }
 
   /**
@@ -382,6 +434,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       unbindDone(fresh)
       // 期间可能已被人挪走（cancel/ 或 done/）：那就别再 move
       if (readTask('running', fresh.taskId) !== undefined) moveTask('running', 'done', fresh.taskId)
+      clearDeadline(fresh.taskId)
     } catch (err) {
       console.warn(`agent-bot: 收口交付 ${task.taskId} 失败（文件留在 running/）: ${(err as Error).message}`)
     }
@@ -554,6 +607,33 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     if (leadSessionId !== undefined && boundTaskId(leadSessionId) === task.taskId) unbindSession(leadSessionId)
   }
 
+  /**
+   * 事件入口：某会话被销毁（`agent/disposed`）→ 它那一路要么重启、要么判死。
+   * 替代原来轮询里的「会话缺失」分支。
+   */
+  async function handleDisposed(sessionId: string): Promise<void> {
+    if (sessionId === '' || stopped) return
+    for (const task of listTasksIn('running')) {
+      const a = task.assignees.find((x) => x.sessionId === sessionId && x.status === 'running')
+      if (a === undefined) continue
+      const cfg = getAgentConfig(a.expertId)
+      if (cfg === undefined) continue
+      const key = `${task.taskId}\0${a.expertId}`
+      const st = probeRenew.get(key) ?? { renew: 0, sessionId, missingSince: 0 }
+      st.renew++
+      if (st.renew >= maxRenew()) {
+        a.status = 'failed'
+        probeRenew.delete(key)
+      } else {
+        probeRenew.set(key, st)
+        await restartExpert(task, cfg, a)
+        continue
+      }
+      if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
+      await patrolTask(task)
+    }
+  }
+
   /** 事件入口：把该会话对应的 assignee 转 idle，并立刻处理这一单。 */
   async function reconcile(sessionId: string): Promise<void> {
     if (sessionId === '') return
@@ -573,6 +653,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
         if (changed && readTask('running', task.taskId) !== undefined) writeTask('running', task)
         await patrolTask(task)
         await probeTask(task)
+        syncDeadline(task.taskId)
       } catch (err) {
         console.warn(`agent-bot: 事件复核 ${task.taskId} 失败: ${(err as Error).message}`)
       }
@@ -580,7 +661,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     reconcileBindings()
   }
 
-  return { run, tickOnce, flush, reconcile, stop }
+  return { start, tickOnce, flush, reconcile, handleDisposed, stop }
 }
 
 /** 叫醒文本：先说清「谁做完/失败了」，再附 md 全文（不让人自己猜）。 */
@@ -595,6 +676,3 @@ export function wakeText(task: TaskBoard, finished: readonly Assignee[]): string
   return `${head}\n\n${marshalText(task)}`
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}

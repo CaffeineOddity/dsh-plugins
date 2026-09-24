@@ -22,6 +22,7 @@ export const name = 'agent-bot'
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'agent/status'(payload: { agent: { id: string }; status: 'idle' | 'running' }): void
+    'agent/disposed'(payload: { agent: { id: string } }): void
   }
 }
 
@@ -145,6 +146,11 @@ export function apply(ctx: Context, config: AgentBotConfig = {}): void {
     service.notifyAgentIdle(String(agent.id))
   })
 
+  // 会话被销毁 → 它那一路要重启或判死（替代轮询里的「会话缺失」分支）
+  const disposeAgentDisposed = ctx.on('agent/disposed', ({ agent }) => {
+    service.notifyAgentDisposed(String(agent.id))
+  })
+
   const disposeRpc = registerRpcRoute(ctx, { listProviders: () => service.listProviders(), localAsk: (rawInput: string, sessionKey?: string) => service.localAsk(rawInput, sessionKey) })
   const disposePage = registerConfigSite(ctx)
   const disposeTool = tools ? registerAgentAskTool(tools, service) : undefined
@@ -159,6 +165,7 @@ export function apply(ctx: Context, config: AgentBotConfig = {}): void {
 
   ctx.effect(() => () => {
     disposeAgentStatus()
+    disposeAgentDisposed()
     unwatch()
     if (disposeRpc) disposeRpc()
     if (disposePage) disposePage()

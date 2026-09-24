@@ -174,4 +174,6 @@ export interface AgentBotService {
    * 让协作链「做完就上报/收口」，不依赖轮询。
    */
   notifyAgentIdle(sessionId: string): void
+  /** 宿主事件入口：会话被销毁（`agent/disposed`）时调用。 */
+  notifyAgentDisposed(sessionId: string): void
 }

@@ -107,6 +107,8 @@ interface StoredProvider extends AgentChannelProviderInfo {
 }
 
 export function createAgentBotService(host: HostServices): AgentBotHostService {
+  /** 交互动兜底入口（ask 结束后调用，定义见下）。 */
+  let service_notifyIdle: (sessionId: string) => void = () => undefined
   const providers = new Map<string, StoredProvider>()
   // 预置内置 local provider：不走 registerProvider（无 disposer、固定）。
   providers.set(LOCAL_PROVIDER.id, { ...LOCAL_PROVIDER, token: Symbol('agent-bot:builtin-local') })
@@ -186,7 +188,11 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
     },
     {},
   )
-  void patrol.run()
+  void patrol.start() // 启动补扫一次；之后完全由 agent/status / agent/disposed 事件驱动
+  service_notifyIdle = (sessionId: string): void => {
+    void patrol.reconcile(sessionId).catch(() => undefined)
+  }
+
 
   /** 按 providerId 找通道的 deliver 能力（缺省打日志）。 */
   function providerDeliver(providerId: string): ((req: AgentDeliverRequest) => Promise<void>) | undefined {
@@ -204,6 +210,11 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
       return toSummary(found)
     },
     providerDeliver,
+    notifyAgentDisposed(sessionId: string): void {
+      void patrol.handleDisposed(sessionId).catch((err: unknown) => {
+        appendLog('patrol', `会话销毁处理失败 sid=${sessionId}: ${err instanceof Error ? err.message : String(err)}`)
+      })
+    },
     notifyAgentIdle(sessionId: string): void {
       // 事件驱动快路径：不 await（事件是同步 emit，别拖慢派发链）
       void patrol.reconcile(sessionId).catch((err: unknown) => {
@@ -278,6 +289,8 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
           Date.now(),
           promptFingerprintFor(live.prompt, live.prompt_placement, live.skill_groups, live.prompt_append_skills),
         )
+        // 交互兜底：只要还有人跟这单互动，漏掉的事件就能在这一刻补上（不再有周期巡检）
+        service_notifyIdle(decision.sessionId)
         return result
       })
     },
