@@ -176,6 +176,26 @@ describe('wakeSessionIdFor', () => {
     expect(wakeSessionIdFor(t, id)).toBe('sess-task')
   })
 
+  it('任务槽丢了 → 用 md 里的 leadSessionId 兜底（否则这单会僵在 running/）', () => {
+    const id = mkAgent('A', []) // 没有任何槽（清过槽 / 换过 key 格式 / agent 重建）
+    const t = task({ taskLead: id, leadSessionId: 'sess-from-md', sessionParts: { bot_id: 'b1', group_id: 'g1' } })
+    expect(wakeSessionIdFor(t, id)).toBe('sess-from-md')
+  })
+
+  it('任务槽在时优先于 md 兜底', () => {
+    const id = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-chan' }])
+    touchSession(id, taskSlotKey('task_t1', id), 'sess-slot', 1, '')
+    const t = task({ taskLead: id, leadSessionId: 'sess-from-md', sessionParts: { bot_id: 'b1', group_id: 'g1' } })
+    expect(wakeSessionIdFor(t, id)).toBe('sess-slot')
+  })
+
+  it('md 兜底只对 taskLead 生效（不会把专家叫到 lead 的会话）', () => {
+    const lead = mkAgent('Lead2', [])
+    const other = mkAgent('Other', [])
+    const t = task({ taskLead: lead, leadSessionId: 'sess-from-md' })
+    expect(wakeSessionIdFor(t, other)).toBeUndefined()
+  })
+
   it('没有对应槽 → undefined（调用方跳过）', () => {
     const id = mkAgent('A', [{ key: 'demo_b_other', sessionId: 'sess-x' }])
     const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })

@@ -118,6 +118,12 @@ jobs/
 
 模型用 `update_task` 改正文和允许的字段；`taskId` / `taskLead` / `leadName` / `sender` / `sessionParts` 创建后不可改。
 
+`leadSessionId` 是 lead 会话的**兜底记录**（`open_task` 创建/捡起时写当前会话；换单时清掉旧单的这份）。
+取 lead 会话的顺序固定为：
+`assignees[]`（被派专家）→ `agents.json` 的任务槽 `task:{taskId}:{leadId}` → **md 的 `leadSessionId`** → 通道槽反推。
+md 只做兜底、不抢先：槽在时行为与"只有槽"时**完全一致**（零回归）；槽丢了
+（人清槽 / 通道 key 格式变更 / agent 删了重建）时还能把 lead 叫醒，否则那单会僵在 `running/`。
+
 `leadName` 是**创建时的名字快照**（与 `assignees[].expertName` / `dispatchedByName` 同规则，agent 改名不回填）。
 用途：问卷文案要 `@` 的是**名字**（`@周bot通`），不是 agentId（`@a1` 在 IM 里对人没意义）；摘要里也显示名字。
 **旧文件缺该字段时回退成 `taskLead`**，不抛错（保证已在跑的任务仍可读）。
@@ -127,6 +133,7 @@ jobs/
 taskId: task_xxx
 taskLead: <最初被 @ 的 agentId>
 leadName: <taskLead 的显示名，创建时快照>
+leadSessionId: <taskLead 在这一单的会话 id；可缺省>
 sender: <sender>
 providerId: demo
 sessionParts: { bot_id, group_id }

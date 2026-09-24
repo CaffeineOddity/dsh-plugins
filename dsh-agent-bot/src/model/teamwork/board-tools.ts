@@ -205,6 +205,14 @@ function myRunningTasks(
   return filterByConversation(listTasksIn('running'), mine, keyFor)
 }
 
+/** 旧单 md 里的 leadSessionId 若指向这条会话，清掉（换单时别让旧单叫醒到新单的会话）。 */
+function clearLeadSessionIfPointingAt(taskId: string, sessionId: string): void {
+  const t = readTask('running', taskId)
+  if (t === undefined || t.leadSessionId !== sessionId) return
+  t.leadSessionId = undefined
+  writeTask('running', t)
+}
+
 /** 旧单的任务槽若指向这条会话，清掉（换单时防"一槽两单"）。 */
 function clearTaskSlotIfPointingAt(taskId: string, agentId: string, sessionId: string): void {
   const cfg = getAgentConfig(agentId)
@@ -352,11 +360,17 @@ export function registerBoardTools(ctx: {
             const existing = boundTaskId(who.sessionId)
             if (existing !== undefined && existing !== args.taskId) {
               clearTaskSlotIfPointingAt(existing, who.agentId, who.sessionId)
+              clearLeadSessionIfPointingAt(existing, who.sessionId)
             }
             bindSession(who.sessionId, args.taskId)
             // 这一轮用的会话就是「本 agent 在该单的任务槽」：后续入站/叫醒都命中同一条，
             // 记忆连续，也不会与后续消息并发改同一份 md（specs/12 §会话分层与入站路由）
             touchSession(who.agentId, taskSlotKey(args.taskId, who.agentId), who.sessionId, Date.now(), '')
+            // md 里也留一份兜底（槽丢了还能把 lead 叫醒）
+            if (task.leadSessionId !== who.sessionId) {
+              task.leadSessionId = who.sessionId
+              writeTask('running', task)
+            }
             return { taskId: args.taskId, text: `已绑定任务 ${args.taskId}（taskLead=${task.taskLead}）` }
           }
           // 新建：谁 open 谁是 taskLead（只在这个 agent 自己的上下文）
@@ -377,6 +391,7 @@ export function registerBoardTools(ctx: {
           const task = createTask({
             taskLead: who.agentId,
             leadName: who.agentName,
+            leadSessionId: who.sessionId,
             sender: inbound.sender,
             providerId: inbound.providerId,
             sessionParts: inbound.sessionParts,

@@ -90,6 +90,10 @@ export function wakeSessionIdFor(task: TaskBoard, agentId: string): string | und
   // 该 agent 在这单的任务槽（入站软路由可能把它放进来了）优先于通道槽
   const slot = cfg.sessions[taskSlotKey(task.taskId, agentId)]
   if (slot !== undefined && slot.sessionId !== '') return slot.sessionId
+  // 槽丢了（清槽 / 换 key 格式 / agent 重建）→ 用 md 里的兜底记录，否则这单会僵在 running/
+  if (agentId === task.taskLead && task.leadSessionId !== undefined && task.leadSessionId !== '') {
+    return task.leadSessionId
+  }
   try {
     const parts = sessionPartsForEncode(task.sessionParts, task.sender, cfg.session_by_sender)
     const slot = cfg.sessions[encodeSessionKey(parts, task.providerId)]

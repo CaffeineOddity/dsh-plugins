@@ -217,6 +217,19 @@ describe('leadName', () => {
   })
 })
 
+describe('leadSessionId（md 里的兜底记录）', () => {
+  it('落盘并读回；旧文件缺字段即 undefined（不抛错）', () => {
+    const t = createTask({
+      taskLead: 'a1', leadSessionId: 'sess-1', sender: 'alice', providerId: 'demo',
+      sessionParts: { bot_id: 'r1', group_id: 'g1' }, originContext: 'c',
+      access: 'write', groupSnapshot: [],
+    })
+    expect(readTask('running', t.taskId)?.leadSessionId).toBe('sess-1')
+    const legacy = marshalTaskYaml(sampleTask('task_old2'), '').replace(/^leadSessionId: .*\n/m, '')
+    expect(unmarshalTask(legacy).leadSessionId).toBeUndefined()
+  })
+})
+
 describe('filterByConversation（板可见性）', () => {
   const keyFor = (providerId: string, parts: Record<string, string>): string =>
     providerId === 'local' ? 'local' : (parts.group_id ?? Object.keys(parts).sort().map((k) => `${k}=${parts[k]}`).join('&'))

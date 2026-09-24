@@ -56,6 +56,12 @@ export interface TaskBoard {
   taskLead: string
   /** taskLead 的显示名（创建时快照；agent 改名不回填。旧文件缺字段时回退成 taskLead）。 */
   leadName: string
+  /**
+   * taskLead 在这一单的任务槽会话 id（**兜底记录**）。
+   * 首选仍是 `agents.json` 的任务槽（`task:{taskId}:{leadId}`）；槽丢了（清槽 / 换 key 格式 /
+   * agent 重建）时靠它把 lead 叫醒，否则那单会僵在 running/。旧文件缺字段即 undefined。
+   */
+  leadSessionId?: string
   sender: string
   providerId: string
   sessionParts: Record<string, string>
@@ -175,6 +181,8 @@ interface SerializeTask {
   taskLead: string
   /** 有则写进 frontmatter（新文件都有；兼容老调用点）。 */
   leadName?: string
+  /** 有则写进 frontmatter。 */
+  leadSessionId?: string
   sender: string
   providerId: string
   sessionParts: Record<string, string>
@@ -194,6 +202,9 @@ export function marshalTaskYaml(task: SerializeTask, body: string): string {
   lines.push(`taskId: ${task.taskId}`)
   lines.push(`taskLead: ${task.taskLead}`)
   lines.push(`leadName: ${yamlScalar(task.leadName ?? task.taskLead)}`)
+  if (task.leadSessionId !== undefined && task.leadSessionId !== '') {
+    lines.push(`leadSessionId: ${task.leadSessionId}`)
+  }
   lines.push(`sender: ${yamlScalar(task.sender)}`)
   lines.push(`providerId: ${task.providerId}`)
   lines.push('sessionParts:')
@@ -276,6 +287,7 @@ export function unmarshalTask(markdown: string): TaskBoard {
     leadName: typeof rec.leadName === 'string' && rec.leadName !== ''
       ? rec.leadName
       : reqString(rec, 'taskLead', where),
+    leadSessionId: typeof rec.leadSessionId === 'string' && rec.leadSessionId !== '' ? rec.leadSessionId : undefined,
     sender: reqString(rec, 'sender', where),
     providerId: reqString(rec, 'providerId', where),
     sessionParts,
@@ -480,6 +492,8 @@ export interface CreateTaskInput {
   taskLead: string
   /** lead 的显示名（缺省用 id）。 */
   leadName?: string
+  /** lead 在这一单的会话 id（兜底记录，见 TaskBoard.leadSessionId）。 */
+  leadSessionId?: string
   sender: string
   providerId: string
   sessionParts: Record<string, string>
@@ -509,6 +523,7 @@ export function createTask(input: CreateTaskInput): TaskBoard {
     taskId,
     taskLead: input.taskLead,
     leadName: input.leadName !== undefined && input.leadName !== '' ? input.leadName : input.taskLead,
+    leadSessionId: input.leadSessionId === undefined || input.leadSessionId === '' ? undefined : input.leadSessionId,
     sender: input.sender,
     providerId: input.providerId,
     sessionParts: { ...input.sessionParts },
