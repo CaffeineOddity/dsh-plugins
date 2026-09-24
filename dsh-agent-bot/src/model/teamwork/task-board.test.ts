@@ -191,6 +191,19 @@ describe('createTask（新建任务落 running/）', () => {
   })
 })
 
+describe('pendingHuman.toHuman 往返', () => {
+  it('toHuman=true 落盘并读回；缺省不带', () => {
+    const t = sampleTask('task_ph')
+    t.pendingHuman = { questions: ['要哪个尺寸？'], askedBy: 'lead1', askedAt: 7, toHuman: true }
+    writeTask('running', t)
+    expect(readTask('running', 'task_ph')?.pendingHuman?.toHuman).toBe(true)
+    const t2 = sampleTask('task_ph2')
+    t2.pendingHuman = { questions: ['上抛给 lead'], askedBy: 'e1', askedAt: 8 }
+    writeTask('running', t2)
+    expect(readTask('running', 'task_ph2')?.pendingHuman?.toHuman).toBe(false)
+  })
+})
+
 describe('YAML 往返：纯数字字符串字段不被写成 number', () => {
   it('sessionParts / sender 是纯数字也要原样读回', () => {
     const t = createTask({

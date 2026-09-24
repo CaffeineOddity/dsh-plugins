@@ -336,9 +336,13 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       // ⑤ 无 assignee 也无待决：无事可做，继续走收口判定
     }
 
-    // 待决：叫醒 taskLead 拍板（只叫一次；人回填后 pendingHuman 清掉、指纹变了才会再叫）
+    // 待决：给人发的问卷 → deliver 问卷 + 顺延墙钟；上抛给 lead 的 → 叫醒 taskLead 拍板
     if (task.pendingHuman !== undefined) {
-      await wakeOnce(task, task.taskLead, `pending:${task.pendingHuman.askedAt}`, marshalText(task))
+      if (task.pendingHuman.toHuman === true) {
+        await askHumanToDecide(task, '有人提了问题')
+      } else {
+        await wakeOnce(task, task.taskLead, `pending:${task.pendingHuman.askedAt}`, marshalText(task))
+      }
       return
     }
 
@@ -450,14 +454,36 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     if (ok) notified.set(key, fingerprint)
   }
 
-  /** 交回给人拍板：deliver 一条「需要你确认」，任务留在 running/ 等人（可答、可挪 cancel/）。 */
-  async function askHumanToDecide(task: TaskBoard, reason: string): Promise<void> {
-    const fingerprint = `decide:${task.deadlineAt}`
+  /**
+   * 发问卷给人（specs/12 §决策链路）：
+   *  - `deliver` 一条 markdown @sender（题干 + 当前摘要 + 怎么回）
+   *  - **把墙钟顺延成「发出时刻 + 一个墙钟」**（人还没答，不该算任务超时）
+   *  - 按 askedAt 指纹去重（同一次问卷只发一条）
+   */
+  async function sendQuestionnaire(task: TaskBoard, questions: readonly string[], reason: string): Promise<boolean> {
+    // 指纹只认「这一次问卷」本身（askedAt + 问题），不认触发它的分支用词：
+    // 否则「待决分支」与「到点分支」措辞不同，会把同一份问卷发两遍
+    const askedAt = task.pendingHuman?.askedAt ?? 0
+    const fingerprint = `ask:${askedAt}:${questions.join('|')}`
     const key = `${task.taskId}\0__human__`
-    if (notified.get(key) === fingerprint) return
+    if (notified.get(key) === fingerprint) return false
+    const body = questions.length === 0
+      ? reason
+      : `${reason}\n\n${questions.map((q, i) => (questions.length > 1 ? `${i + 1}. ${q}` : q)).join('\n')}`
     const tail = task.body.trim() === '' ? '' : `\n\n当前进展：\n${task.body.trim().slice(-300)}`
-    const ok = await deliverToSender(task, `需要你确认后才能继续：${reason}。${tail}\n\n（回一句 @${task.taskLead} 或直接答复即可；不想做了可把任务文件挪到 jobs/cancel/）`)
-    if (ok) notified.set(key, fingerprint)
+    const ok = await deliverToSender(task, `${body}${tail}\n\n（回一句 @${task.taskLead} 即可；不想做了可把任务文件挪到 jobs/cancel/）`)
+    if (!ok) return false
+    notified.set(key, fingerprint)
+    // 问卷发出 → 墙钟顺延（spec：发出时刻 + task_round_timeout_ms）
+    task.deadlineAt = Date.now() + roundTimeoutMs()
+    writeTask('running', task)
+    scheduleDeadline(task)
+    return true
+  }
+
+  /** 到点但没人在跑 / 待决无人答：交回给人拍板，任务留在 running/ 等人。 */
+  async function askHumanToDecide(task: TaskBoard, reason: string): Promise<void> {
+    await sendQuestionnaire(task, task.pendingHuman?.questions ?? [], `需要你确认后才能继续：${reason}`)
   }
 
   /** 救活：对没终态又没会话的 assignee 重新 ensureAgent + 重发 md。返回是否救活了至少一个。 */

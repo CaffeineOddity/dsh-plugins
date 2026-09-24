@@ -410,6 +410,30 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     patrol.stop()
   })
 
+  it('给人发的问卷（toHuman）→ deliver 问题 + 墙钟顺延成「发出时刻 + 一个墙钟」', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const past = Date.now() - 1
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      deadlineAt: past,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: false })],
+      pendingHuman: { questions: ['要哪个尺寸？'], askedBy: a, askedAt: 123, toHuman: true },
+    }))
+    const { host, delivered } = fakeHost(['sess-a', 'sess-b'])
+    const patrol = createPatrol(host, { windowMs: 1 })
+    await patrol.tickOnce()
+    expect(delivered[0]?.text[0]).toContain('要哪个尺寸？')
+    expect(delivered[0]?.text[0]).toContain('@' + a)
+    const back = readTask('running', 'task_t1')!
+    expect(back.deadlineAt).toBeGreaterThan(past)          // 问卷发出 → 顺延
+    expect(back.deadlineAt - Date.now()).toBeGreaterThan(60_000) // 是一个完整墙钟（不是 0）
+    // 同一 askedAt 不重复发
+    await patrol.tickOnce()
+    expect(delivered).toHaveLength(1)
+  })
+
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {
     mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
     bindSession('sess-a', 'task_t1')

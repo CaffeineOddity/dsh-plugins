@@ -166,9 +166,10 @@ pendingHuman:                 # 无则省略
 | `list_group_experts` | 无参 | 专家能力卡片（含 name / description / 技能），以及此刻未 idle 的专家（通道槽或任务槽都算）。来源随全局开关 `use_hub_experts`：开=`agents.json` 全集（没绑任务也能列）；关=本任务缓存的群快照。都不含调用方自己 |
 | `list_tasks` | 无参 | 本群、本 Provider 下 `running/` 全部任务的短摘要（`taskId, taskLead, sender, access, summary, assignees, pendingHuman?`）。入站包装会带同样一份，工具供中途再查 |
 | `open_task` | `{ taskId?, access?, target? }` | 有 `taskId`：绑那份（必须是本群 running）。无：**新建并绑**（本 agent = taskLead；`access` 缺省 `write`，`target` 可空），sender / providerId / sessionParts / 群快照取自入站上下文。未 open / 未因入站绑上就 `dispatch_expert`：工具报错 |
-| `update_task` | `{ markdown?, access?, target?, summary? }` | 改本轮已绑任务的正文或允许字段。改不了 `taskLead` / `sender` |
+| `update_task` | `{ markdown?, access?, target?, summary?, clear_pending? }` | 改本轮已绑任务的正文或允许字段。改不了 `taskLead` / `sender`。`clear_pending=true` 清掉待决标记（拍板/回填后必须清，否则任务一直停在待决、永不交付） |
 | `dispatch_expert` | `{ expert_id, instruction, access, session?, title?, target_workspace?, wake? }` | 启动专家，尽快返回 `{ kind: 'running', sessionId }`，**不等** idle。`access` 必填。目标必须在本任务快照内且不是自己。运行时据快照 / `AgentConfig` 填 `expertName` / `dispatchedByName` 写入 `assignees[]`。缺合法 `target_workspace` 见下 |
-| `ask_task_lead` | `{ questions }` | **仅当本 agent 不是 taskLead。** 写入 md 待决，拒绝在瀑布里干等，叫醒 `taskLead`。taskLead 自己调：工具报错（应走 `ask_user_question`） |
+| `ask_task_lead` | `{ questions }` | **仅当本 agent 不是 taskLead。** 写入 md 待决，拒绝在瀑布里干等，叫醒 `taskLead`。taskLead 自己调：工具报错（应走 `ask_human`） |
+| `ask_human` | `{ questions }` | **仅 taskLead 可用。** 把问题上抛给**人**：写 `pendingHuman{..., toHuman:true}` → 巡检 `deliver` 问卷 @sender，并把**墙钟顺延**成「发出时刻 + 一个墙钟」等人回答 |
 
 `ask_user_question`（DSH 自带）不另注册，按驱动槽拦截，见「决策链路」。
 
@@ -316,6 +317,8 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 | taskLead 综合完成（交付） | **收口**：把 taskLead 这一轮（被叫醒那一轮）的 assistant 文本经 `deliver` 发回**原发送者所在的会话**（`providerId` + 任务里的 `sessionParts`），`@sender`；随后 `moveTask('running','done')` + 解绑该任务所有会话。综合后又派了活 → 不交付，保持 `running` |
 | 交付面（deliver 目标） | 优先发回这一单**原发送者所在的那条会话/群**（任务 frontmatter 里记的 `providerId` + `sessionParts`）。人不在群里 / 通道不支持 deliver → 退化为写日志，任务仍收口 |
 | 被派专家 `ask_user_question` / `ask_task_lead` | 只交给巡检器：写入 md，叫醒 taskLead。该专家即使 `wake=true` 也只走本行，wake 留着 |
+| 待决分两种 | `pendingHuman.toHuman` 缺省 = 上抛给 taskLead（巡检叫醒 lead 拍板）；`=true` = **给人**的问卷（巡检 `deliver` @sender 并**顺延墙钟**）。两种都按「askedAt + 问题」指纹去重，不会因触发分支措辞不同而重复发 |
+| 拍板 / 回填后 | 提问方或被问方用 `update_task{clear_pending:true}` 清待决，并改 md + 叫醒相应的人；不清就会永远卡在待决 |
 | 入站里 taskLead 自己 `ask_user_question` | 本轮 `messages` 带回问卷；写 `pendingHuman`。不经 `deliver` |
 | 人 @ 某专家 | 一律 followup 该专家（带 running 摘要）。LLM 捡起并处理待决 → 改 md，叫醒当时在等的人；不捡 → 旧文件还挂着，本轮可新建 |
 | 墙钟 `deadlineAt` | 见超时。已在综合 followup 或 wake 已在 FIFO 排队：**不做** timeout，把这次内部 followup 做完 |
@@ -398,7 +401,9 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 | 专家续期 | `expert_liveness_max_renew` 默认 3 | 还在跑则再等 W；挂了则重启再跑 |
 | 任务墙钟 | `task_round_timeout_ms` 默认 **2h** | 初值 `deadlineAt = createdAt + 该值`。**禁止** `0` 表示永不超时 |
 
-问卷发出时（本轮 `messages` 或 `deliver`）把 **该文件** 的 `deadlineAt` 改成「发出时刻 + `task_round_timeout_ms`」。`ask_task_lead` 只叫醒 A、人还没被问：**不**改 `deadlineAt`。回填后回到 running：不再改回 createdAt。
+问卷发出时（`deliver` 给人）把 **该文件** 的 `deadlineAt` 改成「发出时刻 + `task_round_timeout_ms`」——人还没答，不该算任务超时。
+`ask_task_lead` 只叫醒 taskLead、人还没被问：**不**改 `deadlineAt`。回填后回到 running：不再改回 createdAt。
+（实现见 `patrol.sendQuestionnaire`：`deliver` + 顺延 + 重排墙钟定时器。）
 
 到点**不一律判死**：先分析这单各专家的会话状态，再决定顺延、继续、综合还是交回给人。
 

@@ -39,11 +39,13 @@ export interface Assignee {
   wake: boolean
 }
 
-/** 待决人问题（把问题抛给人或任务 lead）。 */
+/** 待决问题（抛给人或任务 lead）。 */
 export interface PendingHuman {
   questions: string[]
   askedBy: string
   askedAt: number
+  /** true=这是给**人**的问卷（要 deliver @sender 并把墙钟顺延）；缺省=只上抛给 taskLead。 */
+  toHuman?: boolean
 }
 
 /** 一份任务的前台字段（运行时读写）。 */
@@ -148,6 +150,7 @@ function parsePendingHuman(raw: unknown, where: string): PendingHuman | undefine
     questions,
     askedBy: typeof rec.askedBy === 'string' ? rec.askedBy : '',
     askedAt,
+    toHuman: rec.toHuman === true,
   }
 }
 
@@ -208,6 +211,7 @@ export function marshalTaskYaml(task: SerializeTask, body: string): string {
     for (const q of task.pendingHuman.questions) lines.push(`    - ${yamlScalar(q)}`)
     lines.push(`  askedBy: ${task.pendingHuman.askedBy}`)
     lines.push(`  askedAt: ${task.pendingHuman.askedAt}`)
+    if (task.pendingHuman.toHuman === true) lines.push('  toHuman: true')
   }
   lines.push('---')
   lines.push('')
@@ -573,7 +577,7 @@ export function describeTasks(tasks: TaskBoard[]): Record<string, unknown>[] {
     summary: firstBodyLine(t.body),
     assignees: t.assignees.map((a) => ({ expertId: a.expertId, status: a.status, access: a.access, target: a.target ?? undefined })),
     pendingHuman: t.pendingHuman
-      ? { questions: t.pendingHuman.questions, askedBy: t.pendingHuman.askedBy }
+      ? { questions: t.pendingHuman.questions, askedBy: t.pendingHuman.askedBy, toHuman: t.pendingHuman.toHuman === true }
       : undefined,
     deadlineAt: t.deadlineAt,
   }))

@@ -373,12 +373,13 @@ export function registerBoardTools(ctx: {
     tools.register(
       defineTool({
         name: 'update_task',
-        description: '更新本轮已绑定任务的正文或允许字段（markdown / access / target / summary）。改不了 taskLead / sender。',
+        description: '更新本轮已绑定任务的正文或允许字段（markdown / access / target / summary / clear_pending）。改不了 taskLead / sender。',
         parameters: {
           markdown: { type: 'string', description: '新的正文（替换 md 正文）' },
           access: { type: 'string', description: '任务访问级别：read 或 write' },
           target: { type: 'string', description: 'write 时的目标目录（绝对路径）' },
           summary: { type: 'string', description: '追加一行进展摘要到正文末尾' },
+          clear_pending: { type: 'boolean', description: '清掉待决标记（拍板/回填后调用，否则任务会一直停在待决）' },
         },
         output: {
           schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
@@ -399,8 +400,10 @@ export function registerBoardTools(ctx: {
           if (args.summary !== undefined && args.summary.trim() !== '') {
             task.body = `${task.body}\n\n- ${args.summary.trim()}`
           }
+          const cleared = args.clear_pending === true && task.pendingHuman !== undefined
+          if (cleared) task.pendingHuman = undefined
           writeTask('running', task)
-          return { text: `已更新任务 ${task.taskId}` }
+          return { text: `已更新任务 ${task.taskId}${cleared ? '（已清待决）' : ''}` }
         },
       }),
     ),
@@ -497,6 +500,36 @@ export function registerBoardTools(ctx: {
             sessionId,
             text: `已派给 ${expertName}，正在处理${paused ? `；你已记为等下游（waiting），等 ${expertName} 做完会再叫醒你继续` : ''}`,
           }
+        },
+      }),
+    ),
+  )
+
+  disposeFns.push(
+    tools.register(
+      defineTool({
+        name: 'ask_human',
+        description: '把问题上抛给**人**（原发送者）：写入待决并群里发问卷 @sender，墙钟顺延等人回答。仅 taskLead 可用。',
+        parameters: {
+          questions: { type: 'array', description: '要问人的问题（1 条以上）' },
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
+          render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        async execute(args, exec) {
+          const { task, agentId } = bound(exec.agent?.id)
+          if (agentId !== task.taskLead) {
+            throw new Error('agent-bot: ask_human 仅 taskLead 可用；被派专家请用 ask_task_lead 上抛给 lead')
+          }
+          const questions = (args.questions ?? [])
+            .filter((q): q is string => typeof q === 'string')
+            .map((q) => q.trim())
+            .filter((q) => q !== '')
+          if (questions.length === 0) throw new Error('agent-bot: ask_human 需要至少一条问题')
+          task.pendingHuman = { questions, askedBy: agentId, askedAt: Date.now(), toHuman: true }
+          writeTask('running', task)
+          return { text: `已把 ${questions.length} 条问题发给原发送者（待决挂在这一单上，墙钟已顺延等人回答）` }
         },
       }),
     ),
