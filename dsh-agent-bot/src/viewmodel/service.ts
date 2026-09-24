@@ -19,7 +19,8 @@ import { createAgentRuntime, type HostServices } from '../model/runtime.js'
 import type { AgentConfig } from '../model/config.js'
 import { registerBoardTools } from '../model/teamwork/board-tools.js'
 import { createPatrol } from '../model/teamwork/patrol.js'
-import { describeTasks, listTasksIn, type GroupMember } from '../model/teamwork/task-board.js'
+import { describeTasks, listTasksIn, readTask as readTaskModel, writeTask as writeTaskModel, type GroupMember } from '../model/teamwork/task-board.js'
+import { boundTaskId } from '../model/teamwork/binding.js'
 import { rememberInbound } from '../model/teamwork/inbound.js'
 import type {
   AgentAskRequest,
@@ -257,6 +258,11 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         const values = variableValues(req, current.sessionKey)
         // 入站包装（specs/12 §入站怎么绑任务）：附本群 running 短摘要，让 LLM 认捡起/新建。
         const boardCtx = boardContextFor(live)
+        // 人的回填：入站前记下该会话绑定的任务与待决时间；这一轮结束后若待决没被换掉就清掉
+        const boundBefore = boundTaskId(decision.sessionId)
+        const pendingBefore = boundBefore === undefined
+          ? undefined
+          : readTaskModel('running', boundBefore)?.pendingHuman?.askedAt
         // 入站上下文（specs/12 §入站怎么绑任务）：记下 sender/providerId/群快照，
         // 供本轮模型调 open_task 新建任务时取用（工具作用域里本来没有这些）。
         rememberInbound(decision.sessionId, {
@@ -289,6 +295,14 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
           Date.now(),
           promptFingerprintFor(live.prompt, live.prompt_placement, live.skill_groups, live.prompt_append_skills),
         )
+        // 人 @ 了 lead 并说完这一轮 → 旧问卷视为已回填（同一 askedAt 才清；换了新问题就保留）
+        if (boundBefore !== undefined && pendingBefore !== undefined) {
+          const t = readTaskModel('running', boundBefore)
+          if (t?.pendingHuman !== undefined && t.pendingHuman.askedAt === pendingBefore) {
+            t.pendingHuman = undefined
+            writeTaskModel('running', t)
+          }
+        }
         // 交互兜底：只要还有人跟这单互动，漏掉的事件就能在这一刻补上（不再有周期巡检）
         service_notifyIdle(decision.sessionId)
         return result

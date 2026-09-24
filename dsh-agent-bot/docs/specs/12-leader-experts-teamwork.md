@@ -318,7 +318,8 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 | 交付面（deliver 目标） | 优先发回这一单**原发送者所在的那条会话/群**（任务 frontmatter 里记的 `providerId` + `sessionParts`）。人不在群里 / 通道不支持 deliver → 退化为写日志，任务仍收口 |
 | 被派专家 `ask_user_question` / `ask_task_lead` | 只交给巡检器：写入 md，叫醒 taskLead。该专家即使 `wake=true` 也只走本行，wake 留着 |
 | 待决分两种 | `pendingHuman.toHuman` 缺省 = 上抛给 taskLead（巡检叫醒 lead 拍板）；`=true` = **给人**的问卷（巡检 `deliver` @sender 并**顺延墙钟**）。两种都按「askedAt + 问题」指纹去重，不会因触发分支措辞不同而重复发 |
-| 拍板 / 回填后 | 提问方或被问方用 `update_task{clear_pending:true}` 清待决，并改 md + 叫醒相应的人；不清就会永远卡在待决 |
+| 待决的**自动清除**（不靠模型记得） | ① **上抛给 taskLead 的**：巡检叫醒 lead 并**等它这一轮结束**，若待决没被换成新的（`askedAt` 未变）就自动清掉；② **给人的问卷**：人 @ 该会话并说完这一轮后，入站收尾处自动清（同一 `askedAt` 才清，换了新问题就保留）；③ 也可显式 `update_task{clear_pending:true}` |
+| lead 这轮又问了新问题 | `askedAt` 变了 → **保留新的那份**，不误清 |
 | 入站里 taskLead 自己 `ask_user_question` | 本轮 `messages` 带回问卷；写 `pendingHuman`。不经 `deliver` |
 | 人 @ 某专家 | 一律 followup 该专家（带 running 摘要）。LLM 捡起并处理待决 → 改 md，叫醒当时在等的人；不捡 → 旧文件还挂着，本轮可新建 |
 | 墙钟 `deadlineAt` | 见超时。已在综合 followup 或 wake 已在 FIFO 排队：**不做** timeout，把这次内部 followup 做完 |

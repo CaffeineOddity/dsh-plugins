@@ -76,6 +76,7 @@ function fakeHost(
   delivered: Array<{ providerId: string; text: string[] }> = [],
   eventsBySession: Record<string, Array<{ seq: number; type: string; data?: unknown }>> = {},
   busy: string[] = [],
+  onFollowup?: (sessionId: string) => void,
 ) {
   const woken: Array<{ sessionId: string; text: string }> = []
   const host = {
@@ -90,6 +91,7 @@ function fakeHost(
           whenIdle: () => (busy.includes(sessionId) ? new Promise<void>(() => undefined) : Promise.resolve()),
           followup: (msg: { content: Array<{ text: string }> }) => {
             woken.push({ sessionId, text: msg.content[0]?.text ?? '' })
+            onFollowup?.(sessionId)
           },
           session: { seq: 0, snapshotEvents: () => eventsBySession[sessionId] ?? [] },
         } as unknown as AgentLike
@@ -432,6 +434,46 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     // 同一 askedAt 不重复发
     await patrol.tickOnce()
     expect(delivered).toHaveLength(1)
+  })
+
+  it('上抛给 lead 的待决：lead 答完后自动清掉（不靠模型记得 clear_pending）', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: false })],
+      pendingHuman: { questions: ['用哪个字体？'], askedBy: b, askedAt: 555 },
+    }))
+    const { host, woken } = fakeHost(['sess-a', 'sess-b'])
+    const patrol = createPatrol(host, { windowMs: 50 })
+    await patrol.tickOnce()
+    await patrol.flush() // 等「叫醒 lead → 等它答完 → 清待决」这个后台 job
+    expect(woken.map((w) => w.sessionId)).toContain('sess-a') // 叫醒了 lead
+    expect(readTask('running', 'task_t1')?.pendingHuman).toBeUndefined() // 自动清掉
+  })
+
+  it('lead 这轮又问了新问题（askedAt 变了）→ 保留新的待决', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: false })],
+      pendingHuman: { questions: ['用哪个字体？'], askedBy: b, askedAt: 555 },
+    }))
+    // lead 那轮里改成新问题（模拟 ask_human 写了新的 askedAt）
+    const { host } = fakeHost(['sess-a', 'sess-b'], [], {
+      'sess-a': [{ seq: 1, type: 'turn/start' }],
+    }, [], () => {
+      const t = readTask('running', 'task_t1')!
+      t.pendingHuman = { questions: ['要哪个尺寸？'], askedBy: a, askedAt: 999, toHuman: true }
+      writeTask('running', t)
+    })
+    const patrol = createPatrol(host, { windowMs: 50 })
+    await patrol.tickOnce()
+    await patrol.flush()
+    expect(readTask('running', 'task_t1')?.pendingHuman?.askedAt).toBe(999) // 新的还在
   })
 
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {

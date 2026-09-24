@@ -121,6 +121,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   const probeRenew = new Map<string, ProbeState>() // `taskId\0expertId` -> 续期状态
   const notified = new Map<string, string>() // `taskId\0agentId` -> 已叫醒时的完成情况指纹
   const delivering = new Map<string, Promise<void>>() // taskId -> 在跑的收口交付（同任务只跑一次）
+  const deciding = new Map<string, Promise<void>>() // taskId -> 在等 taskLead 拍板的 job
   const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>() // taskId -> 墙钟定时器
   const lastScheduledDeadline = new Map<string, number>() // taskId -> 已排的 deadlineAt（避免重复排）
   let lastReconcileAt = 0
@@ -145,7 +146,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
 
   /** 等所有在跑的收口交付落地（测试用；也让调用方能确定性收尾）。 */
   async function flush(): Promise<void> {
-    await Promise.allSettled([...delivering.values()])
+    await Promise.allSettled([...delivering.values(), ...deciding.values()])
   }
 
   /** 跑一轮：先扫状态机，再做一轮活性探针。run() 与测试共用。 */
@@ -340,8 +341,9 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     if (task.pendingHuman !== undefined) {
       if (task.pendingHuman.toHuman === true) {
         await askHumanToDecide(task, '有人提了问题')
-      } else {
-        await wakeOnce(task, task.taskLead, `pending:${task.pendingHuman.askedAt}`, marshalText(task))
+      } else if (!deciding.has(task.taskId)) {
+        const job = decidePendingAndClear(task).finally(() => deciding.delete(task.taskId))
+        deciding.set(task.taskId, job)
       }
       return
     }
@@ -452,6 +454,37 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     if (notified.get(key) === fingerprint) return
     const ok = await deliverToSender(task, `还在做：${names.join('、')}。做完我会回来答复。`)
     if (ok) notified.set(key, fingerprint)
+  }
+
+  /**
+   * 上抛给 taskLead 的待决：叫醒它、**等它这一轮结束**，然后自动清掉待决。
+   * 理由：待决原来只写不清（靠模型记得调 clear_pending），忘了就永久卡住。
+   * 安全点：这轮里 lead 若又问了新问题（如 `ask_human`，askedAt 变了），保留新的那份。
+   */
+  async function decidePendingAndClear(task: TaskBoard): Promise<void> {
+    const askedAt = task.pendingHuman?.askedAt
+    if (askedAt === undefined) return
+    const cfg = getAgentConfig(task.taskLead)
+    const sessionId = wakeSessionIdFor(task, task.taskLead)
+    if (cfg === undefined || sessionId === undefined) return
+    const live = host.agents()?.get(sessionId) as AgentLike | undefined
+    if (live === undefined) return
+    try {
+      const ok = await wakeOnce(task, task.taskLead, `pending:${askedAt}`, marshalText(task))
+      if (!ok) return
+      const wait = await waitIdleOrTimeout(live.whenIdle(), windowFor(cfg))
+      if (wait !== 'idle') return // 还没答完：等下次触发
+      const fresh = readTask('running', task.taskId)
+      if (fresh?.pendingHuman === undefined) return
+      if (fresh.pendingHuman.askedAt !== askedAt) return // 这轮又问了新问题 → 留新的
+      fresh.pendingHuman = undefined
+      writeTask('running', fresh)
+      // 拍板完继续推进：可能已派新活，或全终态该收口
+      await patrolTask(fresh)
+      syncDeadline(fresh.taskId)
+    } catch (err) {
+      console.warn(`agent-bot: 等 taskLead 拍板 ${task.taskId} 失败: ${(err as Error).message}`)
+    }
   }
 
   /**

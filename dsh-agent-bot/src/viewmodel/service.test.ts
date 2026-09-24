@@ -779,6 +779,34 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
     expect(asked).toBe(false) // hub 模式不问通道
   })
 
+  it('人 @lead 说完这一轮 → 旧问卷待决自动清掉', async () => {
+    seedRunnableAgent(false, 180000)
+    // 预置一份 running 任务，待决是「给人的问卷」，并把这个会话绑上去
+    const { createTask } = await import('../model/teamwork/task-board.js')
+    const { bindSession } = await import('../model/teamwork/binding.js')
+    const t = createTask({
+      taskLead: 'a1', sender: 'alice', providerId: 'demo',
+      sessionParts: { bot_id: 'r1', group_id: '1' }, originContext: 'c',
+      access: 'write', groupSnapshot: [],
+    })
+    const { readTask, writeTask } = await import('../model/teamwork/task-board.js')
+    const withPending = readTask('running', t.taskId)!
+    withPending.pendingHuman = { questions: ['要哪个尺寸？'], askedBy: 'a1', askedAt: 42, toHuman: true }
+    writeTask('running', withPending)
+
+    const svc = createAgentBotService(fakeHost([], idleNow))
+    svc.registerProvider({ id: 'demo', label: '示例通道' })
+    // 先让 a1 有一个通道槽，拿到 sessionId 后绑上该任务
+    await svc.ask(askReq('t0', 'alice'))
+    const sid = getAgent('a1')?.sessions.r1_1?.sessionId ?? ''
+    bindSession(sid, t.taskId)
+    withPending.pendingHuman = { questions: ['要哪个尺寸？'], askedBy: 'a1', askedAt: 42, toHuman: true }
+    writeTask('running', withPending)
+
+    await svc.ask(askReq('t1', 'alice')) // 人回话
+    expect(readTask('running', t.taskId)?.pendingHuman).toBeUndefined()
+  })
+
   it('开关关闭：问 listGroupAgents，过滤幽灵成员与自己', async () => {
     seedTwoAgents(false)
     let asked = 0
