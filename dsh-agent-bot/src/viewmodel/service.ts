@@ -166,10 +166,15 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
     agent: FollowupAgentLike,
     req: AgentAskRequest,
     sessionId: string,
+    firstSeq: number,
+    boundBefore?: string,
+    pendingBefore?: number,
   ): Promise<void> {
     try {
-      const firstSeq = agent.session.seq
       await agent.whenIdle()
+      // 人 @ 了这条会话并说完这一轮 → 旧问卷视为已回填（与同步路径同一套规则）
+      clearAnsweredPending(boundBefore, pendingBefore)
+      service_notifyIdle(sessionId)
       const bound = boundTaskId(sessionId)
       const task = bound === undefined ? undefined : readTaskModel('running', bound)
       if (task !== undefined && task.assignees.length > 0) return // 派了活：交给收口
@@ -184,6 +189,15 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
     } catch (err) {
       appendLog('deliver', `异步推回失败: ${err instanceof Error ? err.message : String(err)}`)
     }
+  }
+
+  /** 这一轮结束后清掉"已回填"的待决：askedAt 未变才清（换了新问题就保留）。 */
+  function clearAnsweredPending(boundBefore?: string, pendingBefore?: number): void {
+    if (boundBefore === undefined || pendingBefore === undefined) return
+    const t = readTaskModel('running', boundBefore)
+    if (t?.pendingHuman === undefined || t.pendingHuman.askedAt !== pendingBefore) return
+    t.pendingHuman = undefined
+    writeTaskModel('running', t)
   }
 
   /** 某 provider + sessionParts 的「对话」标识（板可见性用）。 */
@@ -433,8 +447,10 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         //   通道没 deliver → 同步：等这一轮（最多 W），拿文本当回复（退化路径）
         const canPush = providers.get(req.meta.providerId)?.deliver !== undefined
         if (canPush) {
-          await startFollowupTurn(agent, contextWithBoard)
-          void pushRoundResult(agent, req, decision.sessionId)
+          const firstSeq = await startFollowupTurn(agent, contextWithBoard)
+          // 回合结束后的两件事（清人的回填待决 + 交互兜底）必须放进后台任务：
+          // 异步分支在回合跑完**之前**就返回了，不能在返回路径上做。
+          void pushRoundResult(agent, req, decision.sessionId, firstSeq, boundBefore, pendingBefore)
           touchSession(
             live.id,
             sessionKey,
@@ -442,7 +458,6 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
             Date.now(),
             promptFingerprintFor(live.prompt, live.prompt_placement, live.skill_groups, live.prompt_append_skills),
           )
-          service_notifyIdle(decision.sessionId)
           return {
             messages: [{ kind: 'text', text: `已接，正在处理（agent「${live.name}」）`, url: '', atUserIds: [], atAll: false }],
             pending: null,
@@ -458,13 +473,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
           promptFingerprintFor(live.prompt, live.prompt_placement, live.skill_groups, live.prompt_append_skills),
         )
         // 人 @ 了 lead 并说完这一轮 → 旧问卷视为已回填（同一 askedAt 才清；换了新问题就保留）
-        if (boundBefore !== undefined && pendingBefore !== undefined) {
-          const t = readTaskModel('running', boundBefore)
-          if (t?.pendingHuman !== undefined && t.pendingHuman.askedAt === pendingBefore) {
-            t.pendingHuman = undefined
-            writeTaskModel('running', t)
-          }
-        }
+        clearAnsweredPending(boundBefore, pendingBefore)
         // 交互兜底：只要还有人跟这单互动，漏掉的事件就能在这一刻补上（不再有周期巡检）
         service_notifyIdle(decision.sessionId)
         return result

@@ -738,6 +738,26 @@ describe('出站按通道能力分档（specs/12 §入站出站）', () => {
     expect(delivered[0]?.text[0]).toContain('答案在此')
   })
 
+  it('异步模式（有 deliver）：人回话后同样自动清待决（回合结束后在后台做）', async () => {
+    seedRunnableAgent(false, 180000)
+    const { createTask, readTask, writeTask } = await import('../model/teamwork/task-board.js')
+    const t = createTask({
+      taskLead: 'a1', sender: 'alice', providerId: 'demo',
+      sessionParts: { bot_id: 'r1', group_id: '1' }, originContext: 'c',
+      access: 'write', groupSnapshot: [],
+    })
+    const w = readTask('running', t.taskId)!
+    w.pendingHuman = { questions: ['要哪个尺寸？'], askedBy: 'a1', askedAt: 7, toHuman: true }
+    writeTask('running', w)
+
+    const svc = createAgentBotService(fakeHost([], idleNow))
+    svc.registerProvider({ id: 'demo', label: '示例通道', deliver: async () => undefined })
+    const r = await svc.ask(askReq('t1', 'alice'))
+    expect(r.messages.map((m) => m.text).join('')).toContain('已接') // 立刻回执
+    await new Promise((res) => setTimeout(res, 30))                  // 等后台收尾
+    expect(readTask('running', t.taskId)?.pendingHuman).toBeUndefined()
+  })
+
   it('通道没有 deliver → 保持同步：直接回这一轮的文本（退化路径）', async () => {
     seedRunnableAgent(false, 180000)
     const events = [
