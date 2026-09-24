@@ -165,7 +165,7 @@ async function api(path, options) {
   return data
 }
 
-const STATUS_PILL = { ok: 'ok', error: 'error', running: 'running' }
+const STATUS_PILL = { ok: 'ok', error: 'error', running: 'running', break: 'off' }
 const PERM_LABEL = { 'read-only': '仅可查看', 'workspace-write': '工作区内修改', 'danger-full-access': '完全权限' }
 
 function esc(text) {

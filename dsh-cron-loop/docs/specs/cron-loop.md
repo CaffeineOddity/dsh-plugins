@@ -44,6 +44,8 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
   1. 遍历 enabled job，用 `computeNextRun`（`cron-core.ts` 纯函数，本地时区）算 `nextRunAt`；
   2. `nextRunAt <= now` 的 job 进入执行：先置 `lastStatus: 'running'` 并写 running run 记录，
      防重入（同一 job 同时至多一个在途执行）。
+  3. 触发时该 job 已有在途执行（`inFlight`）：本次触发跳过（break，非 error），
+     写一条 `status: 'break'` 的 run 记录，`lastStatus: 'break'`，等下一个 cron 触发时机。
 - 执行：`ctx.agents` create/resume，对齐 ruliu-bridge 的 `ensureAgent` 三态模型。
   - lifecycle 判定：`agents.get(sid)` 在内存 -> live；`isPersisted`（`sessionPersistence.list`
     扫磁盘）-> resume；都没有 -> create。

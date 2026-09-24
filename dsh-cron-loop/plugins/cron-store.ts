@@ -42,8 +42,8 @@ export interface CronJobRecord {
   updatedAt: number
   /** 最近一次触发时间（epoch ms）。 */
   lastRunAt?: number
-  /** 最近一次触发结果。 */
-  lastStatus?: 'ok' | 'error' | 'running'
+  /** 最近一次触发结果。break = 触发时上一次执行未结束，本次跳过。 */
+  lastStatus?: 'ok' | 'error' | 'running' | 'break'
   /** 由调度器刷新的下次触发时间（epoch ms）。 */
   nextRunAt?: number
   /** 累计执行统计：total 总轮次，ok 成功轮次（由调度器在每轮终态时递增）。 */
@@ -62,8 +62,8 @@ export interface CronRunRecord {
   startedAt: number
   /** 结束时间（epoch ms）；running 时缺省。 */
   finishedAt?: number
-  /** 执行状态。 */
-  status: 'running' | 'ok' | 'error'
+  /** 执行状态。break = 触发时已有在途执行，本次跳过。 */
+  status: 'running' | 'ok' | 'error' | 'break'
   /** 执行会话 id（可跳转续聊）。 */
   sessionId?: string
   /** 最终 assistant 文本（截断 500 字）。 */
@@ -92,7 +92,7 @@ const jobSchema = z.object({
   createdAt: z.number(),
   updatedAt: z.number(),
   lastRunAt: z.number().optional(),
-  lastStatus: z.enum(['ok', 'error', 'running']).optional(),
+  lastStatus: z.enum(['ok', 'error', 'running', 'break']).optional(),
   nextRunAt: z.number().optional(),
   runStats: z.object({ total: z.number(), ok: z.number() }).optional(),
 })
@@ -104,7 +104,7 @@ const runSchema = z.object({
   jobName: z.string().min(1),
   startedAt: z.number(),
   finishedAt: z.number().optional(),
-  status: z.enum(['running', 'ok', 'error']),
+  status: z.enum(['running', 'ok', 'error', 'break']),
   sessionId: z.string().optional(),
   summary: z.string().optional(),
   error: z.string().optional(),

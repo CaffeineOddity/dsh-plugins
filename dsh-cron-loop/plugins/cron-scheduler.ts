@@ -218,7 +218,22 @@ async function runJob(ctx: Context, job: CronJobRecord): Promise<void> {
   }
   // inFlight 由 runJob 统一持有：入口 add，finally 释放。tick/trigger 只做检查，
   // 链式续跑先释放再同步进入下一轮 runJob（无 await 间隙，不会与 tick 竞争）。
-  if (inFlight.has(job.id)) return
+  if (inFlight.has(job.id)) {
+    // 上一次执行还在跑：本次触发记 break（非 error），等下一个 cron 时机。
+    ctx.logger?.info?.(`cron-scheduler: job ${job.id} previous run still in flight, skipping this trigger (break)`)
+    const breakRun: CronRunRecord = {
+      id: `run-${job.id}-${Date.now()}`,
+      jobId: job.id,
+      jobName: job.name,
+      startedAt: Date.now(),
+      finishedAt: Date.now(),
+      status: 'break',
+      summary: '上次执行仍在进行，本次触发跳过（break）',
+    }
+    await store.putRun(breakRun)
+    await mergeJobUpdate(store, job.id, { lastRunAt: breakRun.startedAt, lastStatus: 'break', updatedAt: Date.now() })
+    return
+  }
   inFlight.add(job.id)
   const runId = `run-${job.id}-${Date.now()}`
   const startedAt = Date.now()
@@ -431,7 +446,10 @@ export function getCronLoopScheduler(): CronLoopScheduler {
 async function triggerJobNowOn(ctx: Context, jobId: string): Promise<void> {
   const job = ctx.cronLoopStore.jobs.get(jobId)
   if (job === undefined) throw new Error(`cron-scheduler: job ${jobId} not found`)
-  if (inFlight.has(jobId)) throw new Error(`cron-scheduler: job ${jobId} already running`)
+  if (inFlight.has(jobId)) {
+    ctx.logger?.info?.(`cron-scheduler: job ${jobId} already running, skip manual trigger (break)`)
+    return
+  }
   await runJob(ctx, job)
 }
 
