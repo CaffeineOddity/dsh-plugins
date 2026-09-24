@@ -739,7 +739,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       ? reason
       : `${reason}\n\n${questions.map((q, i) => (questions.length > 1 ? `${i + 1}. ${q}` : q)).join('\n')}`
     const tail = task.body.trim() === '' ? '' : `\n\n当前进展：\n${task.body.trim().slice(-300)}`
-    const ok = await deliverToSender(task, `${body}${tail}\n\n（回一句 @${task.taskLead} 即可；不想做了可把任务文件挪到 jobs/cancel/）`)
+    const ok = await deliverToSender(task, `${body}${tail}\n\n（回一句 @${task.leadName} 即可；不想做了可把任务文件挪到 jobs/cancel/）`)
     if (!ok) return false
     notified.set(key, fingerprint)
     // 问卷发出 → 墙钟顺延（spec：发出时刻 + task_round_timeout_ms）

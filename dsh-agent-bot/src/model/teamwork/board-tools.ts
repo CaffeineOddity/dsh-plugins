@@ -376,6 +376,7 @@ export function registerBoardTools(ctx: {
           if (rawTarget !== '' && !rawTarget.startsWith('/')) throw new Error('agent-bot: target 必须是绝对路径')
           const task = createTask({
             taskLead: who.agentId,
+            leadName: who.agentName,
             sender: inbound.sender,
             providerId: inbound.providerId,
             sessionParts: inbound.sessionParts,

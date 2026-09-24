@@ -205,7 +205,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
       for (const r of running) {
         const ph = r.pendingHuman as undefined | { questions?: string[] }
         const pending = ph === undefined ? '' : ` 待决:${String(ph.questions?.join('; ') ?? '')}`
-        lines.push(`- ${String(r.taskId)}: lead=${String(r.taskLead)} sender=${String(r.sender)} access=${String(r.access)} 摘要=${String(r.summary ?? '')}${pending}`)
+        lines.push(`- ${String(r.taskId)}: lead=${String(r.leadName ?? r.taskLead)}(${String(r.taskLead)}) sender=${String(r.sender)} access=${String(r.access)} 摘要=${String(r.summary ?? '')}${pending}`)
       }
       lines.push('（若是同一件事：open_task 捡起那一单；若是另一件事：open_task{new:true} 另起一单）')
     }

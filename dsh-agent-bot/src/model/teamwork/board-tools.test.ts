@@ -110,6 +110,7 @@ describe('open_task：把当前会话写进该单任务槽', () => {
     const t: TaskBoard = {
       taskId: 'task_ot',
       taskLead: bobId,
+      leadName: 'Bob',
       sender: 'alice',
       providerId: 'demo',
       sessionParts: { bot_id: 'r1', group_id: 'g1' },

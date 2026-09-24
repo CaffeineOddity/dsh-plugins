@@ -54,6 +54,8 @@ export interface PendingHuman {
 export interface TaskBoard {
   taskId: string
   taskLead: string
+  /** taskLead 的显示名（创建时快照；agent 改名不回填。旧文件缺字段时回退成 taskLead）。 */
+  leadName: string
   sender: string
   providerId: string
   sessionParts: Record<string, string>
@@ -171,6 +173,8 @@ function parsePendingHuman(raw: unknown, where: string): PendingHuman | undefine
 interface SerializeTask {
   taskId: string
   taskLead: string
+  /** 有则写进 frontmatter（新文件都有；兼容老调用点）。 */
+  leadName?: string
   sender: string
   providerId: string
   sessionParts: Record<string, string>
@@ -189,6 +193,7 @@ export function marshalTaskYaml(task: SerializeTask, body: string): string {
   const lines: string[] = ['---']
   lines.push(`taskId: ${task.taskId}`)
   lines.push(`taskLead: ${task.taskLead}`)
+  lines.push(`leadName: ${yamlScalar(task.leadName ?? task.taskLead)}`)
   lines.push(`sender: ${yamlScalar(task.sender)}`)
   lines.push(`providerId: ${task.providerId}`)
   lines.push('sessionParts:')
@@ -267,6 +272,10 @@ export function unmarshalTask(markdown: string): TaskBoard {
   return {
     taskId: reqString(rec, 'taskId', where),
     taskLead: reqString(rec, 'taskLead', where),
+    // 旧文件没有 leadName：回退成 id，不抛错（保证已在跑的任务仍可读）
+    leadName: typeof rec.leadName === 'string' && rec.leadName !== ''
+      ? rec.leadName
+      : reqString(rec, 'taskLead', where),
     sender: reqString(rec, 'sender', where),
     providerId: reqString(rec, 'providerId', where),
     sessionParts,
@@ -469,6 +478,8 @@ function taskFile(status: TaskStatus, taskId: string): string {
 export interface CreateTaskInput {
   /** 谁被 @，谁就是这一单的 lead。 */
   taskLead: string
+  /** lead 的显示名（缺省用 id）。 */
+  leadName?: string
   sender: string
   providerId: string
   sessionParts: Record<string, string>
@@ -497,6 +508,7 @@ export function createTask(input: CreateTaskInput): TaskBoard {
   const task: TaskBoard = {
     taskId,
     taskLead: input.taskLead,
+    leadName: input.leadName !== undefined && input.leadName !== '' ? input.leadName : input.taskLead,
     sender: input.sender,
     providerId: input.providerId,
     sessionParts: { ...input.sessionParts },
@@ -601,6 +613,7 @@ export function describeTasks(tasks: TaskBoard[]): Record<string, unknown>[] {
   return tasks.map((t) => ({
     taskId: t.taskId,
     taskLead: t.taskLead,
+    leadName: t.leadName,
     sender: t.sender,
     originContext: t.originContext,
     access: t.access,

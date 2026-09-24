@@ -42,6 +42,7 @@ function task(over: Partial<TaskBoard> = {}): TaskBoard {
   return {
     taskId: 'task_t1',
     taskLead: 'lead',
+    leadName: 'Lead',
     sender: 'alice',
     providerId: 'demo',
     sessionParts: { bot_id: 'b1', group_id: 'g1' },
@@ -440,7 +441,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     const patrol = createPatrol(host, { windowMs: 1 })
     await patrol.tickOnce()
     expect(delivered[0]?.text[0]).toContain('要哪个尺寸？')
-    expect(delivered[0]?.text[0]).toContain('@' + a)
+    expect(delivered[0]?.text[0]).toContain('@Lead')      // 问卷 @ 的是**名字**，不是 agent id
     const back = readTask('running', 'task_t1')!
     expect(back.deadlineAt).toBeGreaterThan(past)          // 问卷发出 → 顺延
     expect(back.deadlineAt - Date.now()).toBeGreaterThan(60_000) // 是一个完整墙钟（不是 0）

@@ -28,6 +28,7 @@ function sampleTask(id = 'task_abc'): TaskBoard {
   return {
     taskId: id,
     taskLead: 'lead1',
+    leadName: '周bot通',
     sender: 'alice',
     providerId: 'demo',
     sessionParts: { bot_id: 'r1', group_id: 'g9' },
@@ -189,6 +190,30 @@ describe('createTask（新建任务落 running/）', () => {
     })
     expect(t.target).toBeUndefined()
     expect(t.deadlineAt - t.createdAt).toBe(loadConfig().task_round_timeout_ms)
+  })
+})
+
+describe('leadName', () => {
+  it('落盘并读回；createTask 缺省用 id 兜底', () => {
+    const t = createTask({
+      taskLead: 'a1', sender: 'alice', providerId: 'demo',
+      sessionParts: { bot_id: 'r1', group_id: 'g1' }, originContext: 'c',
+      access: 'write', groupSnapshot: [],
+    })
+    expect(t.leadName).toBe('a1') // 没给就用 id
+    const t2 = createTask({
+      taskLead: 'a1', leadName: '周bot通', sender: 'alice', providerId: 'demo',
+      sessionParts: { bot_id: 'r1', group_id: 'g1' }, originContext: 'c',
+      access: 'write', groupSnapshot: [],
+    })
+    expect(readTask('running', t2.taskId)?.leadName).toBe('周bot通')
+  })
+
+  it('旧文件没有 leadName → 回退成 taskLead，不抛错（在跑的任务仍可读）', () => {
+    const yaml = marshalTaskYaml(sampleTask('task_old'), '')
+    const legacy = yaml.replace(/^leadName: .*\n/m, '')
+    expect(legacy).not.toContain('leadName')
+    expect(unmarshalTask(legacy).leadName).toBe('lead1')
   })
 })
 

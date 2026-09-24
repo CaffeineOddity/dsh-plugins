@@ -116,12 +116,17 @@ jobs/
 
 ### frontmatter（运行时写，模型可读不可直接改关键键）
 
-模型用 `update_task` 改正文和允许的字段；`taskId` / `taskLead` / `sender` / `sessionParts` 创建后不可改。
+模型用 `update_task` 改正文和允许的字段；`taskId` / `taskLead` / `leadName` / `sender` / `sessionParts` 创建后不可改。
+
+`leadName` 是**创建时的名字快照**（与 `assignees[].expertName` / `dispatchedByName` 同规则，agent 改名不回填）。
+用途：问卷文案要 `@` 的是**名字**（`@周bot通`），不是 agentId（`@a1` 在 IM 里对人没意义）；摘要里也显示名字。
+**旧文件缺该字段时回退成 `taskLead`**，不抛错（保证已在跑的任务仍可读）。
 
 ```yaml
 ---
 taskId: task_xxx
 taskLead: <最初被 @ 的 agentId>
+leadName: <taskLead 的显示名，创建时快照>
 sender: <sender>
 providerId: demo
 sessionParts: { bot_id, group_id }
