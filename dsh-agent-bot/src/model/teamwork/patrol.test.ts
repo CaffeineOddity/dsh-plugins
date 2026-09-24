@@ -72,7 +72,13 @@ function assignee(over: Partial<Assignee> = {}): Assignee {
   }
 }
 
-/** 假 host：记录 followup 到的 sessionId；agents().get 只看注册过的 id。 */
+/**
+ * 假 host：记录 followup 到的 sessionId；agents().get 只看注册过的 id。
+ * 回合生命周期要真实：`followup` 会**把会话变成 running**，跑完（默认下一个宏任务，
+ * 或 idleAfterFollowupMs 毫秒后）回到 idle —— 否则"Is this turn started?" 这类判断测不出来。
+ * `busy` 里的会话表示"一直在跑"，whenIdle 永不 resolve（用来测顺延/等锁）。
+ * `noopFollowup` 里的会话表示"叫了也不开跑"（用来测"还没开始就别当它做完了"）。
+ */
 function fakeHost(
   live: string[],
   delivered: Array<{ providerId: string; text: string[] }> = [],
@@ -80,8 +86,10 @@ function fakeHost(
   busy: string[] = [],
   onFollowup?: (sessionId: string) => void,
   cancelled: string[] = [],
+  opts: { idleAfterFollowupMs?: number; noopFollowup?: string[] } = {},
 ) {
   const woken: Array<{ sessionId: string; text: string }> = []
+  const turning = new Set<string>() // followup 开了这一轮（跑完会回 idle）
   const host = {
     async ensureAgent(input: { sessionId: string }): Promise<AgentLike> {
       if (!live.includes(input.sessionId)) live.push(input.sessionId)
@@ -90,13 +98,25 @@ function fakeHost(
     agents: () => ({
       get: (sessionId: string) => {
         if (!live.includes(sessionId)) return undefined
+        const perma = busy.includes(sessionId)
         return {
-          status: busy.includes(sessionId) ? 'running' : 'idle',
+          get status(): 'idle' | 'running' {
+            return perma || turning.has(sessionId) ? 'running' : 'idle'
+          },
           cancel: () => { cancelled.push(sessionId) },
-          whenIdle: () => (busy.includes(sessionId) ? new Promise<void>(() => undefined) : Promise.resolve()),
+          whenIdle: () =>
+            new Promise<void>((resolve) => {
+              if (perma) return // 一直忙：永不 resolve
+              if (!turning.has(sessionId)) return resolve()
+              setTimeout(() => {
+                turning.delete(sessionId)
+                resolve()
+              }, opts.idleAfterFollowupMs ?? 0)
+            }),
           followup: (msg: { content: Array<{ text: string }> }) => {
             woken.push({ sessionId, text: msg.content[0]?.text ?? '' })
             onFollowup?.(sessionId)
+            if (!(opts.noopFollowup ?? []).includes(sessionId)) turning.add(sessionId)
           },
           session: { seq: 0, snapshotEvents: () => eventsBySession[sessionId] ?? [] },
         } as unknown as AgentLike
@@ -725,7 +745,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     expect(fence.occupied('/proj')).toBe(true) // 重新占住
   })
 
-  it('综合超时后重试仍能交付（不再被"只叫一次"的指纹挡死）', async () => {
+  it('慢综合也能交付（收口不再设人为窗口）', async () => {
     const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     writeTask('running', task({
@@ -734,21 +754,29 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
       assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: true })],
     }))
     const events = { 'sess-a': [{ seq: 0, type: 'turn/start' }, { seq: 1, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '海报已出好' }] } } }] }
-    const delivered: Array<{ providerId: string; text: string[] }> = []
-    // 第一轮：lead 一直在跑（busy）→ 等超时 → 不交付
-    const first = fakeHost(['sess-a', 'sess-b'], delivered, events, ['sess-a'])
-    const p1 = createPatrol(first.host, { windowMs: 5 })
-    await p1.tickOnce()
-    await p1.flush()
-    expect(delivered).toHaveLength(0)
-    expect(readTask('running', 'task_t1')).toBeDefined() // 还在 running/
-    // 第二轮：lead 空闲了（busy 清掉）→ 重试必须继续等并交付
-    const second = fakeHost(['sess-a', 'sess-b'], delivered, events, [])
-    const p2 = createPatrol(second.host, { windowMs: 50 })
-    await p2.tickOnce()
-    await p2.flush()
+    const { host, delivered } = fakeHost(['sess-a', 'sess-b'], [], events, [], undefined, [], { idleAfterFollowupMs: 20 })
+    const patrol = createPatrol(host, { windowMs: 5 }) // 窗口设很小也不影响：收口等的是"它真的跑完"
+    await patrol.tickOnce()
+    await patrol.flush()
     expect(delivered[0]?.text[0]).toContain('海报已出好')
     expect(readTask('done', 'task_t1')).toBeDefined()
+  })
+
+  it('叫醒了但还没开跑（仍 idle 且无新事件）→ 不交付空文本、不移 done', async () => {
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: true })],
+    }))
+    const { host, delivered } = fakeHost(['sess-a', 'sess-b'], [], {}, [], undefined, [], { noopFollowup: ['sess-a'] })
+    const patrol = createPatrol(host, { windowMs: 50 })
+    await patrol.tickOnce()
+    await patrol.flush()
+    expect(delivered).toHaveLength(0)                    // 没发「（综合无输出）」这种假答案
+    expect(readTask('running', 'task_t1')).toBeDefined() // 也没移 done
+    expect(readTask('done', 'task_t1')).toBeUndefined()
   })
 
   it('deliver 失败 → 不移 done/，留在 running/ 等重试', async () => {

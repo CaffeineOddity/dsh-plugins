@@ -688,14 +688,26 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
           })
         }
       }
-      const wait = await waitIdleOrTimeout(live.whenIdle(), windowFor(cfg))
-      if (wait !== 'idle') return // 还在综合：下次触发继续等（不再被指纹挡住）
-      const text = summarizeOwnedInterval(live.session.snapshotEvents(), st.firstSeq) || '（综合无输出）'
+      // 等它综合完——**不设人为窗口**。但必须先确认"这一轮真的开始了"：
+      // followup 之后 agent 可能还没开跑，此时 whenIdle() 会立刻 resolve，
+      // 取到空文本就会发出「（综合无输出）」并移 done（假成功）。
+      if (live.status === 'running') {
+        await live.whenIdle()
+      } else if (!hasEventsAfter(live, st.firstSeq)) {
+        return // 还没开跑：本轮不动，等下次触发（collecting 留着）
+      }
+      const text = summarizeOwnedInterval(live.session.snapshotEvents(), st.firstSeq)
+      if (text === '') return // 这一轮没有产出：不发明假答案，下次再来
       st.text = text
       await retryDeliver(task, text)
     } catch (err) {
       console.warn(`agent-bot: 收口交付 ${task.taskId} 失败（文件留在 running/）: ${(err as Error).message}`)
     }
+  }
+
+  /** 从 firstSeq 之后有没有新事件（用来判断"叫醒的那一轮到底跑没跑过"）。 */
+  function hasEventsAfter(live: { session: { snapshotEvents(): Array<{ seq: number }> } }, firstSeq: number): boolean {
+    return live.session.snapshotEvents().some((e) => e.seq > firstSeq)
   }
 
   /** 投递收口文本；成功且没有新活 → 移 done/ + 解绑；失败留着下次重试。 */
@@ -737,14 +749,21 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     const cfg = getAgentConfig(task.taskLead)
     const sessionId = wakeSessionIdFor(task, task.taskLead)
     if (cfg === undefined || sessionId === undefined) return
-    const live = host.agents()?.get(sessionId) as AgentLike | undefined
+    const live = host.agents()?.get(sessionId) as
+      | (AgentLike & { session: { seq: number; snapshotEvents(): Array<{ seq: number }> } })
+      | undefined
     if (live === undefined) return
     try {
+      const firstSeq = live.session.seq // 叫醒前的起点（判断这一轮跑没跑过）
       // 叫醒只做一次（指纹去重）；即使"已叫醒过"也要继续等它这一轮——
       // 否则上一次等超时后，重试会被指纹挡住，待决永远清不掉。
       await wakeOnce(task, task.taskLead, `pending:${askedAt}`, marshalText(task))
-      const wait = await waitIdleOrTimeout(live.whenIdle(), windowFor(cfg))
-      if (wait !== 'idle') return // 还没答完：等下次触发
+      // 不设窗口，但要先确认它真的开跑了，否则"刚叫醒仍 idle"会被当成答完、把待决误清
+      if (live.status === 'running') {
+        await live.whenIdle()
+      } else if (!hasEventsAfter(live, firstSeq)) {
+        return // 还没开跑：等下次触发
+      }
       const fresh = readTask('running', task.taskId)
       if (fresh?.pendingHuman === undefined) return
       if (fresh.pendingHuman.askedAt !== askedAt) return // 这轮又问了新问题 → 留新的
