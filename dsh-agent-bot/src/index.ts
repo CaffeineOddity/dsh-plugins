@@ -23,6 +23,8 @@ declare module '@deepseek-ai/cordis' {
   interface Events {
     'agent/status'(payload: { agent: { id: string }; status: 'idle' | 'running' }): void
     'agent/disposed'(payload: { agent: { id: string } }): void
+    /** 会话日志 post-commit 追加 feed（只用来观测审批审计事件）。 */
+    'session/event'(session: { id: string }, event: { type: string; data?: unknown }): void
   }
 }
 
@@ -151,6 +153,13 @@ export function apply(ctx: Context, config: AgentBotConfig = {}): void {
     service.notifyAgentDisposed(String(agent.id))
   })
 
+  // 审批审计事件写在会话日志里：靠 session/event 实时观测，检测「卡在等审批」。
+  // 事件很频（每次 append 都发），所以只认这两个 type，其余立即返回。
+  const disposeSessionEvent = ctx.on('session/event', (session, event) => {
+    if (event.type !== 'approval/asked' && event.type !== 'approval/decided') return
+    service.notifySessionEvent(String(session.id))
+  })
+
   const disposeRpc = registerRpcRoute(ctx, { listProviders: () => service.listProviders(), localAsk: (rawInput: string, sessionKey?: string) => service.localAsk(rawInput, sessionKey) })
   const disposePage = registerConfigSite(ctx)
   const disposeTool = tools ? registerAgentAskTool(tools, service) : undefined
@@ -166,6 +175,7 @@ export function apply(ctx: Context, config: AgentBotConfig = {}): void {
   ctx.effect(() => () => {
     disposeAgentStatus()
     disposeAgentDisposed()
+    disposeSessionEvent()
     unwatch()
     if (disposeRpc) disposeRpc()
     if (disposePage) disposePage()

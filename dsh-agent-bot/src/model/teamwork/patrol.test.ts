@@ -476,6 +476,50 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     expect(readTask('running', 'task_t1')?.pendingHuman?.askedAt).toBe(999) // 新的还在
   })
 
+  it('专家卡在等审批 → 标 need_decision + 通知人（只发一次）；批准后回到 running', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const bEvents = [
+      { seq: 1, type: 'turn/start' },
+      { seq: 2, type: 'approval/asked', data: { id: 'ap1', toolName: 'write_file', reason: '要写工作区外文件' } },
+    ]
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'running', wake: true })],
+    }))
+    const { host, delivered } = fakeHost(['sess-a', 'sess-b'], [], { 'sess-b': bEvents }, ['sess-b'])
+    const patrol = createPatrol(host, { windowMs: 1 })
+
+    await patrol.tickOnce()
+    expect(readTask('running', 'task_t1')?.assignees[0]?.status).toBe('need_decision')
+    expect(delivered[0]?.text[0]).toContain('等你批准')
+    expect(delivered[0]?.text[0]).toContain('write_file')
+
+    await patrol.tickOnce() // 仍卡着 → 不重复通知
+    expect(delivered).toHaveLength(1)
+
+    // 人批准了 → 会话日志出现配对的 decided → 回到 running
+    bEvents.push({ seq: 3, type: 'approval/decided', data: { id: 'ap1', outcome: 'allowed-once' } })
+    await patrol.tickOnce()
+    expect(readTask('running', 'task_t1')?.assignees[0]?.status).toBe('running')
+  })
+
+  it('只有专家在等审批时，到点不再无限顺延，而是交回给人', async () => {
+    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      deadlineAt: Date.now() - 1,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'need_decision', wake: true })],
+    }))
+    const { host, delivered } = fakeHost(['sess-a', 'sess-b'], [], {}, ['sess-b'])
+    const patrol = createPatrol(host, { windowMs: 1 })
+    await patrol.tickOnce()
+    expect(delivered.some((d) => d.text[0]?.includes('需要你确认'))).toBe(true)
+  })
+
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {
     mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
     bindSession('sess-a', 'task_t1')

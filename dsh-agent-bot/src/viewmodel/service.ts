@@ -216,6 +216,10 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         appendLog('patrol', `会话销毁处理失败 sid=${sessionId}: ${err instanceof Error ? err.message : String(err)}`)
       })
     },
+    notifySessionEvent(sessionId: string): void {
+      // 审批状态变了 → 复核这一单（检测与标记都在 patrol 里读会话日志得出）
+      void patrol.reconcile(sessionId).catch(() => undefined)
+    },
     notifyAgentIdle(sessionId: string): void {
       // 事件驱动快路径：不 await（事件是同步 emit，别拖慢派发链）
       void patrol.reconcile(sessionId).catch((err: unknown) => {

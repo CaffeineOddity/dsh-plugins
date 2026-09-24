@@ -250,6 +250,31 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     return options.roundTimeoutMs ?? loadConfig().task_round_timeout_ms
   }
 
+  /**
+   * 该会话此刻未配对的审批请求（`approval/asked` 有、`approval/decided` 没有）。
+   * 审批审计事件写在**会话日志**里（`session.append`），所以我们读自己这一路的日志即可，
+   * 会话关联天然就有（specs/12 §决策链路）。
+   */
+  function openApprovals(live: AgentLike): Array<{ id: string; toolName: string; reason: string }> {
+    const events = live.session.snapshotEvents() as Array<{ type: string; data?: unknown }>
+    const asked = new Map<string, { id: string; toolName: string; reason: string }>()
+    for (const e of events) {
+      const d = (e.data ?? {}) as { id?: unknown; toolName?: unknown; reason?: unknown }
+      const id = typeof d.id === 'string' ? d.id : ''
+      if (id === '') continue
+      if (e.type === 'approval/asked') {
+        asked.set(id, {
+          id,
+          toolName: typeof d.toolName === 'string' ? d.toolName : '',
+          reason: typeof d.reason === 'string' ? d.reason : '',
+        })
+      } else if (e.type === 'approval/decided') {
+        asked.delete(id)
+      }
+    }
+    return [...asked.values()]
+  }
+
   /** 该 assignee 的会话是否还活着（在跑）。 */
   function agentAlive(a: Assignee): boolean {
     return a.sessionId !== '' && host.agents()?.get(a.sessionId) !== undefined
@@ -307,7 +332,8 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     if (task.deadlineAt > 0 && now >= task.deadlineAt) {
       const pending = task.pendingHuman !== undefined
       const unfinished = task.assignees.filter((a) => !isTerminal(a))
-      const someoneAlive = unfinished.some(agentAlive)
+      // need_decision = 卡在等人批准：不算「还在跑」，否则会被无限顺延
+      const someoneAlive = unfinished.some((a) => a.status !== 'need_decision' && agentAlive(a))
 
       if (allDone && !pending) {
         // ① 都做完了没综合 → 就走下面的正常收口（不是超时）
@@ -514,6 +540,23 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     return true
   }
 
+  /** 通知人：某专家卡在等审批（同一请求 id 只发一次）。 */
+  async function notifyApprovalWait(
+    task: TaskBoard,
+    a: Assignee,
+    open: ReadonlyArray<{ id: string; toolName: string; reason: string }>,
+  ): Promise<void> {
+    const name = a.expertName === '' ? a.expertId : a.expertName
+    const fingerprint = `approval:${open.map((o) => o.id).sort().join(',')}`
+    const key = `${task.taskId}\0${a.expertId}`
+    if (notified.get(key) === fingerprint) return
+    const detail = open
+      .map((o) => `${o.toolName === '' ? '某操作' : o.toolName}${o.reason === '' ? '' : `（${o.reason}）`}`)
+      .join('、')
+    const ok = await deliverToSender(task, `${name} 卡在等你批准：${detail}。\n\n请到网页确认；确认后它会自己继续，我等它做完再回来答复。`)
+    if (ok) notified.set(key, fingerprint)
+  }
+
   /** 到点但没人在跑 / 待决无人答：交回给人拍板，任务留在 running/ 等人。 */
   async function askHumanToDecide(task: TaskBoard, reason: string): Promise<void> {
     await sendQuestionnaire(task, task.pendingHuman?.questions ?? [], `需要你确认后才能继续：${reason}`)
@@ -566,9 +609,23 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     // 同一轮里前面可能已把这份任务收口移走（done/ 或人手工挪走）→ 别再用旧快照写回去复活它
     if (readTask('running', task.taskId) === undefined) return
     for (const a of task.assignees) {
-      if (a.status !== 'running') continue
+      if (isTerminal(a)) continue
       const cfg = getAgentConfig(a.expertId)
       if (cfg === undefined) continue
+      // 等审批：标记 need_decision + 通知人去网页批准；批准/拒绝后回到 running
+      const waitLive = host.agents()?.get(a.sessionId) as AgentLike | undefined
+      if (waitLive !== undefined) {
+        const open = openApprovals(waitLive)
+        if (open.length > 0 && a.status !== 'need_decision') {
+          a.status = 'need_decision'
+          if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
+          await notifyApprovalWait(task, a, open)
+        } else if (open.length === 0 && a.status === 'need_decision') {
+          a.status = 'running'
+          if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
+        }
+      }
+      if (a.status !== 'running') continue
       const key = `${task.taskId}\0${a.expertId}`
       let st = probeRenew.get(key)
       if (st === undefined || st.sessionId !== a.sessionId) {

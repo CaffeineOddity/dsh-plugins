@@ -2,7 +2,7 @@
 
 > **实现进度（SDD 标记）**：任务板模型（`task-board.ts`）、会话绑定（`binding.ts`）、中继（`relay.ts`）、六件看板工具（`board-tools.ts`）、巡检器（`patrol.ts` 含活性探针/超时/重启）、service 接线（toolsMount 挂载 + deliver 路由 + 入站 running 摘要包装）均已实现。测试见各 `*.test.ts`。
 > 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、deliver @sender 收口、重启按 `jobs/running/` 恢复；全局开关 `use_hub_experts`（默认 true=中枢全集）；`open_task` 新建任务（入站上下文提供 sender/providerId/群快照）；派发时 fiber 绑定协作槽 + prompt 带任务文件绝对路径；中间层派下游后 `waiting` 暂停、下游终态后恢复；**全终态 → 叫醒 taskLead 综合 → 取其该轮产出 deliver @sender → 移 `done/` + 解绑**；墙钟到点按会话状态分四种处理（顺延/进度反馈/救活/交回给人）；`jobs/cancel/` 人工取消；任务移走后自动解绑。
-> 未做：dsh-`user-questions/request` waterfall 拦截（本插件包无法导入 `dsh-user-questions`），`ask_task_lead` 仅 tools 实现，真实问卷走 Web answerer。
+> 未做：入站 `ask_user_question` 的拦截。`dsh-user-questions` **只有 `user-questions/request` waterfall，没有会话日志事件**，拿不到「正在等问卷」的信号；且 spec 不拦截审批/问卷 waterfall。替代：`ask_human` 工具（lead 主动把问题上抛给人），prompt 里引导 lead 用它。
 > 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）。
 
 ## 背景与目标
@@ -373,6 +373,27 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 - 墙钟定时器是**内存态**：进程重启会丢，由 `start()` 的补扫重建。
 - 没有任何兜底扫描 ⇒ 漏事件的唯一自愈路径是「启动扫一次」与「入站互动时复核」。
   这是去掉轮询的代价：若事件丢失且无人再与这单互动，该单会停在原地等下一次互动。
+
+### 等人拍板 / 等审批的状态标记（`need_decision`）
+
+`assignees[].status` 里 `need_decision` = **这一路卡在等人**（等审批、或需人拍板），不是"还在跑"。
+
+**审批怎么被发现**：DSH 把 `approval/asked` / `approval/decided` 写进**会话日志**（`session.append`），
+而 `session/event` 是 post-commit 的实时 feed。所以我们订阅 `session/event`（只认这两个 type），
+再读**自己这一路**的会话日志算出「有 asked 没 decided」的未配对请求 —— 会话关联天然就有，
+不需要把全局事件猜回某个任务。
+
+```
+订阅 session/event（approval/asked | approval/decided）→ notifySessionEvent → reconcile
+  → 读该 assignee 会话日志：未配对的 approval/asked
+      有  → status=need_decision + deliver 一条「<专家> 卡在等你批准：<工具>（<原因>）」给人
+            （同一请求 id 只发一次）
+      没有 → 若原为 need_decision → 回到 running（批准/拒绝后它自己继续）
+```
+
+**关键语义**：到点分析里 **`need_decision` 不算「还在跑」**。否则等审批的会话一直 alive，
+会被当成"还在做"→ 墙钟无限顺延 + 反复「还在做」。现在它会落到「交回给人拍板」那一支，
+人知道要批，任务留在 `running/` 等人。
 
 ### 活性探针（非阻塞）
 

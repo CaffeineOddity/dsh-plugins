@@ -176,4 +176,6 @@ export interface AgentBotService {
   notifyAgentIdle(sessionId: string): void
   /** 宿主事件入口：会话被销毁（`agent/disposed`）时调用。 */
   notifyAgentDisposed(sessionId: string): void
+  /** 宿主事件入口：会话日志追加了审批审计事件（`session/event`）时调用。 */
+  notifySessionEvent(sessionId: string): void
 }
