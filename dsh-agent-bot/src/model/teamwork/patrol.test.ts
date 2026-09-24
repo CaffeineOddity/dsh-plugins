@@ -599,7 +599,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     }))
     // 手动占锁（模拟 dispatch 时 begin 过），并让 B 的会话已 idle
     const { getWriteFence } = await import('./relay.js')
-    getWriteFence(() => undefined).begin('write', 'write:/proj', 'sess-b')
+    getWriteFence(() => undefined).begin('/proj', 'sess-b')
     const started: string[] = []
     const { host } = fakeHost(['sess-a', 'sess-b', 'sess-c'], [], {}, [], undefined, started)
     const patrol = createPatrol(host, { windowMs: 1 })
@@ -616,17 +616,43 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
     const { getWriteFence } = await import('./relay.js')
-    getWriteFence(() => undefined).begin('write', 'write:/proj', 'sess-b')
+    getWriteFence(() => undefined).begin('/proj', 'sess-b')
     const { host } = fakeHost(['sess-a', 'sess-b', 'sess-c'])
     const patrol = createPatrol(host, { windowMs: 1 })
     void patrol
     const fence = getWriteFence(() => undefined)
-    expect(fence.occupied('write:/proj')).toBe(true)
-    // read 的键与 write 不同 → 互不影响
-    const { writeFenceKey } = await import('./relay.js')
-    expect(writeFenceKey('read', '/proj', undefined, undefined)).not.toBe(writeFenceKey('write', '/proj', undefined, undefined))
+    expect(fence.occupied('/proj')).toBe(true)
+    expect(fence.occupied('/proj/design')).toBe(true)   // 子目录也算冲突
+    expect(fence.occupied('/other')).toBe(false)
     void b
     void c
+  })
+
+  it('巡检不拿旧快照覆盖：叫醒上游期间别人写进 md 的正文要保住', async () => {
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      body: '初稿',
+      assignees: [
+        // B 刚干完（idle）→ 会触发「叫醒上游 A」；C 还在跑 → 不走收口
+        assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: true }),
+        assignee({ expertId: c, expertName: 'C', dispatchedBy: a, sessionId: 'sess-c', status: 'running', wake: true }),
+      ],
+    }))
+    // 叫醒 A 的那一刻（await 期间），别人往同一份 md 写了正文（模拟专家 update_task）
+    const { host } = fakeHost(['sess-a', 'sess-b', 'sess-c'], [], {}, ['sess-c'], () => {
+      const t = readTask('running', 'task_t1')!
+      t.body = '初稿\n\n- 专家补的进展'
+      writeTask('running', t)
+    })
+    const patrol = createPatrol(host, { windowMs: 1 })
+    await patrol.tickOnce()
+    const back = readTask('running', 'task_t1')
+    expect(back?.body).toContain('专家补的进展')      // 正文没被旧快照覆盖
+    expect(back?.assignees.find((x) => x.expertId === b)?.wake).toBe(false) // 但 wake 消费照常落盘
   })
 
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {

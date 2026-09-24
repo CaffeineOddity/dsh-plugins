@@ -4,10 +4,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { tmpdir } from 'node:os'
 import { loadConfig, resetConfigCache, type AgentConfig } from '../config.js'
 import { saveAgent, type AgentWrite } from '../agents.js'
-import { buildRelay, isCollabSessionKey, taskSlotKey, wrapDispatchFollowup, writeFenceKey, type RelayHost } from './relay.js'
+import { buildRelay, dirsConflict, isCollabSessionKey, resolveFenceDir, taskSlotKey, wrapDispatchFollowup, type RelayHost } from './relay.js'
 import { boundTaskId, resetBindingsCache } from './binding.js'
 
 let dir: string
@@ -66,11 +67,25 @@ describe('taskSlotKey / isCollabSessionKey / writeFenceKey', () => {
     expect(isCollabSessionKey('channel')).toBe(false)
   })
 
-  it('target 优先级：target_workspace > 任务 target > 专家 workspace', () => {
-    expect(writeFenceKey('write', '/proj', '/other', '/expert')).toBe('write:/proj')
-    expect(writeFenceKey('write', undefined, '/other', '/expert')).toBe('write:/other')
-    expect(writeFenceKey('write', undefined, undefined, '/expert')).toBe('write:/expert')
-    expect(writeFenceKey('read', undefined, undefined, '/expert')).toBe('read:/expert')
+  it('目标目录优先级：target_workspace > 任务 target > 专家 workspace', () => {
+    expect(resolveFenceDir('/proj', '/other', '/expert')).toBe('/proj')
+    expect(resolveFenceDir(undefined, '/other', '/expert')).toBe('/other')
+    expect(resolveFenceDir(undefined, undefined, '/expert')).toBe('/expert')
+  })
+
+  it('归一化：去尾斜杠；`~` 展开', () => {
+    expect(resolveFenceDir('/proj/', undefined, undefined)).toBe('/proj')
+    expect(resolveFenceDir(undefined, undefined, '~/x')).toBe(join(homedir(), 'x'))
+  })
+
+  it('祖先也算冲突：/proj 与 /proj/design 串行；不相干目录不冲突', () => {
+    expect(dirsConflict('/proj', '/proj')).toBe(true)
+    expect(dirsConflict('/proj', '/proj/design')).toBe(true)
+    expect(dirsConflict('/proj/design', '/proj')).toBe(true)
+    expect(dirsConflict('/proj/a', '/proj/ab')).toBe(false) // 前缀但不是子目录
+    expect(dirsConflict('/p1', '/p2')).toBe(false)
+    expect(dirsConflict('', '')).toBe(true)
+    expect(dirsConflict('', '/proj')).toBe(false)
   })
 })
 

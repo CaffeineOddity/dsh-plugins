@@ -11,6 +11,9 @@
  * 读写 md（assignees[] 落槽）交 board-tools / patrol，本模块只负责「拉起并叫醒」。
  */
 import { randomUUID } from 'node:crypto'
+import { realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { AgentConfig } from '../config.js'
 import { touchSession } from '../agents.js'
 import type { EnsureAgentInput, AgentLike } from '../runtime.js'
@@ -49,36 +52,71 @@ export function resolveCollabSlotSession(
   return sessionId
 }
 
-/** 同 target write 的 FIFO 归组键：target_workspace ?? 任务 target ?? 该专家 cwd。 */
-export function writeFenceKey(access: 'read' | 'write', targetWorkspace?: string, taskTarget?: string, expertWorkspace?: string): string {
-  const key = targetWorkspace ?? taskTarget ?? expertWorkspace ?? ''
-  return `${access}:${key}`
+/**
+ * write 串行的目标目录：`target_workspace ?? 任务 target ?? 该专家 cwd`。
+ * 取到时做**归一化**（展开 `~`、去尾斜杠、解软链），避免同一目录的不同写法绕过锁。
+ */
+export function resolveFenceDir(targetWorkspace?: string, taskTarget?: string, expertWorkspace?: string): string {
+  const raw = targetWorkspace ?? taskTarget ?? expertWorkspace ?? ''
+  return normalizeDir(raw)
+}
+
+/** 归一化目录：展开 `~`、去尾斜杠、尽量解软链（解不开就用原路径）。 */
+export function normalizeDir(raw: string): string {
+  let p = raw.trim()
+  if (p === '') return ''
+  if (p === '~') p = homedir()
+  else if (p.startsWith('~/')) p = join(homedir(), p.slice(2))
+  while (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1)
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
 }
 
 /**
- * 进程内 write FIFO 栅栏。真实并发只有本进程驱动，进程内判定足够；
- * 重启后栅栏清空，占位会话以 `agents.get(sessionId)` 判活性。
+ * 两个目标目录是否算"同一处"：相等，或**互为祖先**（`/proj` 与 `/proj/design`）。
+ * 祖先也算冲突：往 `/proj` 写完全可能覆盖 `/proj/design` 里的文件。
+ */
+export function dirsConflict(a: string, b: string): boolean {
+  if (a === '' || b === '') return a === b // 空（无目录信息）只与空冲突
+  if (a === b) return true
+  return a.startsWith(`${b}/`) || b.startsWith(`${a}/`)
+}
+
+/**
+ * 进程内 write 串行栅栏（按目标目录，read 不占）。
+ * 真实并发只有本进程驱动，进程内判定足够；重启后栅栏清空，占位会话以 `agents.get(sessionId)` 判活性。
+ * 注意：**必须进程级共享**（见 `getWriteFence`）——`buildRelay` 是每个 agent 会话各建一份的。
  */
 export interface WriteFence {
-  begin(access: 'read' | 'write', key: string, sessionId: string): void
-  /** 该读写槽当前是否被一个活会话占着。 */
-  occupied(key: string): boolean
-  release(key: string, sessionId: string): void
+  begin(dir: string, sessionId: string): void
+  /** 是否有**活的**会话正占着与该目录冲突（相等或祖先）的位置。 */
+  occupied(dir: string): boolean
+  release(dir: string, sessionId: string): void
 }
 
 export function createWriteFence(agents: () => { get(sessionId: string): unknown } | undefined): WriteFence {
-  const holders = new Map<string, string>() // key -> sessionId
+  const holders = new Map<string, { dir: string; sessionId: string }>()
+  const alive = (sessionId: string): boolean => agents()?.get(sessionId) !== undefined
+  /** 清掉已经不在线的占位（进程重启 / 会话销毁后自动让位）。 */
+  const reap = (): void => {
+    for (const [k, v] of holders) if (!alive(v.sessionId)) holders.delete(k)
+  }
   return {
-    begin(_access, key, sessionId) {
-      holders.set(key, sessionId)
+    begin(dir, sessionId) {
+      holders.set(`${dir}\0${sessionId}`, { dir, sessionId })
     },
-    occupied(key) {
-      const sessionId = holders.get(key)
-      if (sessionId === undefined) return false
-      return agents()?.get(sessionId) !== undefined
+    occupied(dir) {
+      reap()
+      for (const v of holders.values()) {
+        if (dirsConflict(v.dir, dir)) return true
+      }
+      return false
     },
-    release(key, sessionId) {
-      if (holders.get(key) === sessionId) holders.delete(key)
+    release(dir, sessionId) {
+      holders.delete(`${dir}\0${sessionId}`)
     },
   }
 }
@@ -86,7 +124,7 @@ export function createWriteFence(agents: () => { get(sessionId: string): unknown
 /**
  * 进程级共享的 write 栅栏。
  * 必须共享：`buildRelay` 是**每个 agent 会话**各建一份的，若栅栏跟着会话建，
- * 同一 target 的两个专家会各拿一把锁 → 串行失效。
+ * 同一目标目录的两个专家会各拿一把锁 → 串行失效。
  */
 let sharedFence: WriteFence | null = null
 let sharedAgents: (() => { get(sessionId: string): unknown } | undefined) | null = null

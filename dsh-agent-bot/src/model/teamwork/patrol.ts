@@ -10,7 +10,7 @@ import type { AgentLike } from '../runtime.js'
 import { getAgent as getAgentConfig } from '../agents.js'
 import { listTasksIn, readTask, writeTask, moveTask, type TaskBoard, type Assignee } from './task-board.js'
 import { boundTaskId, listBindings, unbindSession } from './binding.js'
-import { buildRelay, taskSlotKey, writeFenceKey, type RelayHost } from './relay.js'
+import { buildRelay, resolveFenceDir, taskSlotKey, type RelayHost } from './relay.js'
 import { marshalText } from './board-tools.js'
 import { encodeSessionKey, sessionPartsForEncode, type AgentOutboundMessage } from '../../types.js'
 import { summarizeOwnedInterval, toMarkdownMessages, waitIdleOrTimeout } from '../ask.js'
@@ -390,34 +390,46 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     syncDeadline(task.taskId)
   }
 
-  /** 该 assignee 的 write 串行键（按目标目录；read 不占锁）。 */
-  function fenceKeyOf(task: TaskBoard, a: Assignee, cfg: AgentConfig): string {
-    return writeFenceKey(a.access, a.target, task.target, cfg.workspace)
+  /**
+   * 重读 → 改 → 写（同步小段）。
+   * 巡检经常"读快照 → await（等 idle / deliver）→ 写回"，直接写会把这段期间
+   * 别人（专家 update_task / 人的回填）写进 md 的内容覆盖掉。所有写入都走这里。
+   */
+  function patchTask(taskId: string, mutate: (t: TaskBoard) => void): void {
+    const fresh = readTask('running', taskId)
+    if (fresh === undefined) return
+    mutate(fresh)
+    writeTask('running', fresh)
+  }
+
+  /** 该 assignee 的 write 串行目录（按目标目录；read 不占锁）。 */
+  function fenceDirOf(task: TaskBoard, a: Assignee, cfg: AgentConfig): string {
+    return resolveFenceDir(a.target, task.target, cfg.workspace)
   }
 
   /** write 那一轮结束（idle/failed）→ 释放目标锁，并叫醒同一目标排队中的下一个。 */
   async function releaseAndAdvance(task: TaskBoard, a: Assignee, cfg: AgentConfig): Promise<void> {
     if (a.access !== 'write') return
-    const key = fenceKeyOf(task, a, cfg)
-    relay.writeFence.release(key, a.sessionId)
-    await advanceWriteQueue(task.taskId, key)
+    const dir = fenceDirOf(task, a, cfg)
+    relay.writeFence.release(dir, a.sessionId)
+    await advanceWriteQueue(task.taskId, dir)
   }
 
   /**
    * 同一目标目录的 write 队列推进（FIFO，按 md 里 assignees 顺序）：
    * 锁空着就取第一个 waiting 启动它（用派发时存下的 instruction）。
    */
-  async function advanceWriteQueue(taskId: string, key: string): Promise<void> {
-    if (relay.writeFence.occupied(key)) return
+  async function advanceWriteQueue(taskId: string, dir: string): Promise<void> {
+    if (relay.writeFence.occupied(dir)) return
     const fresh = readTask('running', taskId)
     if (fresh === undefined) return
     for (const a of fresh.assignees) {
       if (a.status !== 'waiting' || a.access !== 'write') continue
       const cfg = getAgentConfig(a.expertId)
       if (cfg === undefined) continue
-      if (fenceKeyOf(fresh, a, cfg) !== key) continue
+      if (fenceDirOf(fresh, a, cfg) !== dir) continue
       if (a.instruction === undefined || a.instruction === '') continue
-      relay.writeFence.begin('write', key, a.sessionId)
+      relay.writeFence.begin(dir, a.sessionId)
       a.status = 'running'
       a.wake = true
       writeTask('running', fresh)
@@ -571,12 +583,17 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
           const resumed = resumeWaiting(task, by)
           const done = await wakeOnce(task, by, wakeFingerprint(task, by), wakeText(task, kids))
           if (done) consumed.push(...kids)
-          if (resumed && !done) writeTask('running', task)
         }
-        // 上报成功才消费 wake；目标不在线则留着，下一轮重试
-        if (consumed.length > 0) {
-          for (const a of consumed) a.wake = false
-          writeTask('running', task)
+        // 上报成功才消费 wake；目标不在线则留着，下一轮重试。恢复 waiting 也一并落盘。
+        const consumedIds = new Set(consumed.map((a) => a.expertId))
+        const resumedIds = new Set(wakers.keys())
+        if (consumedIds.size > 0 || resumedIds.size > 0) {
+          patchTask(task.taskId, (t) => {
+            for (const a of t.assignees) {
+              if (consumedIds.has(a.expertId)) a.wake = false
+              else if (resumedIds.has(a.expertId) && a.status === 'waiting') a.status = 'running'
+            }
+          })
         }
         return
       }
@@ -702,9 +719,9 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     if (!ok) return false
     notified.set(key, fingerprint)
     // 问卷发出 → 墙钟顺延（spec：发出时刻 + task_round_timeout_ms）
-    task.deadlineAt = Date.now() + roundTimeoutMs()
-    writeTask('running', task)
-    scheduleDeadline(task)
+    const nextDeadline = Date.now() + roundTimeoutMs()
+    patchTask(task.taskId, (t) => { t.deadlineAt = nextDeadline })
+    scheduleDeadline({ ...task, deadlineAt: nextDeadline })
     return true
   }
 
@@ -787,11 +804,17 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
         const open = openApprovals(waitLive)
         if (open.length > 0 && a.status !== 'need_decision') {
           a.status = 'need_decision'
-          if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
+          patchTask(task.taskId, (t) => {
+            const x = t.assignees.find((y) => y.expertId === a.expertId)
+            if (x !== undefined) x.status = 'need_decision'
+          })
           await notifyApprovalWait(task, a, open)
         } else if (open.length === 0 && a.status === 'need_decision') {
           a.status = 'running'
-          if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
+          patchTask(task.taskId, (t) => {
+            const x = t.assignees.find((y) => y.expertId === a.expertId)
+            if (x !== undefined) x.status = 'running'
+          })
         }
       }
       if (a.status !== 'running') continue
@@ -814,7 +837,10 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
         st.renew++
         if (st.renew >= maxRenew()) {
           a.status = 'failed'
-          if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
+          patchTask(task.taskId, (t) => {
+            const x = t.assignees.find((y) => y.expertId === a.expertId)
+            if (x !== undefined) x.status = 'failed'
+          })
           probeRenew.delete(key)
           await releaseAndAdvance(task, a, cfg)
           continue
@@ -827,7 +853,10 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       if (live.status === 'idle') {
         st.renew = 0
         a.status = 'idle'
-        if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
+        patchTask(task.taskId, (t) => {
+          const x = t.assignees.find((y) => y.expertId === a.expertId)
+          if (x !== undefined && x.status === 'running') x.status = 'idle'
+        })
         await releaseAndAdvance(task, a, cfg) // 这一轮 write 结束 → 让出目标锁，叫醒排队的下一个
         continue
       }
