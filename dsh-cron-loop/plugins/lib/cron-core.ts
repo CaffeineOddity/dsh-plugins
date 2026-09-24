@@ -249,19 +249,24 @@ export function describeCron(expr: string): string {
     return `每天 ${fmtTime(hours[0]!, minutes[0]!)}`
   }
 
-  // 小时级通用描述：每天/工作日/周末/周X 的 N 点 N 分（含多值小时与分钟）
-  if (domAll && monAll) {
-    const prefix = dowPrefix()
-    if (prefix !== null || dowAll) {
-      const dayName = prefix ?? '每天'
-      return `${dayName} ${hoursText()}${minutesText()}`
-    }
+  // 精确到分钟（单小时单分钟）的特例：工作日 / 周末 / 每月 X 号 —— 用 HH:MM，比通用「N 点 N 分」好读。
+  // 必须排在下面的通用分支之前，否则永远走不到。
+  const weekday = !dowAll && plan.daysOfWeek !== undefined
+    && [1, 2, 3, 4, 5].every((d) => plan.daysOfWeek!.has(d))
+    && plan.daysOfWeek.size === 5
+  if (weekday && domAll && monAll && minutes.length === 1 && hours.length === 1) {
+    return `工作日 ${fmtTime(hours[0]!, minutes[0]!)}`
   }
 
-  // 带日期/月份的通用描述
-  const day = dayText()
-  if (day !== '' && minutes.length >= 1 && hours.length >= 1) {
-    return `${monthsSuffix() ? monthsSuffix().slice(2) + ' ' : ''}${day} ${hoursText()}${minutesText()}`
+  const weekend = !dowAll && plan.daysOfWeek !== undefined
+    && [0, 6].every((d) => plan.daysOfWeek!.has(d))
+    && plan.daysOfWeek.size === 2
+  if (weekend && domAll && monAll && minutes.length === 1 && hours.length === 1) {
+    return `周末 ${fmtTime(hours[0]!, minutes[0]!)}`
+  }
+
+  if (!domAll && dowAll && monAll && plan.daysOfMonth!.size === 1 && minutes.length === 1 && hours.length === 1) {
+    return `每月 ${plan.daysOfMonth!.values().next().value!} 号 ${fmtTime(hours[0]!, minutes[0]!)}`
   }
 
   // 每小时 X 分
@@ -277,28 +282,19 @@ export function describeCron(expr: string): string {
     }
   }
 
-  // 工作日（周一~周五）
-  const weekday = !dowAll && plan.daysOfWeek !== undefined
-    && [1, 2, 3, 4, 5].every((d) => plan.daysOfWeek!.has(d))
-    && plan.daysOfWeek.size === 5
-
-  if (weekday && domAll && monAll) {
-    if (minutes.length === 1 && hours.length === 1) {
-      return `工作日 ${fmtTime(hours[0]!, minutes[0]!)}`
+  // 小时级通用描述：每天/工作日/周末/周X 的 N 点 N 分（含多值小时与分钟）
+  if (domAll && monAll) {
+    const prefix = dowPrefix()
+    if (prefix !== null || dowAll) {
+      const dayName = prefix ?? '每天'
+      return `${dayName} ${hoursText()}${minutesText()}`
     }
   }
 
-  // 周末
-  const weekend = !dowAll && plan.daysOfWeek !== undefined
-    && [0, 6].every((d) => plan.daysOfWeek!.has(d))
-    && plan.daysOfWeek.size === 2
-  if (weekend && domAll && monAll && minutes.length === 1 && hours.length === 1) {
-    return `周末 ${fmtTime(hours[0]!, minutes[0]!)}`
-  }
-
-  // 每月 X 号
-  if (!domAll && dowAll && monAll && plan.daysOfMonth!.size === 1 && minutes.length === 1 && hours.length === 1) {
-    return `每月 ${plan.daysOfMonth!.values().next().value!} 号 ${fmtTime(hours[0]!, minutes[0]!)}`
+  // 带日期/月份的通用描述
+  const day = dayText()
+  if (day !== '' && minutes.length >= 1 && hours.length >= 1) {
+    return `${monthsSuffix() ? monthsSuffix().slice(2) + ' ' : ''}${day} ${hoursText()}${minutesText()}`
   }
 
   // 回退：原表达式

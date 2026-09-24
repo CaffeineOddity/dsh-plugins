@@ -116,6 +116,9 @@ add/update 的 `activateOnSuccess` 缺省不填（成功后立即激活的另一
 
 - `GET /cron` → 任务中心页面（内联单文件 HTML+JS，调用下方 JSON API）。
 - `GET /cron/api/jobs` → 全部 job（含 nextRunAt 计算与 cron 可读描述 `cronHuman`）。
+  `describeCron` 判定顺序固定：每分钟 → 每天 HH:MM → 工作日/周末/每月 X 号的 HH:MM 特例 →
+  每小时 X 分 → 每 N 分钟 → 小时级通用（「N 点 N 分」）→ 带日期/月份通用 → 原表达式。
+  精确特例必须排在通用分支**之前**，否则永远走不到（曾因此把「工作日 09:00」输出成「工作日 09 点00 分」）。
 - `POST /cron/api/jobs` → 新建（body: name/cwd/cron/prompt/permissionMode/continuous/activateOnSuccess）。
 - `PUT /cron/api/jobs/:id` → 更新（cron/prompt/enabled/name/permissionMode/continuous/activateOnSuccess）。
 - `DELETE /cron/api/jobs/:id` → 删除。
