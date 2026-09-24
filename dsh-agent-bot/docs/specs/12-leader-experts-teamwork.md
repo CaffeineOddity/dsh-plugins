@@ -4,7 +4,7 @@
 > 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、deliver @sender 收口、重启按 `jobs/running/` 恢复；全局开关 `use_hub_experts`（默认 true=中枢全集）；`open_task` 新建任务（入站上下文提供 sender/providerId/群快照）；派发时 fiber 绑定协作槽 + prompt 带任务文件绝对路径；中间层派下游后 `waiting` 暂停、下游终态后恢复；**全终态 → 叫醒 taskLead 综合 → 取其该轮产出 deliver @sender → 移 `done/` + 解绑**；墙钟到点按会话状态分四种处理（顺延/进度反馈/救活/交回给人）；`jobs/cancel/` 人工取消；任务移走后自动解绑。
 > 接管 `ask_user_question` 走的是「检测挂起 tool/call + 取消回合 + 非阻塞问人」，**不拦 waterfall**；
 > `user-questions/request` 的 waterfall 本身不介入（认领会与人的 IM 回复形成死锁，见上）。
-> 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）。
+> 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）；同一会话可能先后服务多单（路由判偏不锁死，真相是 md）。
 
 ## 背景与目标
 
@@ -197,6 +197,12 @@ pendingHuman:                 # 无则省略
 入站 **不**在 followup 前绑文件。包装 prompt 带上本群 running 短摘要（含待决题）。模型调 `open_task` / `dispatch_expert` / 改待决 才绑。
 
 入站时把本轮的 **sender / providerId / sessionParts / 群成员快照** 记进「入站上下文」（按 sessionId 存内存），供本轮里的 `open_task` 新建时取用——工具作用域里本来没有这些。
+选哪条会话见 §会话分层与入站路由。
+
+**板可见性按「对话」隔离**：列出 `running/` 时只给**同一个对话**的任务 —— 判据 = 同 `providerId` **且** 同 `conversationKey(sessionParts)`。
+`conversationKey` 由通道定义（IM 取 `group_id` / 飞书 `chat_id`；**不含 `bot_id`**，否则同群各台 bot 会各看各的板）；缺省实现取 `group_id`，没有则把 `sessionParts` 规范化拼接。
+内置 `local` 的 `conversationKey` **恒为一个常量**（本地没有"群"概念，整台中枢的 local 共用一块板），避免"换个网页会话就看不见旧单 → 重复建单"。
+定位不了自己的对话（既无入站上下文也无绑定任务）→ **不列**并提示，不返回全部。
 
 LLM 拿到的判据就三样：running 摘要、自己的技能、专家卡片。决策：
 
@@ -237,6 +243,31 @@ LLM 拿到的判据就三样：running 摘要、自己的技能、专家卡片�
 - 回填 / 叫醒必须用 **当时那次** `dispatch_expert` 记下的 `sessionId`。
 
 直 @ 通道槽：仍完全看该专家 `reuse_session` / `session_by_sender` / `session_timeout_minutes`。两套 key 都落在该专家 `agents[].sessions`。通道 key 永不带 `task:`；协作 key 必须以 `task:` 开头。
+
+**通道 key 显式含 `providerId`**（对齐 `<provider>_<sessionParts 各值>[_<sender>]`）：原来只用 `sessionParts` 的值拼，
+不同通道若 `bot_id` / `group_id` 取值撞上会**共用同一个槽**（跨通道串台）。`agentId` 不必进 key —— 每个 agent 有自己的 `agents[].sessions`。
+
+#### 会话分层与入站路由
+
+两类会话，职责不同：
+
+| 层 | key | 用途 |
+|---|---|---|
+| **前台槽**（对话级） | `<provider>_<sessionParts 各值>[_<sender>]` | 收人的消息、认单、汇报；以及"还没归属到某一单"的对话 |
+| **任务槽**（任务级） | `task:{taskId}:{agentId}` | 已归属某一单的对话与干活（含 taskLead 自己的活；被派专家也走这里） |
+
+**入站路由**（在 turn 开始**之前**，只用客观状态，不抠任务号）：
+
+1. 该 `sender` 在某 `running` 单上有**未回填待决** → 进那一单的任务槽（他就该在这一单里说话）
+2. 否则该对话里该 `sender` **最近绑定**的 `running` 单 → 进那一单的任务槽
+3. 都没有 → 进**前台槽**
+
+**LLM 保留最终决定权**：路由只决定「从哪条会话起步」，任务归属仍由 LLM 的 `open_task`（捡起 / 新建）决定，并把当前会话绑上去（`binding`，现状）。所以路由判偏（例如人说"对了还有个事"被归到上一单）**不会锁死**：LLM 读 running 摘要后照样可以新建一单。
+
+已知不完美：同一会话可能先后服务多单（LLM 在某单的会话里新建/切换任务时）。**真相始终是 md**，会话只是记忆载体。
+
+> 为什么不在路由里直接定任务：那需要"先知道属于哪一单才能选会话"，而认单本身要先把 turn 跑起来 —— 循环。
+> 也不用两次 LLM（先判定再干活）：延迟与成本翻倍，且判错比"进错会话"更难挽回。
 
 内部驱动把本轮 IM meta 只读注入专家 prompt 变量（`sender` / `provider_id` / `sessionParts` 各键）。另注入 `{{target_workspace}}`（未传则为 `-`）。
 
@@ -542,6 +573,8 @@ DSH waterfall `user-questions/request`（agent-scoped）。Web GUI 是现成 ans
 - `@A` 入站带 running 摘要。未 `open_task` / 未捡起就 `dispatch_expert` 报错。
 - 直 @ 不强制发现；清单空则自己答，不报错。taskLead 入站问人：本轮 messages，落 0 专家 running 文件。
 - 卡片含 name / description / 技能；不注入专家 system prompt。`running_experts` 按 agent 自身未 idle 会话。
+- 板可见性按对话隔离：同 `providerId` + 同 `conversationKey`；同群各台 bot 看到**同一块板**，跨群互不可见；local 共一块板。
+- 通道 key 显式含 `providerId`（防跨通道撞槽）。入站按「未回填待决 → 最近绑定 → 前台槽」软路由；任务归属仍由 LLM 的 `open_task` 决定。
 - 清单来源全局开关 `use_hub_experts`（默认 `true`）：`true` 时来自 `agents.json` 全集（路线 b，没绑任务也能列）；`false` 时来自本任务群快照（Provider 投影）。两种来源都不含调用方自己，且都按 `agents.json`+`skills-map` 补描述 / 技能。
 - `dispatch_expert` 成功返回 `{ kind: 'running', sessionId }`，不等 idle。再派写入 **同一份 md**，不改 `taskLead`。`assignees[]` 含 `expertName` / `dispatchedByName`（派发时从快照解析）。做完叫醒 `dispatchedBy`，最后才叫醒 taskLead 综合。
 - 同一目标 `write` 执行 FIFO；`read` 并行。占着仍可派。
