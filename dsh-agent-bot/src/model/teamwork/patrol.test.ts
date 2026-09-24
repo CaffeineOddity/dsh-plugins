@@ -725,6 +725,51 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
     expect(fence.occupied('/proj')).toBe(true) // 重新占住
   })
 
+  it('综合超时后重试仍能交付（不再被"只叫一次"的指纹挡死）', async () => {
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: true })],
+    }))
+    const events = { 'sess-a': [{ seq: 0, type: 'turn/start' }, { seq: 1, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '海报已出好' }] } } }] }
+    const delivered: Array<{ providerId: string; text: string[] }> = []
+    // 第一轮：lead 一直在跑（busy）→ 等超时 → 不交付
+    const first = fakeHost(['sess-a', 'sess-b'], delivered, events, ['sess-a'])
+    const p1 = createPatrol(first.host, { windowMs: 5 })
+    await p1.tickOnce()
+    await p1.flush()
+    expect(delivered).toHaveLength(0)
+    expect(readTask('running', 'task_t1')).toBeDefined() // 还在 running/
+    // 第二轮：lead 空闲了（busy 清掉）→ 重试必须继续等并交付
+    const second = fakeHost(['sess-a', 'sess-b'], delivered, events, [])
+    const p2 = createPatrol(second.host, { windowMs: 50 })
+    await p2.tickOnce()
+    await p2.flush()
+    expect(delivered[0]?.text[0]).toContain('海报已出好')
+    expect(readTask('done', 'task_t1')).toBeDefined()
+  })
+
+  it('deliver 失败 → 不移 done/，留在 running/ 等重试', async () => {
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
+    const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
+    writeTask('running', task({
+      taskId: 'task_t1',
+      taskLead: a,
+      assignees: [assignee({ expertId: b, expertName: 'B', dispatchedBy: a, sessionId: 'sess-b', status: 'idle', wake: true })],
+    }))
+    const events = { 'sess-a': [{ seq: 0, type: 'turn/start' }, { seq: 1, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '结果' }] } } }] }
+    const { host } = fakeHost(['sess-a', 'sess-b'], [], events)
+    // 让 deliver 抛错
+    host.deliver = async () => { throw new Error('通道挂了') }
+    const patrol = createPatrol(host, { windowMs: 50 })
+    await patrol.tickOnce()
+    await patrol.flush()
+    expect(readTask('running', 'task_t1')).toBeDefined()  // 没被移走
+    expect(readTask('done', 'task_t1')).toBeUndefined()
+  })
+
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {
     mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     bindSession('sess-a', 'task_t1')

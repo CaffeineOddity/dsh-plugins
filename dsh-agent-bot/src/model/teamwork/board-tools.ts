@@ -503,7 +503,9 @@ export function registerBoardTools(ctx: {
           const fenceDir = resolveFenceDir(assigneeTarget, task.target, expertCfg.workspace)
           const mustQueue = args.access === 'write' && relay.writeFence.occupied(fenceDir)
           // 重复派发同 expert 同 target：占着仍可派（spec：不拒，FIFO）
-          const status: AssigneeStatus = mustQueue ? 'waiting' : 'running'
+          // wake=false = 只落 assignees、不叫醒（等派发方后续叫醒）→ 状态记 waiting：
+          //   'running' 会被活性探针按"会话不在线"在 3×W 后误判 failed
+          const status: AssigneeStatus = mustQueue || args.wake === false ? 'waiting' : 'running'
           const sessionId = relay.resolveSession(expertCfg, task.taskId, args.expert_id, args.session === 'new' ? 'new' : 'reuse', Date.now())
           if (mustQueue) {
             upsertAssignee(task, {

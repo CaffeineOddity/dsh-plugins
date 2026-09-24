@@ -140,6 +140,8 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   const delivering = new Map<string, Promise<void>>() // taskId -> 在跑的收口交付（同任务只跑一次）
   const deciding = new Map<string, Promise<void>>() // taskId -> 在等 taskLead 拍板的 job
   const askTimers = new Map<string, ReturnType<typeof setTimeout>>() // `taskId\0expertId` -> 转交人的宽限定时器
+  /** 收口进度（跨多轮）：firstSeq=综合那一轮的起点；text=已拿到但还没投出去的产出。 */
+  const collecting = new Map<string, { firstSeq: number; text?: string }>()
   const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>() // taskId -> 墙钟定时器
   const lastScheduledDeadline = new Map<string, number>() // taskId -> 已排的 deadlineAt（避免重复排）
   let lastReconcileAt = 0
@@ -441,7 +443,11 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       const cfg = getAgentConfig(a.expertId)
       if (cfg === undefined) continue
       if (fenceDirOf(fresh, a, cfg) !== dir) continue
-      if (a.instruction === undefined || a.instruction === '') continue
+      if (a.instruction === undefined || a.instruction === '') {
+        // 排队项没存下指令：无法重启 → 明确告警（不再静默地永远 waiting）
+        console.warn(`agent-bot: 任务 ${taskId} 的 ${a.expertId} 在等 ${dir}，但没存 instruction，无法自动续跑`)
+        continue
+      }
       relay.writeFence.begin(dir, a.sessionId)
       a.status = 'running'
       a.wake = true
@@ -643,46 +649,71 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   }
 
   /**
-   * 收口交付（specs/12 §谁改状态）：叫醒 taskLead 综合 → 等它这一轮结束 → 取产出 `deliver` @sender
-   * → 若没再派活、也没待决 → 移 `done/` + 解绑。
+   * 收口交付（specs/12 §谁改状态）：
+   *   1. 全终态 → 叫醒 taskLead 综合（记下当时的 seq 作为"这段产出"的起点）
+   *   2. 等它这一轮结束 → 取产出 `deliver` @sender
+   *   3. deliver 成功、且没再派活/没待决 → 移 `done/` + 解绑
    *
-   * 后台跑（不阻塞巡检循环）；同一任务同一时刻只跑一次（delivering 集合）。
+   * 跨多轮的状态放内存 `collecting`：**叫醒只做一次**（指纹去重），但等它结束、交付可以重试。
+   * 原实现写成"`wakeOnce` 返回 false 就直接 return"，于是 lead 综合一旦超过一次等待窗口，
+   * 重试就被指纹挡住 → **永远不交付 / 待决永不清**。现在重试会继续等。
+   * deliver 失败**不**移 `done/`（spec：留在 running/ 待重试），产出的文本也留着下次再发。
    */
   async function summarizeAndDeliver(task: TaskBoard, leadBound: readonly Assignee[] = []): Promise<void> {
     const cfg = getAgentConfig(task.taskLead)
     const sessionId = wakeSessionIdFor(task, task.taskLead)
     if (cfg === undefined || sessionId === undefined) return
-    const live = host.agents()?.get(sessionId) as (AgentLike & { session: { seq: number; snapshotEvents(): Array<{ seq: number; type: string; data?: unknown }> } }) | undefined
+    const live = host.agents()?.get(sessionId) as
+      | (AgentLike & { session: { seq: number; snapshotEvents(): Array<{ seq: number; type: string; data?: unknown }> } })
+      | undefined
     if (live === undefined) return
+    const key = task.taskId
     try {
-      const firstSeq = live.session.seq
-      const ok = await wakeOnce(task, task.taskLead, wakeFingerprint(task, task.taskLead), marshalText(task))
-      if (!ok) return
-      // 综合已开始：消费报给 lead 的 wake，后续要靠新的终态变化才会再触发
-      if (leadBound.length > 0) {
-        for (const a of leadBound) a.wake = false
-        const cur = readTask('running', task.taskId)
-        if (cur !== undefined) {
-          for (const a of cur.assignees) if (leadBound.some((x) => x.expertId === a.expertId)) a.wake = false
-          writeTask('running', cur)
+      let st = collecting.get(key)
+      if (st?.text !== undefined) {
+        // 上次产出拿到了但 deliver 失败：只重试投递，不再打扰 lead
+        await retryDeliver(task, st.text)
+        return
+      }
+      if (st === undefined) {
+        // 第一次：叫醒 lead，并记下这一轮的起点（后续重试仍用这个起点取产出）
+        st = { firstSeq: live.session.seq }
+        collecting.set(key, st)
+        await wakeOnce(task, task.taskLead, wakeFingerprint(task, task.taskLead), marshalText(task))
+        // 综合已开始：消费报给 lead 的 wake，后续要靠新的终态变化才会再触发
+        if (leadBound.length > 0) {
+          for (const a of leadBound) a.wake = false
+          patchTask(task.taskId, (t) => {
+            for (const a of t.assignees) if (leadBound.some((x) => x.expertId === a.expertId)) a.wake = false
+          })
         }
       }
       const wait = await waitIdleOrTimeout(live.whenIdle(), windowFor(cfg))
-      if (wait !== 'idle') return // 综合还没完：下轮再来
-      const text = summarizeOwnedInterval(live.session.snapshotEvents(), firstSeq)
-      // 重新读盘：综合这一轮里它可能又派了活 / 写了正文
-      const fresh = readTask('running', task.taskId)
-      if (fresh === undefined) return // 人已挪走（done/ 或 cancel/）
-      await deliverToSender(fresh, toMarkdownMessages(text).map((m) => m.text).join('\n\n') || '（综合无输出）')
-      const stillOpen = fresh.assignees.some((a) => !isTerminal(a)) || fresh.pendingHuman !== undefined
-      if (stillOpen) return // 又派了活 / 又问了人：保持 running
-      unbindDone(fresh)
-      // 期间可能已被人挪走（cancel/ 或 done/）：那就别再 move
-      if (readTask('running', fresh.taskId) !== undefined) moveTask('running', 'done', fresh.taskId)
-      clearDeadline(fresh.taskId)
+      if (wait !== 'idle') return // 还在综合：下次触发继续等（不再被指纹挡住）
+      const text = summarizeOwnedInterval(live.session.snapshotEvents(), st.firstSeq) || '（综合无输出）'
+      st.text = text
+      await retryDeliver(task, text)
     } catch (err) {
       console.warn(`agent-bot: 收口交付 ${task.taskId} 失败（文件留在 running/）: ${(err as Error).message}`)
     }
+  }
+
+  /** 投递收口文本；成功且没有新活 → 移 done/ + 解绑；失败留着下次重试。 */
+  async function retryDeliver(task: TaskBoard, text: string): Promise<void> {
+    const fresh = readTask('running', task.taskId)
+    if (fresh === undefined) {
+      collecting.delete(task.taskId) // 人已挪走（done/ 或 cancel/）
+      return
+    }
+    const ok = await deliverToSender(fresh, text)
+    if (!ok) return // 留在 running/，下次触发再投（spec：deliver 失败不移动文件）
+    collecting.delete(task.taskId)
+    const stillOpen = fresh.assignees.some((a) => !isTerminal(a)) || fresh.pendingHuman !== undefined
+    if (stillOpen) return // 又派了活 / 又问了人：保持 running
+    unbindDone(fresh)
+    // 期间可能已被人挪走（cancel/ 或 done/）：那就别再 move
+    if (readTask('running', fresh.taskId) !== undefined) moveTask('running', 'done', fresh.taskId)
+    clearDeadline(fresh.taskId)
   }
 
   /** 进度反馈：给原发送者发一条「还在做」，同一 deadlineAt 只发一次（不刷屏）。 */
@@ -709,8 +740,9 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     const live = host.agents()?.get(sessionId) as AgentLike | undefined
     if (live === undefined) return
     try {
-      const ok = await wakeOnce(task, task.taskLead, `pending:${askedAt}`, marshalText(task))
-      if (!ok) return
+      // 叫醒只做一次（指纹去重）；即使"已叫醒过"也要继续等它这一轮——
+      // 否则上一次等超时后，重试会被指纹挡住，待决永远清不掉。
+      await wakeOnce(task, task.taskLead, `pending:${askedAt}`, marshalText(task))
       const wait = await waitIdleOrTimeout(live.whenIdle(), windowFor(cfg))
       if (wait !== 'idle') return // 还没答完：等下次触发
       const fresh = readTask('running', task.taskId)

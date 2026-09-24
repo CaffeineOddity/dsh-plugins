@@ -324,6 +324,7 @@ B 可 `open_task(task_x)` 捡起（复用**同一份 md**，接着做 / `update_
 | `access=read` | **并行**，不占锁、不排队（同 target 正有 write 在跑时可能读到半成品） |
 | `access=write`，且该目标目录**已有 write 在跑** | 下发成功即**进队列**：`assignees[].status=waiting`，**不立即叫醒**；同时把 `instruction` 存进 assignees（轮到时要拿它重启） |
 | `access=write`，目标目录**空着** | 立刻占锁 + 叫醒 |
+| `wake=false`（不论 read/write） | **不叫醒**，`status=waiting` 等派发方后续叫醒。**不能记 `running`**：那会被活性探针按"会话不在线"在 `3×W` 后误判 `failed`（它本来就没被启动） |
 | 不同目标目录 | **并行**（各自一把锁） |
 
 目标目录的取法：`assignee.target` → `task.target` → 该专家 cwd（三者取第一个有值的），并**归一化**
@@ -404,6 +405,11 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 | 墙钟 `deadlineAt` | 见超时。已在综合 followup 或 wake 已在 FIFO 排队：**不做** timeout，把这次内部 followup 做完 |
 
 `deliver` 失败：打日志并有界重试，不重跑专家；仍失败则文件留在 `running/` 待进程起来再 deliver。
+**实现要点**：拿到产出文本后先存内存（`collecting`），`deliver` 失败**不**移 `done/`，下次触发只重投这段文本
+（不再打扰 lead）；进程重启后内存丢失 → 指纹也丢 → 会重新叫醒 lead 再取一次产出。
+
+**叫醒只做一次，但"等它结束"可以重试**：叫醒用指纹去重（不刷屏），而等待/交付必须能在下次触发接着做。
+否则 lead 综合一旦超过一次等待窗口，重试会被指纹挡死 —— 表现是**永远不交付、待决永远清不掉**。
 
 `deliver({ sessionParts, messages })` 与 ask 出站同形；@ sender 写在 `atUserIds`。通道 markdown 若不吃 AT，正文同时写 `@name`。通道：`bot_id` 查 webhook（**按 robot.id**），`group_id` 当 toid。缺 `deliver`：只打日志。
 
