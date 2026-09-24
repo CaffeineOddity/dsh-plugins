@@ -2,3 +2,14 @@ node_modules/
 .omc/
 # run.sh 按需生成的 corepack pnpm 包装器（每次运行自动重建，不入库）
 .bin/
+
+# 设计交付产物（output/）与配置站页面的临时副本
+output/
+/agents.html
+/chat.html
+/log.html
+/prompts.html
+/settings.html
+/site.css
+/site.js
+/skills.html
