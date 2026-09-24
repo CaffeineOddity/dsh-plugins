@@ -21,6 +21,7 @@ import {
   writeTask,
   listTasksIn,
   describeTasks,
+  filterByConversation,
   isTaskId,
   marshalTaskYaml,
   createTask,
@@ -37,6 +38,8 @@ export interface AgentIdentity {
 }
 
 export interface BoardToolDeps {
+  /** 对话标识：同 providerId + 同 key 的任务才算「本群」。由 service 注入（用通道的 conversationKey）。 */
+  conversationKeyFor: (providerId: string, parts: Record<string, string>) => string
   agentIdentity: AgentIdentity
   ensureAgent: RelayHost['ensureAgent']
   agents: RelayHost['agents']
@@ -96,37 +99,6 @@ export function buildExpertCards(members: Array<{ agentId: string; name: string;
     cards.push(card)
   }
   return cards
-}
-
-/** 本群 running/ 任务短摘要（入站包装也复用）。 */
-export function runningSummaries(providerId: string, sessionParts: Record<string, string>): Record<string, unknown>[] {
-  void providerId
-  void sessionParts
-  return describeTasks(listTasksIn('running'))
-}
-
-/** 任务前台上手文本：本任务快照 + 卡片 + 运行中摘要。 */
-export function taskBoardPrompt(snapshot: GroupSnapshotInput): string {
-  const cards = buildExpertCards(snapshot.members)
-  const running = describeTasks(listTasksIn('running'))
-  const lines: string[] = ['——本群专家卡片（供选人派活，不写进被派专家 prompt）——']
-  for (const c of cards) {
-    const parts = [`- ${c.name} (${c.agentId})`]
-    if (c.description) parts.push(c.description)
-    if (c.needs_target_workspace) {
-      parts.push('需要目标项目目录')
-      const ws = c.workspaceCandidates?.map((w) => `${w.name}=${w.workspace}`).join('; ')
-      if (ws) parts.push(`候选: ${ws}`)
-    }
-    if (c.skills && c.skills.length > 0) {
-      parts.push(`技能: ${c.skills.map((s) => `${s.name}${s.description ? `(${s.description})` : ''}`).join(', ')}`)
-    }
-    lines.push(parts.join('；'))
-  }
-  lines.push('——本群 running 任务摘要——')
-  if (running.length === 0) lines.push('（暂无 running 任务）')
-  for (const r of running) lines.push(`- ${String(r.taskId)}: ${String(r.summary ?? '')}`)
-  return lines.join('\n')
 }
 
 /** 解析运行中的 session 归属哪个 agent（channel 槽 or 协作槽），供 running_experts。 */
@@ -196,6 +168,34 @@ function pauseSelfIfIntermediate(task: TaskBoard, callerAgentId: string): boolea
   if (self.status === 'waiting') return false
   self.status = 'waiting'
   return true
+}
+
+/**
+ * 「我」属于哪个对话：优先本轮入站上下文，其次已绑定任务。
+ * 两个都没有 → undefined（调用方**不列**，而不是返回全部）。
+ */
+function myConversation(
+  sessionId: string,
+  keyFor: (providerId: string, parts: Record<string, string>) => string,
+): { providerId: string; key: string } | undefined {
+  const inb = inboundFor(sessionId)
+  if (inb !== undefined) return { providerId: inb.providerId, key: keyFor(inb.providerId, inb.sessionParts) }
+  const taskId = boundTaskId(sessionId)
+  if (taskId !== undefined) {
+    const t = readTask('running', taskId)
+    if (t !== undefined) return { providerId: t.providerId, key: keyFor(t.providerId, t.sessionParts) }
+  }
+  return undefined
+}
+
+/** 本群 running 任务（按对话隔离）。定位不到自己的对话 → 返回 undefined。 */
+function myRunningTasks(
+  sessionId: string,
+  keyFor: (providerId: string, parts: Record<string, string>) => string,
+): TaskBoard[] | undefined {
+  const mine = myConversation(sessionId, keyFor)
+  if (mine === undefined) return undefined
+  return filterByConversation(listTasksIn('running'), mine, keyFor)
 }
 
 function notBoundError(): Error {
@@ -296,8 +296,11 @@ export function registerBoardTools(ctx: {
           schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
           render: (_args, value) => [{ type: 'text', text: value.text }],
         },
-        async execute() {
-          const running = describeTasks(listTasksIn('running'))
+        async execute(_args, exec) {
+          const who = caller(exec.agent?.id)
+          const mine = myRunningTasks(who.sessionId, deps.conversationKeyFor)
+          if (mine === undefined) return { text: '（无法确定本群，暂不列任务；先 open_task 或等入站）' }
+          const running = describeTasks(mine)
           if (running.length === 0) return { text: '（本群暂无 running 任务）' }
           const lines = running.map((r) => `- ${String(r.taskId)}: sender=${String(r.sender)} access=${String(r.access)} 摘要=${String(r.summary ?? '')}`)
           return { text: lines.join('\n') }

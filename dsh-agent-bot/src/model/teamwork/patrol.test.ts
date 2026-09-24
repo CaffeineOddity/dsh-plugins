@@ -143,29 +143,29 @@ describe('wakeSessionIdFor', () => {
   })
 
   it('taskLead → 按任务的 providerId/sessionParts 反推通道槽，取 sessionId', () => {
-    // encodeSessionKey 按 key 字母序连接值：bot_id=b1, group_id=g1 -> 'b1_g1'
-    const id = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-chan-a' }])
+    // encodeSessionKey = <providerId>_<按 key 字母序的值>：demo + b1,g1 -> 'demo_b1_g1'
+    const id = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-chan-a' }])
     const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })
     expect(wakeSessionIdFor(t, id)).toBe('sess-chan-a')
   })
 
   it('session_by_sender=true 时带上 sender 再定位', () => {
-    const id = mkAgent('A', [{ key: 'b1_g1_alice', sessionId: 'sess-chan-alice' }], true)
+    const id = mkAgent('A', [{ key: 'demo_b1_g1_alice', sessionId: 'sess-chan-alice' }], true)
     const t = task({ taskLead: id, sender: 'alice', sessionParts: { bot_id: 'b1', group_id: 'g1' } })
     expect(wakeSessionIdFor(t, id)).toBe('sess-chan-alice')
   })
 
   it('多群时不乱挑：只认任务那条群', () => {
     const id = mkAgent('A', [
-      { key: 'b1_g_other', sessionId: 'sess-other-group' },
-      { key: 'b1_g1', sessionId: 'sess-right-group' },
+      { key: 'demo_b_g_other', sessionId: 'sess-other-group' },
+      { key: 'demo_b1_g1', sessionId: 'sess-right-group' },
     ])
     const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })
     expect(wakeSessionIdFor(t, id)).toBe('sess-right-group')
   })
 
   it('没有对应槽 → undefined（调用方跳过）', () => {
-    const id = mkAgent('A', [{ key: 'b1_other', sessionId: 'sess-x' }])
+    const id = mkAgent('A', [{ key: 'demo_b_other', sessionId: 'sess-x' }])
     const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })
     expect(wakeSessionIdFor(t, id)).toBeUndefined()
   })
@@ -227,7 +227,7 @@ describe('assigneeOf / shouldDeliver', () => {
 
 describe('tickOnce 叫醒链（A→B→C）', () => {
   it('C 完成 → 叫醒 B（用 B 的协作会话）；本级未齐不叫 A', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
     writeTask('running', task({
@@ -248,7 +248,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('B 派完 C 但 C 还在跑 → 谁都不叫（不提前叫醒 A）', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
     writeTask('running', task({
@@ -266,7 +266,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('全终态 → 叫醒 taskLead 综合；同状态再跑不重复叫', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     writeTask('running', task({
       taskId: 'task_t1',
@@ -282,7 +282,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('待决 → 叫醒 taskLead 拍板，也只叫一次', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     writeTask('running', task({
       taskId: 'task_t1',
       taskLead: a,
@@ -296,7 +296,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('墙钟到点但专家还在跑 → 顺延墙钟 + 一条进度反馈，不移 done', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const past = Date.now() - 1
     writeTask('running', task({
@@ -318,7 +318,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('墙钟到点、专家救不动（不在 agents.json）→ 交回给人拍板，任务留在 running/', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     writeTask('running', task({
       taskId: 'task_t1',
       taskLead: a,
@@ -333,7 +333,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('全终态 → 收口：叫醒 lead、取它这轮产出交付、移 done/ 并解绑', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     bindSession('sess-b', 'task_t1')
     bindSession('sess-a', 'task_t1')
@@ -358,7 +358,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('中间层在等下游（waiting）→ 下游终态后恢复 running 并叫醒它，不叫 A', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const c = mkAgent('C', [{ key: 'task:task_t1:C', sessionId: 'sess-c' }])
     writeTask('running', task({
@@ -378,7 +378,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('事件快路径：会话变 idle 立刻转态并上报（不等轮询）', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     writeTask('running', task({
       taskId: 'task_t1',
@@ -396,7 +396,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('墙钟由定时器触发（无轮询）：到点自动顺延并给人进度反馈', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const past = Date.now() - 1
     writeTask('running', task({
@@ -415,7 +415,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('给人发的问卷（toHuman）→ deliver 问题 + 墙钟顺延成「发出时刻 + 一个墙钟」', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const past = Date.now() - 1
     writeTask('running', task({
@@ -439,7 +439,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('上抛给 lead 的待决：lead 答完后自动清掉（不靠模型记得 clear_pending）', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     writeTask('running', task({
       taskId: 'task_t1',
@@ -456,7 +456,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('lead 这轮又问了新问题（askedAt 变了）→ 保留新的待决', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     writeTask('running', task({
       taskId: 'task_t1',
@@ -479,7 +479,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('专家卡在等审批 → 标 need_decision + 通知人（只发一次）；批准后回到 running', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const bEvents: Array<{ seq: number; type: string; data?: unknown }> = [
       { seq: 1, type: 'turn/start' },
@@ -508,7 +508,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('只有专家在等审批时，到点不再无限顺延，而是交回给人', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     writeTask('running', task({
       taskId: 'task_t1',
@@ -523,7 +523,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('IM 任务里专家调了 ask_user_question → 取消那轮、写待决、发问卷到群', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const bEvents = [
       { seq: 1, type: 'turn/start' },
@@ -554,7 +554,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('local（Web）任务里调 ask_user_question → 不接管，留给网页 answerer', async () => {
-    const a = mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    const a = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     const b = mkAgent('B', [{ key: 'task:task_t1:B', sessionId: 'sess-b' }])
     const bEvents = [
       { seq: 1, type: 'tool/call', data: { callId: 'c1', name: 'ask_user_question', arguments: '{"questions":[{"id":"q1","question":"?"}]}' } },
@@ -574,7 +574,7 @@ describe('tickOnce 叫醒链（A→B→C）', () => {
   })
 
   it('任务被人挪走（cancel/）→ 解绑清理把会话解掉', async () => {
-    mkAgent('A', [{ key: 'b1_g1', sessionId: 'sess-a' }])
+    mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-a' }])
     bindSession('sess-a', 'task_t1')
     // running/ 里没有这份任务（相当于人已 mv 到 cancel/）
     const { host } = fakeHost(['sess-a'])

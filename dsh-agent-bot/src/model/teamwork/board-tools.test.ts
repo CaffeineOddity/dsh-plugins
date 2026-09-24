@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { resetConfigCache } from '../config.js'
 import { createAgent as createAgentConfig, saveAgent, type AgentWrite } from '../agents.js'
-import { buildExpertCards, hubMembers, resolveTargetWorkspace, runningSummaries, type ExpertCard } from './board-tools.js'
+import { buildExpertCards, hubMembers, resolveTargetWorkspace, type ExpertCard } from './board-tools.js'
 
 let dir: string
 let prevEnv: string | undefined
@@ -119,11 +119,5 @@ describe('resolveTargetWorkspace', () => {
     const cfg = await aliceCfg()
     const r = resolveTargetWorkspace({ ...cfg, needs_target_workspace: false }, '')
     expect(r.ok).toBe(true)
-  })
-})
-
-describe('runningSummaries', () => {
-  it('空 running 返回空数组', () => {
-    expect(runningSummaries('local', {})).toEqual([])
   })
 })

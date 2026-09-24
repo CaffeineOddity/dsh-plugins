@@ -150,9 +150,9 @@ describe('prepareAsk 校验', () => {
 })
 
 describe('prepareAsk sessionKey', () => {
-  it('只在大脑按字母序编 key，不含 providerId', () => {
+  it('只在大脑按字母序编 key，providerId 打头', () => {
     const prepared = prepareAsk(req(), providers)
-    expect(prepared.sessionKey).toBe('r1_6031348')
+    expect(prepared.sessionKey).toBe('demo_r1_6031348')
     expect(prepared.parts).toEqual({ bot_id: 'r1', group_id: '6031348' })
   })
 
@@ -168,7 +168,7 @@ describe('prepareAsk sessionKey', () => {
     use_hub_experts: true,
       agent_wait_timeout_ms: 180000,
     })
-    expect(prepareAsk(req(), providers).sessionKey).toBe('r1_6031348_alice')
+    expect(prepareAsk(req(), providers).sessionKey).toBe('demo_r1_6031348_alice')
     expect(() => prepareAsk(req({ meta: { ...req().meta, sender: '' } }), providers)).toThrow(
       /session_by_sender 需要非空 sender/,
     )
@@ -272,7 +272,7 @@ describe('resolveSessionReuse', () => {
           id: 'a1',
           name: '联运',
           workspace,
-          sessions: { r1_6031348: { sessionId: 'sid-old', lastAskAt: now - 60_000 } },
+          sessions: { demo_r1_6031348: { sessionId: 'sid-old', lastAskAt: now - 60_000 } },
         }),
       ],
       skill_apply: {},
@@ -299,7 +299,7 @@ describe('resolveSessionReuse', () => {
           workspace,
           prompt: 'default',
           sessions: {
-            r1_6031348: { sessionId: 'sid-old', lastAskAt: now - 60_000, promptFingerprint: '旧文' },
+            demo_r1_6031348: { sessionId: 'sid-old', lastAskAt: now - 60_000, promptFingerprint: '旧文' },
           },
         }),
       ],
@@ -328,7 +328,7 @@ describe('resolveSessionReuse', () => {
           prompt: 'default',
           prompt_placement: 'user',
           sessions: {
-            r1_6031348: { sessionId: 'sid-old', lastAskAt: now - 60_000, promptFingerprint: '同文' },
+            demo_r1_6031348: { sessionId: 'sid-old', lastAskAt: now - 60_000, promptFingerprint: '同文' },
           },
         }),
       ],
@@ -357,7 +357,7 @@ describe('resolveSessionReuse', () => {
           prompt: 'default',
           skill_groups: ['rd'],
           sessions: {
-            r1_6031348: { sessionId: 'sid-old', lastAskAt: now - 60_000, promptFingerprint: '同文' },
+            demo_r1_6031348: { sessionId: 'sid-old', lastAskAt: now - 60_000, promptFingerprint: '同文' },
           },
         }),
       ],
@@ -387,7 +387,7 @@ describe('resolveSessionReuse', () => {
           skill_groups: ['rd'],
           prompt_append_skills: false,
           sessions: {
-            r1_6031348: {
+            demo_r1_6031348: {
               sessionId: 'sid-old',
               lastAskAt: now - 60_000,
               promptFingerprint: '同文\n\n推荐工具：git-skill',

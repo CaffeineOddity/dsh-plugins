@@ -1,7 +1,7 @@
 # 12. 群内专家协作（task board）
 
 > **实现进度（SDD 标记）**：任务板模型（`task-board.ts`）、会话绑定（`binding.ts`）、中继（`relay.ts`）、六件看板工具（`board-tools.ts`）、巡检器（`patrol.ts` 含活性探针/超时/重启）、service 接线（toolsMount 挂载 + deliver 路由 + 入站 running 摘要包装）均已实现。测试见各 `*.test.ts`。
-> 已实现：`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、deliver @sender 收口、重启按 `jobs/running/` 恢复；全局开关 `use_hub_experts`（默认 true=中枢全集）；`open_task` 新建任务（入站上下文提供 sender/providerId/群快照）；派发时 fiber 绑定协作槽 + prompt 带任务文件绝对路径；中间层派下游后 `waiting` 暂停、下游终态后恢复；**全终态 → 叫醒 taskLead 综合 → 取其该轮产出 deliver @sender → 移 `done/` + 解绑**；墙钟到点按会话状态分四种处理（顺延/进度反馈/救活/交回给人）；`jobs/cancel/` 人工取消；任务移走后自动解绑。
+> 已实现：通道 key 含 `providerId`（防跨通道撞槽）；板可见性按 `providerId + conversationKey` 隔离（同群各台 bot 共享一块板、跨群不可见、local 共一块板）；`list_group_experts / list_tasks / open_task / update_task / dispatch_expert / ask_task_lead` 六工具；`task:` 协作槽隔离、write FIFO、叫醒链、deliver @sender 收口、重启按 `jobs/running/` 恢复；全局开关 `use_hub_experts`（默认 true=中枢全集）；`open_task` 新建任务（入站上下文提供 sender/providerId/群快照）；派发时 fiber 绑定协作槽 + prompt 带任务文件绝对路径；中间层派下游后 `waiting` 暂停、下游终态后恢复；**全终态 → 叫醒 taskLead 综合 → 取其该轮产出 deliver @sender → 移 `done/` + 解绑**；墙钟到点按会话状态分四种处理（顺延/进度反馈/救活/交回给人）；`jobs/cancel/` 人工取消；任务移走后自动解绑。
 > 接管 `ask_user_question` 走的是「检测挂起 tool/call + 取消回合 + 非阻塞问人」，**不拦 waterfall**；
 > `user-questions/request` 的 waterfall 本身不介入（认领会与人的 IM 回复形成死锁，见上）。
 > 已知边界：同一专家在同一单只有一条 `assignees[]`（按 expertId 覆盖）；多人并行改同一份 md 无锁（读-改-写可能互相覆盖）；同一会话可能先后服务多单（路由判偏不锁死，真相是 md）。

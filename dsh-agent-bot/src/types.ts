@@ -63,10 +63,15 @@ export function sessionPartsForEncode(
 }
 
 /**
- * 大脑唯一的会话槽编码：按 key 字母序取**值**用 `_` 连接。
- * 调用前先走 sessionPartsForEncode。例：`r1_6031348` / `r1_6031348_alice`。
+ * 大脑唯一的会话槽编码：`<providerId>_<按 key 字母序的各值>`，用 `_` 连接。
+ * 调用前先走 sessionPartsForEncode。例：`feishu_r1_6031348` / `feishu_r1_6031348_alice`。
+ *
+ * `providerId` **必须**进来：只用 `sessionParts` 的值拼时，不同通道若 `bot_id` / `group_id`
+ * 取值撞上会共用同一个槽（跨通道串台）。
  */
-export function encodeSessionKey(sessionParts: Record<string, string>): string {
+export function encodeSessionKey(sessionParts: Record<string, string>, providerId: string): string {
+  const pid = providerId.trim()
+  if (pid === '') throw new Error('agent-bot: encodeSessionKey 需要 providerId')
   const keys = Object.keys(sessionParts).sort()
   if (keys.length === 0) throw new Error('agent-bot: encodeSessionKey 需要非空 sessionParts')
   const values: string[] = []
@@ -78,7 +83,7 @@ export function encodeSessionKey(sessionParts: Record<string, string>): string {
     }
     values.push(value)
   }
-  return values.join('_')
+  return [pid, ...values].join('_')
 }
 
 export interface AgentAskRequest {
@@ -149,6 +154,14 @@ export interface AgentChannelProviderRegistration {
   label: string
   /** 可选：按本轮 sessionParts 返回该群绑定了 agentId 的成员。缺省专家清单为空。 */
   listGroupAgents?(sessionParts: Record<string, string>): AgentGroupMemberInfo[]
+  /**
+   * 可选：把一个 `sessionParts` 压成「这是哪个对话」的标识，用于**板可见性**过滤
+   * （同 providerId + 同 conversationKey 才看得到彼此的任务）。
+   * IM 通道应返回群身份（`group_id` / 飞书 `chat_id`）且**不要带 `bot_id`**
+   * —— 带上就会同群各台 bot 各看各的板，破坏「直 @ 与协作派发看见同一块板」。
+   * local（本地）返回常量，表示整台中枢共用一块板。缺省实现见 `conversationKeyOf`。
+   */
+  conversationKey?(sessionParts: Record<string, string>): string
   /** 可选：任务收口投递（与 ask 出站同形）。缺省只打日志。 */
   deliver?(req: AgentDeliverRequest): Promise<void>
 }
@@ -157,6 +170,25 @@ export interface AgentChannelProviderRegistration {
 export interface AgentChannelProviderInfo extends AgentChannelProviderRegistration {
   id: string
   label: string
+}
+
+/**
+ * 板可见性用的「对话」标识：优先通道自定义；否则取 `group_id`；再否则把 sessionParts 规范化拼起来。
+ */
+export function conversationKeyOf(
+  sessionParts: Record<string, string>,
+  custom?: (parts: Record<string, string>) => string,
+): string {
+  if (custom !== undefined) {
+    const v = custom(sessionParts)
+    if (typeof v === 'string' && v !== '') return v
+  }
+  const group = sessionParts.group_id
+  if (typeof group === 'string' && group !== '') return group
+  return Object.keys(sessionParts)
+    .sort()
+    .map((k) => `${k}=${sessionParts[k]}`)
+    .join('&')
 }
 
 export interface AgentBotService {

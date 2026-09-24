@@ -425,6 +425,20 @@ export function isTaskId(v: string): boolean {
   return /^task_[A-Za-z0-9_-]+$/.test(v)
 }
 
+/**
+ * 板可见性：只保留与「我」同一个对话的任务（同 `providerId` + 同 conversationKey）。
+ * 判据不含 bot_id / sender —— 同群各台 bot、同群不同人都看**同一块板**（specs/12 §入站怎么绑任务）。
+ */
+export function filterByConversation<T extends { providerId: string; sessionParts: Record<string, string> }>(
+  tasks: readonly T[],
+  mine: { providerId: string; key: string },
+  keyFor: (providerId: string, parts: Record<string, string>) => string,
+): T[] {
+  return tasks.filter(
+    (t) => t.providerId === mine.providerId && keyFor(t.providerId, t.sessionParts) === mine.key,
+  )
+}
+
 /** 任务文件绝对路径（派发时告知专家去读；也是运维排查入口）。 */
 export function taskFilePath(status: TaskStatus, taskId: string): string {
   return taskFile(status, taskId)

@@ -89,7 +89,7 @@ export function wakeSessionIdFor(task: TaskBoard, agentId: string): string | und
   if (cfg === undefined) return undefined
   try {
     const parts = sessionPartsForEncode(task.sessionParts, task.sender, cfg.session_by_sender)
-    const slot = cfg.sessions[encodeSessionKey(parts)]
+    const slot = cfg.sessions[encodeSessionKey(parts, task.providerId)]
     if (slot === undefined) return undefined
     return slot.sessionId === '' ? undefined : slot.sessionId
   } catch {

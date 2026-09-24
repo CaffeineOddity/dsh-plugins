@@ -170,7 +170,7 @@ describe('listAgents / getAgent', () => {
           session_timeout_minutes: 30,
           concurrency: "serial",
           needs_target_workspace: false,
-          sessions: { r1_1: { sessionId: 'sid', lastAskAt: 1 } },
+          sessions: { demo_r1_1: { sessionId: 'sid', lastAskAt: 1 } },
         },
       ],
       skill_apply: {},
@@ -337,7 +337,7 @@ describe('ask 校验先于回合', () => {
       messages: [{ kind: 'markdown', text: '你好世界', url: '', atUserIds: [], atAll: false }],
       pending: null,
     })
-    const slot = getAgent('a1')?.sessions.r1_1
+    const slot = getAgent('a1')?.sessions.demo_r1_1
     expect(slot?.sessionId).toEqual(expect.any(String))
     expect(slot?.sessionId.length).toBeGreaterThan(0)
     expect(slot?.lastAskAt).toBeGreaterThan(1_700_000_000_000)
@@ -378,10 +378,10 @@ describe('ask 校验先于回合', () => {
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     const req = askReq('t1', 'alice')
     await svc.ask(req)
-    const first = getAgent('a1')?.sessions.r1_1
+    const first = getAgent('a1')?.sessions.demo_r1_1
     if (first === undefined) throw new Error('test: 第一轮应收口写槽')
     await svc.ask({ ...req, meta: { ...req.meta, traceId: 't2' } })
-    const second = getAgent('a1')?.sessions.r1_1
+    const second = getAgent('a1')?.sessions.demo_r1_1
     expect(second?.sessionId).toBe(first.sessionId)
     expect(second?.lastAskAt).toBeGreaterThanOrEqual(first.lastAskAt)
     expect(second?.promptFingerprint).toBe('')
@@ -422,7 +422,7 @@ describe('ask 校验先于回合', () => {
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     const req = askReq('t1', 'alice')
     await svc.ask(req)
-    const first = getAgent('a1')?.sessions.r1_1
+    const first = getAgent('a1')?.sessions.demo_r1_1
     if (first === undefined) throw new Error('test: 第一轮应收口写槽')
     expect(first.promptFingerprint).toBe('旧文')
     const cfg = getAgent('a1')
@@ -439,7 +439,7 @@ describe('ask 校验先于回合', () => {
       use_hub_experts: true,
     })
     await svc.ask({ ...req, meta: { ...req.meta, traceId: 't2' } })
-    const second = getAgent('a1')?.sessions.r1_1
+    const second = getAgent('a1')?.sessions.demo_r1_1
     expect(second?.sessionId).not.toBe(first.sessionId)
     expect(second?.promptFingerprint).toBe('新文')
   })
@@ -481,7 +481,7 @@ describe('ask 校验先于回合', () => {
     await svc.ask(askReq('t1', 'alice'))
     const payload = followups[0] as { content: Array<{ text: string }> }
     expect(payload.content[0]?.text).toBe('用户[alice]: 你好\n\n你是alice助手\n\n——本群任务板（specs/12）——\n（本群暂无 running 任务；你可以 open_task 新建一份，或直接自己做）')
-    expect(getAgent('a1')?.sessions.r1_1?.promptFingerprint).toBe('user\n你是{{sender}}助手')
+    expect(getAgent('a1')?.sessions.demo_r1_1?.promptFingerprint).toBe('user\n你是{{sender}}助手')
   })
 
   it('ask 按 agent skill_groups 追加推荐工具', async () => {
@@ -521,7 +521,7 @@ describe('ask 校验先于回合', () => {
     await svc.ask(askReq('t1', 'alice'))
     const payload = followups[0] as { content: Array<{ text: string }> }
     expect(payload.content[0]?.text).toBe('用户[alice]: 你好\n\n角色说明\n\n推荐工具：union-xxx, git-skill\n\n——本群任务板（specs/12）——\n（本群暂无 running 任务；你可以 open_task 新建一份，或直接自己做）')
-    expect(getAgent('a1')?.sessions.r1_1?.promptFingerprint).toBe('user\n角色说明\n\n推荐工具：union-xxx, git-skill')
+    expect(getAgent('a1')?.sessions.demo_r1_1?.promptFingerprint).toBe('user\n角色说明\n\n推荐工具：union-xxx, git-skill')
   })
 
   it('prompt_append_skills=false 不把技能名写进 prompt', async () => {
@@ -561,7 +561,7 @@ describe('ask 校验先于回合', () => {
     await svc.ask(askReq('t1', 'alice'))
     const payload = followups[0] as { content: Array<{ text: string }> }
     expect(payload.content[0]?.text).toBe('用户[alice]: 你好\n\n角色说明\n\n——本群任务板（specs/12）——\n（本群暂无 running 任务；你可以 open_task 新建一份，或直接自己做）')
-    expect(getAgent('a1')?.sessions.r1_1?.promptFingerprint).toBe('user\n角色说明')
+    expect(getAgent('a1')?.sessions.demo_r1_1?.promptFingerprint).toBe('user\n角色说明')
   })
 
   it('校验通过后无 agents 服务显式抛错', async () => {
@@ -688,8 +688,8 @@ describe('ask 校验先于回合', () => {
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     await svc.ask(askReq('t1', 'alice'))
-    expect(getAgent('a1')?.sessions.r1_1_alice?.sessionId).toEqual(expect.any(String))
-    expect(getAgent('a1')?.sessions.r1_1).toBeUndefined()
+    expect(getAgent('a1')?.sessions.demo_r1_1_alice?.sessionId).toEqual(expect.any(String))
+    expect(getAgent('a1')?.sessions.demo_r1_1).toBeUndefined()
     await expect(svc.ask(askReq('t2', ''))).rejects.toThrow(/session_by_sender 需要非空 sender/)
   })
 
@@ -752,7 +752,7 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     await svc.ask(askReq('t1', 'alice'))
-    const sid = getAgent('a1')?.sessions.r1_1?.sessionId ?? ''
+    const sid = getAgent('a1')?.sessions.demo_r1_1?.sessionId ?? ''
     const ctx = inboundFor(sid)
     expect(ctx?.sender).toBe('alice')
     expect(ctx?.providerId).toBe('demo')
@@ -773,7 +773,7 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
       },
     })
     await svc.ask(askReq('t1', 'alice'))
-    const sid = getAgent('a1')?.sessions.r1_1?.sessionId ?? ''
+    const sid = getAgent('a1')?.sessions.demo_r1_1?.sessionId ?? ''
     const snap = inboundFor(sid)?.groupSnapshot ?? []
     expect(snap.map((m) => m.agentId)).toEqual(['a2'])
     expect(asked).toBe(false) // hub 模式不问通道
@@ -798,7 +798,7 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     // 先让 a1 有一个通道槽，拿到 sessionId 后绑上该任务
     await svc.ask(askReq('t0', 'alice'))
-    const sid = getAgent('a1')?.sessions.r1_1?.sessionId ?? ''
+    const sid = getAgent('a1')?.sessions.demo_r1_1?.sessionId ?? ''
     bindSession(sid, t.taskId)
     withPending.pendingHuman = { questions: ['要哪个尺寸？'], askedBy: 'a1', askedAt: 42, toHuman: true }
     writeTask('running', withPending)
@@ -824,7 +824,7 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
       },
     })
     await svc.ask(askReq('t1', 'alice'))
-    const sid = getAgent('a1')?.sessions.r1_1?.sessionId ?? ''
+    const sid = getAgent('a1')?.sessions.demo_r1_1?.sessionId ?? ''
     const snap = inboundFor(sid)?.groupSnapshot ?? []
     expect(asked).toBe(1)
     expect(snap.map((m) => m.agentId)).toEqual(['a2'])

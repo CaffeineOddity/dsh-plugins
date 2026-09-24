@@ -82,7 +82,7 @@ export function prepareAsk(req: AgentAskRequest, registeredProviderIds: Readonly
 
   const sender = typeof req.meta.sender === 'string' ? req.meta.sender : ''
   const parts = sessionPartsForEncode(req.meta.sessionParts ?? {}, sender, agent.session_by_sender)
-  const sessionKey = encodeSessionKey(parts)
+  const sessionKey = encodeSessionKey(parts, providerId)
   return { agent, sessionKey, parts }
 }
 

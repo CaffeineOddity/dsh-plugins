@@ -16,6 +16,7 @@ import {
   isTaskId,
   describeTasks,
   createTask,
+  filterByConversation,
   taskFilePath,
   type TaskBoard,
 } from './task-board.js'
@@ -188,6 +189,29 @@ describe('createTask（新建任务落 running/）', () => {
     })
     expect(t.target).toBeUndefined()
     expect(t.deadlineAt - t.createdAt).toBe(loadConfig().task_round_timeout_ms)
+  })
+})
+
+describe('filterByConversation（板可见性）', () => {
+  const keyFor = (providerId: string, parts: Record<string, string>): string =>
+    providerId === 'local' ? 'local' : (parts.group_id ?? Object.keys(parts).sort().map((k) => `${k}=${parts[k]}`).join('&'))
+  it('同群各台 bot 看同一块板；跨群不可见；跨通道不可见', () => {
+    const mine = { providerId: 'demo', key: 'G1' }
+    const tasks = [
+      { providerId: 'demo', sessionParts: { bot_id: 'A', group_id: 'G1' } },   // 同群别台 bot 建的 → 可见
+      { providerId: 'demo', sessionParts: { bot_id: 'B', group_id: 'G1' } },   // 同群自己 → 可见
+      { providerId: 'demo', sessionParts: { bot_id: 'A', group_id: 'G2' } },   // 别的群 → 不可见
+      { providerId: 'other', sessionParts: { bot_id: 'A', group_id: 'G1' } },  // 别的通道 → 不可见
+    ]
+    expect(filterByConversation(tasks, mine, keyFor)).toHaveLength(2)
+  })
+  it('local 恒为一块板（不同网页会话也互相可见）', () => {
+    const mine = { providerId: 'local', key: 'local' }
+    const tasks = [
+      { providerId: 'local', sessionParts: { session: 'conv1' } },
+      { providerId: 'local', sessionParts: { session: 'conv2' } },
+    ]
+    expect(filterByConversation(tasks, mine, keyFor)).toHaveLength(2)
   })
 })
 

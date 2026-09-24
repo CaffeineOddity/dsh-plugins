@@ -19,9 +19,10 @@ import { createAgentRuntime, type HostServices } from '../model/runtime.js'
 import type { AgentConfig } from '../model/config.js'
 import { registerBoardTools } from '../model/teamwork/board-tools.js'
 import { createPatrol } from '../model/teamwork/patrol.js'
-import { describeTasks, listTasksIn, readTask as readTaskModel, writeTask as writeTaskModel, type GroupMember } from '../model/teamwork/task-board.js'
+import { describeTasks, listTasksIn, filterByConversation, readTask as readTaskModel, writeTask as writeTaskModel, type GroupMember } from '../model/teamwork/task-board.js'
 import { boundTaskId } from '../model/teamwork/binding.js'
 import { rememberInbound } from '../model/teamwork/inbound.js'
+import { conversationKeyOf } from '../types.js'
 import type {
   AgentAskRequest,
   AgentAskResponse,
@@ -99,7 +100,12 @@ function variableValues(req: AgentAskRequest, sessionKey: string): Record<string
 export type AgentBotHostService = AgentBotService & { dispose(): Promise<void> }
 
 /** 从登记的 provider 查 listGroupAgents / deliver。 */
-export const LOCAL_PROVIDER: AgentChannelProviderInfo = { id: 'local', label: '本地' }
+export const LOCAL_PROVIDER: AgentChannelProviderInfo = {
+  id: 'local',
+  label: '本地',
+  // 本地没有"群"概念：整台中枢的 local 共用一块板（换网页会话也看得到旧单，不会重复建单）
+  conversationKey: () => 'local',
+}
 
 /** 创建 agentBot 服务。host 由组合根注入；测试可传假服务。 */
 /** 进程内已登记 Provider：公共字段 + 内部代令牌。 */
@@ -115,10 +121,16 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
   providers.set(LOCAL_PROVIDER.id, { ...LOCAL_PROVIDER, token: Symbol('agent-bot:builtin-local') })
   const queue = createAskQueue()
 
-  /** 入站绑定点：包入站 running 摘要；群快照由组员发现函数单独登记（见 rememberInbound）。 */
-  function boardContextFor(live: AgentConfig): { text: string; variables: Record<string, string> } {
-    // 卡片按需由 list_group_experts 取（hub 模式可能很多，不塞进 prompt）；这里只带 running 摘要。
-    const running = describeTasks(listTasksIn('running'))
+  /** 某 provider + sessionParts 的「对话」标识（板可见性用）。 */
+  function conversationKeyFor(providerId: string, parts: Record<string, string>): string {
+    return conversationKeyOf(parts, providers.get(providerId)?.conversationKey)
+  }
+
+  /** 入站绑定点：包入站 running 摘要（**只列本群**）；群快照由组员发现函数单独登记。 */
+  function boardContextFor(live: AgentConfig, providerId: string, sessionParts: Record<string, string>): { text: string; variables: Record<string, string> } {
+    // 卡片按需由 list_group_experts 取（hub 模式可能很多，不塞进 prompt）；这里只带本群 running 摘要。
+    const mine = { providerId, key: conversationKeyFor(providerId, sessionParts) }
+    const running = describeTasks(filterByConversation(listTasksIn('running'), mine, conversationKeyFor))
     const lines: string[] = ['——本群任务板（specs/12）——']
     if (running.length === 0) {
       lines.push('（本群暂无 running 任务；你可以 open_task 新建一份，或直接自己做）')
@@ -162,6 +174,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
     ...host,
     toolsMount: () => (sessionId, agentId, agentName, agentCtx) => {
       registerBoardTools(agentCtx, {
+        conversationKeyFor: (providerId, parts) => conversationKeyFor(providerId, parts),
         agentIdentity: (sid) => runtime.identityFor(sid),
         ensureAgent: (input) => runtime.ensureAgent(input),
         agents: () => runtime.hostAgents(),
@@ -261,7 +274,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         const promptText = promptTextFor(live.id, live.prompt, live.skill_groups, live.prompt_append_skills)
         const values = variableValues(req, current.sessionKey)
         // 入站包装（specs/12 §入站怎么绑任务）：附本群 running 短摘要，让 LLM 认捡起/新建。
-        const boardCtx = boardContextFor(live)
+        const boardCtx = boardContextFor(live, req.meta.providerId, req.meta.sessionParts)
         // 人的回填：入站前记下该会话绑定的任务与待决时间；这一轮结束后若待决没被换掉就清掉
         const boundBefore = boundTaskId(decision.sessionId)
         const pendingBefore = boundBefore === undefined
