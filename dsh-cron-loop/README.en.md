@@ -8,7 +8,7 @@ DSH's built-in `automation` is a global/session-level timer with no project bind
 
 - **Project-level timers**: each job is bound to an absolute working directory (cwd); on fire it opens/resumes a DSH session in that directory and lets a full agent loop execute the injected prompt.
 - **Claude Code-style command**: `/cron` inside a session manages the current project's tasks.
-- **Task-center page**: `http://127.0.0.1:3080/cron` lists tasks and execution history across all local projects, with create/edit/pause/delete.
+- **Task-center page**: `http://127.0.0.1:3080/cron` (shadcn/ui) lists tasks and execution history across all local projects, with create/edit/pause/delete.
 
 ```mermaid
 flowchart LR
@@ -187,7 +187,8 @@ dsh-cron-loop/
 │   ├── cron-scheduler.ts      # 30s tick scheduler + cron_job model tool
 │   ├── cron-commands.ts       # /cron slash command
 │   ├── cron-web.ts            # /cron page + jobs/runs JSON API
-│   ├── assets/cron.html       # task-center single-file frontend
+│   ├── web/                   # task-center shadcn/ui source
+│   ├── assets/cron.html       # built single-file frontend
 │   └── lib/
 │       ├── cron-core.ts       # cron parser pure functions (parseCron/matches/computeNextRun)
 │       ├── cron-core.spec.ts  # cron-core smoke tests

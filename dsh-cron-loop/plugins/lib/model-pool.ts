@@ -106,8 +106,12 @@ export function computeRecoveryAt(entry: ModelEntry): number | null {
 /** 全局模型池：不依赖 ctx，纯文件读写 + 内存缓存。 */
 export class ModelPool {
   private config: ModelPoolFile | null = null
+  /** 配置落盘路径：默认真实环境，测试可注入临时路径避免污染。 */
+  private readonly filePath: string
 
-  private constructor() {}
+  private constructor(filePath: string = modelPoolPath()) {
+    this.filePath = filePath
+  }
 
   /** 加载模型池配置（首次或刷新时调用）。 */
   static async load(): Promise<ModelPool> {
@@ -119,7 +123,7 @@ export class ModelPool {
   /** 从磁盘重新加载配置。 */
   async reload(): Promise<void> {
     try {
-      const text = await readFile(modelPoolPath(), 'utf8')
+      const text = await readFile(this.filePath, 'utf8')
       this.config = JSON.parse(text) as ModelPoolFile
     } catch {
       // 文件不存在或格式错误 -> 视为未启用
@@ -127,9 +131,9 @@ export class ModelPool {
     }
   }
 
-  /** 测试用：从内存配置构造（绕过文件读取）。 */
-  static fromConfig(config: ModelPoolFile): ModelPool {
-    const pool = new ModelPool()
+  /** 测试用：从内存配置构造（绕过文件读取）；filePath 供测试注入隔离路径。 */
+  static fromConfig(config: ModelPoolFile, filePath: string = modelPoolPath()): ModelPool {
+    const pool = new ModelPool(filePath)
     pool.config = config
     return pool
   }
@@ -183,7 +187,7 @@ export class ModelPool {
   /** 写回配置文件。 */
   async save(): Promise<void> {
     if (this.config === null) return
-    await writeAtomic(modelPoolPath(), JSON.stringify(this.config, null, 2))
+    await writeAtomic(this.filePath, JSON.stringify(this.config, null, 2))
   }
 
   /** 获取当前配置快照（只读）。 */

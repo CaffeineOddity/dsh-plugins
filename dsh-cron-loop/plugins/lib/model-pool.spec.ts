@@ -1,12 +1,20 @@
 // model-pool 冒烟测试：tsx --test 运行。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { ModelPool, computeRecoveryAt } from './model-pool.ts'
 import type { ModelEntry, ModelPoolFile } from './model-pool.ts'
 
-/** 构造测试用 pool（绕过文件读取）。 */
+/** 测试用隔离落盘路径：写临时目录，绝不污染真实 ~/.dsh。 */
+function testPath(): string {
+  return join(tmpdir(), `dsh-model-pool-test-${randomUUID()}.json`)
+}
+
+/** 构造测试用 pool（绕过文件读取；落盘指向隔离临时路径）。 */
 function makePool(models: ModelEntry[], enabled = true): ModelPool {
-  return ModelPool.fromConfig({ enabled, models })
+  return ModelPool.fromConfig({ enabled, models }, testPath())
 }
 
 test('pickAvailable returns highest priority non-exhausted model', () => {
@@ -41,8 +49,8 @@ test('pickAvailable recovers exhausted model after reset period', () => {
   const pool = makePool([
     { id: 'a', provider: 'p1', model: 'm1', priority: 1, quotaReset: { type: 'hours', value: 24 }, exhausted: true, exhaustedAt: past },
   ])
-  // save 会被调用，但它写文件，这里只验证逻辑恢复
-  try { pool.pickAvailable() } catch { /* save 可能失败，不影响逻辑验证 */ }
+  // 此处会触发 save()，但落盘指向隔离临时路径，不污染真实 ~/.dsh
+  pool.pickAvailable()
   const snapshot = pool.snapshot()
   assert.equal(snapshot?.models[0]?.exhausted, false)
 })
@@ -81,13 +89,13 @@ test('disabled pool returns null', () => {
 test('enabled pool with empty models is treated as not configured', () => {
   // UI 允许保存 {enabled: true, models: []}：应视为未配置（isEnabled=false），
   // 任务走 dsh 自身模型流程，而不是「all models exhausted」。
-  const pool = ModelPool.fromConfig({ enabled: true, models: [] })
+  const pool = ModelPool.fromConfig({ enabled: true, models: [] }, testPath())
   assert.equal(pool.isEnabled, false)
   assert.equal(pool.pickAvailable(), null)
 })
 
 test('isEnabled tolerates missing models key from hand-edited file', () => {
-  const pool = ModelPool.fromConfig({ enabled: true } as unknown as ModelPoolFile)
+  const pool = ModelPool.fromConfig({ enabled: true } as unknown as ModelPoolFile, testPath())
   assert.equal(pool.isEnabled, false)
   assert.equal(pool.pickAvailable(), null)
 })

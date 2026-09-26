@@ -23,11 +23,8 @@ export const name = 'cron-web'
 /** 硬依赖：webServer、存储服务、模型注册表与默认模型。 */
 export const inject = ['webServer', 'cronLoopStore', 'llm', 'agentDefaultModel']
 
-/** 任务中心页面 HTML（启动时从 assets 读取一次）。 */
-const PAGE_HTML = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), 'assets', 'cron.html'),
-  'utf8',
-)
+/** 任务中心页面路径。每次请求读取，改 HTML 后刷新即可，不必重启。 */
+const PAGE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'cron.html')
 
 /** 读请求体（JSON，上限 1MB）。 */
 function readBody(req: IncomingMessage): Promise<Buffer> {
@@ -77,7 +74,7 @@ export function apply(ctx: Context): void {
     path: '/cron',
     handler: (_req, res) => {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-      res.end(PAGE_HTML)
+      res.end(readFileSync(PAGE_PATH))
     },
   })
 

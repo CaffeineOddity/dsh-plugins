@@ -9,7 +9,7 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
 - 项目级定时器：每条 job 绑定一个绝对工作目录（cwd），到期后在该目录新开/续接一个
   DSH 会话并注入任务 prompt，由完整 agent loop 执行。
 - Claude Code 风格命令：会话内 `/cron` 管理当前项目（按 agent cwd 归属）的定时任务。
-- 任务中心页面：`http://127.0.0.1:3080/cron` 查看本地所有项目的任务列表、执行历史，
+- 任务中心页面：`http://127.0.0.1:3080/cron`（shadcn/ui）查看本地所有项目的任务列表、执行历史，
   并可新建/编辑/暂停/删除任务。
 
 ## 接口设计
@@ -110,7 +110,7 @@ add/update 的 `activateOnSuccess` 缺省不填（成功后立即激活的另一
 - `/cron`（无参数 / list）：列出当前项目的任务。
 - 命令结果为 success 文本（CommandResult），不进模型。
 
-### Web 任务中心（`cron-web.ts` + `assets/cron.html`）
+### Web 任务中心（`cron-web.ts` + `web/` 构建出的 `assets/cron.html`）
 
 通过 `ctx.webServer.register`（exact 路由）：
 

@@ -8,7 +8,7 @@ DSH 内置的 `automation` 是全局/会话级定时器，不绑定具体项目�
 
 - **项目级定时器**：每条任务绑定一个绝对工作目录（cwd），到期后在该目录新开/续接 DSH 会话，由完整 agent loop 执行注入的 prompt。
 - **Claude Code 风格命令**：会话内 `/cron` 管理当前项目的定时任务。
-- **任务中心页面**：`http://127.0.0.1:3080/cron` 查看本地所有项目的任务列表与执行历史，可新建/编辑/暂停/删除。
+- **任务中心页面**：`http://127.0.0.1:3080/cron`（shadcn/ui）查看本地所有项目的任务列表与执行历史，可新建/编辑/暂停/删除。
 
 ```mermaid
 flowchart LR
@@ -187,7 +187,8 @@ dsh-cron-loop/
 │   ├── cron-scheduler.ts      # 30s tick 调度 + cron_job 模型工具
 │   ├── cron-commands.ts       # /cron 斜杠命令
 │   ├── cron-web.ts            # /cron 页面 + jobs/runs JSON API
-│   ├── assets/cron.html       # 任务中心单文件前端
+│   ├── web/                   # 任务中心 shadcn/ui 源码
+│   ├── assets/cron.html       # 构建后的单文件前端
 │   └── lib/
 │       ├── cron-core.ts       # cron 解析纯函数（parseCron/matches/computeNextRun）
 │       ├── cron-core.spec.ts  # cron-core 冒烟测试
