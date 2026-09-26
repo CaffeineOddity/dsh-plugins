@@ -25,6 +25,15 @@ flowchart LR
   App -.loads.-> Plugin["plugin (insert list)"]
 ```
 
+## Create a plugin
+
+```bash
+./run.sh --create <plugin-name>     # e.g. ./run.sh --create dsh-notes
+./run.sh <plugin-name> -d -r        # link the source and restart, then open the page
+```
+
+The scaffold uses React, Tailwind, and the Radix (shadcn) components in `ui/`. The default layout is a sidebar plus a main pane. Page: `http://127.0.0.1:3080/<plugin-name>`. Acceptance criteria: [docs/specs/create-plugin.md](./docs/specs/create-plugin.md).
+
 ## General installation
 
 The repo root provides `run.sh` to manage plugin release and installation. Three mutually exclusive install modes:

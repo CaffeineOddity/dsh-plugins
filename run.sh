@@ -12,6 +12,7 @@
 #   -r/--restart       安装/升级/开发模式后重启 dsh web（委托 ~/.dsh/run.sh --restart）
 #
 # 用法：
+#   run.sh --create <插件名> [--no-install]             创建插件脚手架（React + Tailwind + shadcn）
 #   run.sh <plugin> -d [-r]                             开发：link 源码，可选重启
 #   run.sh <plugin> release [major|minor|patch]          发布：bump + pack（不动 git）
 #   run.sh <plugin> release [level] [--commit] [--tag]  发布 + 提交/打 tag（可选）
@@ -21,6 +22,7 @@
 #   run.sh <plugin> -u [-r]                            升级 .dist/ tarball，可选重启
 #
 # 示例：
+#   run.sh --create dsh-notes               创建侧边栏 + 主窗口的插件脚手架
 #   run.sh dsh-cron-loop -d -r              开发：link 源码 + 重启
 #   run.sh dsh-cron-loop release patch       发布：bump + pack（不 commit）
 #   run.sh dsh-cron-loop release patch --commit --tag  发布 + commit + push + tag
@@ -386,6 +388,7 @@ DO_NOHUP=false
 usage() {
   cat << 'USAGE'
 用法：
+  run.sh --create <插件名> [--no-install]          创建插件脚手架（侧边栏 + 主窗口）
   run.sh <plugin> -d [-r]                          开发：link 源码，可选重启
   run.sh <plugin> release [major|minor|patch]     发布：bump + pack（不动 git）
   run.sh <plugin> release [level] [--commit] [--tag] 发布 + 提交/打 tag（可选）
@@ -395,6 +398,7 @@ usage() {
   run.sh <plugin> -u [-r]                         升级当前版本 tarball，可选重启
 
 选项：
+  --create      在仓库根创建插件目录。默认 pnpm install 并构建页面；--no-install 只写源码
   -d            开发模式：link 源码到 profile
   release       发布。level 可选：major|minor|patch；不传则用当前版本打包
   --commit/-c  发布时 git commit + push origin main（仅版本有变才提交），默认不动 git
@@ -408,6 +412,7 @@ usage() {
 互斥：-d / -i / -u 三选一
 
 示例：
+  run.sh --create dsh-notes                创建脚手架，随后可用 run.sh dsh-notes -d
   run.sh dsh-cron-loop -d -r               开发：link 源码 + 重启
   run.sh dsh-cron-loop release patch        发布：bump + pack（不 commit）
   run.sh dsh-cron-loop release patch --commit --tag  发布 + commit + push + tag
@@ -418,6 +423,40 @@ usage() {
 USAGE
   exit 0
 }
+
+# --create 不依赖已有插件目录，必须在 init_plugin 之前处理。
+if [[ "${1:-}" == "--create" ]]; then
+  shift
+  CREATE_NAME=""
+  CREATE_NO_INSTALL=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-install) CREATE_NO_INSTALL=true; shift ;;
+      -h|--help) usage ;;
+      -*) err "未知选项: $1"; exit 1 ;;
+      *)
+        if [[ -n "$CREATE_NAME" ]]; then
+          err "--create 只接受一个插件名"
+          exit 1
+        fi
+        CREATE_NAME="$1"
+        shift
+        ;;
+    esac
+  done
+  if [[ -z "$CREATE_NAME" ]]; then
+    err "用法: run.sh --create <插件名>"
+    exit 1
+  fi
+  log "创建插件: $CREATE_NAME"
+  # 不用空数组展开：macOS 自带 bash 3.2 在 set -u 下会把 "${arr[@]}" 当成未绑定。
+  if [[ "$CREATE_NO_INSTALL" == true ]]; then
+    node "$SCRIPT_DIR/scripts/create-plugin.mjs" --name "$CREATE_NAME" --no-install
+  else
+    node "$SCRIPT_DIR/scripts/create-plugin.mjs" --name "$CREATE_NAME"
+  fi
+  exit 0
+fi
 
 # 第一个位置参数 = 插件名
 if [[ $# -lt 1 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then

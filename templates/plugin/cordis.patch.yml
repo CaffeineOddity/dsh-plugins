@@ -1,0 +1,8 @@
+# __PLUGIN_NAME__ 的 Cordis 叠加层。
+# 开发模式由 run.sh -d 以 link 加载本文件。
+# 发布时 run.sh 会把下面的 TypeScript 入口改写成 dist 里的 JavaScript。
+# 不要在注释里再写一遍 plugins 入口路径，否则发布替换会误伤注释。
+
+- insert:
+    - id: __PLUGIN_NAME__
+      name: ./plugins/web.ts

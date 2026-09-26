@@ -25,6 +25,15 @@ flowchart LR
   App -.加载.-> Plugin["插件（insert 列表）"]
 ```
 
+## 创建插件
+
+```bash
+./run.sh --create <插件名>          # 例: ./run.sh --create dsh-notes
+./run.sh <插件名> -d -r             # 链接源码并重启后打开页面
+```
+
+生成的插件使用 React、Tailwind 和仓库 `ui/` 里的 Radix（shadcn）组件，默认布局是侧边栏 + 主窗口。页面地址：`http://127.0.0.1:3080/<插件名>`。验收与边界见 [docs/specs/create-plugin.md](./docs/specs/create-plugin.md)。
+
 ## 通用安装方式
 
 仓库根目录提供 `run.sh` 统一管理插件的发布与安装。三种安装模式互斥：
