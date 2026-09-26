@@ -228,21 +228,23 @@ LLM 拿到的判据就三样：running 摘要、自己的技能、专家卡片�
 | 判断 | 动作 |
 |---|---|
 | 这条消息属于正在做的那一单 | 捡起：`open_task(taskId)` 绑上，**复用该单的会话**继续（通道槽 `reuse_session` 不强制重开） |
-| 不是已有单，但自己的技能能做 | 直接做，不建文件（普通 `settleAskRound`） |
+| 调用方会话 A 把活交给另一条专家会话 B | 运行时在 followup 前建 `running/` 并绑定 B（B 的 agent = taskLead，不论之后派不派）。不依赖模型 `open_task` |
+| 不是已有单，且就在当前会话做完（没有另一条专家会话） | 直接做，不建文件（普通 `settleAskRound`） |
 | 不是已有单，自己也做不了 | `open_task` 无 id → **新建** `running/task_{id}.md`（本 agent = taskLead），再按卡片 `dispatch_expert` 或 `ask_user_question` |
 
 新建的 `groupSnapshot` 来源随全局开关 `use_hub_experts`：开=`agents.json` 全集；关=本轮 `listGroupAgents` 投影。两种都按 `agents.json` 过滤幽灵成员、去掉调用方自己。
 
 | 谁发起 | 绑哪份 | 群快照 |
 |---|---|---|
-| 人 @ 某专家（不论像不像答问卷） | LLM 捡起 → 那份；`open_task` 无 id → 新建（本 agent = taskLead）。只自己答完、没派、没问人：不建文件，走普通单 agent `settleAskRound` | 新建本轮扫一份；捡起用文件里缓存的 |
+| 人 @ 某专家，且就在这条会话里做完 | LLM 捡起 → 那份；`open_task` 无 id → 新建。只自己答完、没派、没问人：不建文件 | 新建本轮扫一份；捡起用文件里缓存的 |
+| 会话 A 经 `/agent_` / `agent_ask` 交给专家会话 B | 运行时建单并绑定 B。B 自己做完：deliver 回 A，移 `done/`。B 再派或问人：留 `running/` | 新建时扫一份 |
 | 中继叫醒（内部 followup） | 文件里那份（派发时已 fiber 绑定） | 该文件已缓存的 |
 
 内部 followup 必须带 `taskId`（fiber 绑定，不是让模型填）。A 的派发只写入 A 那份；B 再派 C 仍写入 **同一份**。
 
 `open_task` 无 id 且当前不是入站回合（没有入站上下文，如中继内部 followup）→ 显式报错，让它带 `taskId` 捡起。
 
-入站 turn 结束时文件必须在 `running/`，当且仅当：本轮成功 `dispatch_expert`，**或** 本 agent 作为 taskLead 调了 `ask_user_question`（允许 `assignees=[]`）。只自己答完：不写文件。
+入站 turn 结束时文件留在 `running/`，当且仅当：本轮成功 `dispatch_expert`，**或** 本 agent 作为 taskLead 问了人（允许 `assignees=[]`），**或** 这一轮是会话 A → 专家会话 B 的跨会话接入且 B 还没做完。跨会话接入在 followup 前就建文件；B 自己做完（没派、没问人）后 deliver 回 A，再移 `done/` 并解绑。同一会话自己做完：不写文件。
 
 ## 中继驱动
 
@@ -311,7 +313,7 @@ B 可 `open_task(task_x)` 捡起（复用**同一份 md**，接着做 / `update_
 - `target_workspace` 必填，绝对路径（`~` 先展开），目录必须已存在。
 - 缺省 / 相对 / 不存在 → 工具报错，**不**回落到专家 `workspace`。
 - 注入 `{{target_workspace}}`；包装加一句：产出写到该目录，不要写到自己的 cwd。
-- 直连（`/agent_<slug>`、`agent_ask`）：调用方会话 cwd 就是目标项目，注入 `target_workspace`。专家会话仍开在自己的 workspace（侧边栏 `agent_<name>`），按目标目录分槽（后缀 `__ag_`，不续接 cwd 曾是目标目录的旧 `__tw_` 槽）。缺 cwd / 目录不存在则报错，不回落把 cwd 改成目标项目。自己做完（没派活）后，本轮产出经 local `deliver` followup 抛回调用方会话。见 [14](./14-slash-agent.md)、[15](./15-agent-tool.md)。
+- 直连（`/agent_<slug>`、`agent_ask`）：调用方会话 cwd 就是目标项目，注入 `target_workspace`。专家会话仍开在自己的 workspace（侧边栏 `agent_<name>`），按目标目录分槽（后缀 `__ag_`，不续接 cwd 曾是目标目录的旧 `__tw_` 槽）。缺 cwd / 目录不存在则报错，不回落把 cwd 改成目标项目。这是会话 A → 专家会话 B：followup 前建 job 并绑定 B。自己做完（没派活、没问人）后，本轮产出经 local `deliver` followup 抛回调用方会话，再移 `done/`。见 [14](./14-slash-agent.md)、[15](./15-agent-tool.md)。
 - 直 @（IM，没走上面的直连）：context 没带绝对路径则 `ask_user_question` 问原发送者（该专家此时是 taskLead）。`dispatch_expert` 仍不改专家 cwd。
 
 ### 执行时机（专家侧）

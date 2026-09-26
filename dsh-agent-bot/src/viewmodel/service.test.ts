@@ -9,6 +9,7 @@ import { getAgent } from '../model/agents.js'
 import { resetConfigCache, saveConfig } from '../model/config.js'
 import type { AgentLike, AgentsService, HostServices } from '../model/runtime.js'
 import { createAgentBotService, emptyHostServices } from './service.js'
+import { resetBindingsCache } from '../model/teamwork/binding.js'
 import { inboundFor, resetInboundCache } from '../model/teamwork/inbound.js'
 
 function fakeHost(
@@ -143,11 +144,13 @@ beforeEach(() => {
   process.env.AGENT_BOT_CONFIG_DIR = configDir
   resetConfigCache()
   resetInboundCache()
+  resetBindingsCache()
 })
 
 afterEach(() => {
   resetConfigCache()
   resetInboundCache()
+  resetBindingsCache()
   if (prevEnv === undefined) delete process.env.AGENT_BOT_CONFIG_DIR
   else process.env.AGENT_BOT_CONFIG_DIR = prevEnv
   rmSync(configDir, { recursive: true, force: true })
@@ -1001,8 +1004,27 @@ describe('直连 needs_target_workspace：会话开在专家工作区，做完�
     expect(attached).toEqual([designerWs])
     const slotKey = Object.keys(getAgent('designer')?.sessions ?? {}).find((k) => k.includes('session-a'))
     expect(slotKey).toMatch(/__ag_[0-9a-f]{12}$/)
+    const expertSessionId = getAgent('designer')?.sessions[slotKey ?? '']?.sessionId ?? ''
     await new Promise((res) => setTimeout(res, 30))
     expect(pushed.join('')).toContain('首页稿在 workspace_a')
     expect(pushed.join('')).toContain('不要再次调用 agent_ask')
+    const { listTasksIn } = await import('../model/teamwork/task-board.js')
+    const { boundTaskId } = await import('../model/teamwork/binding.js')
+    expect(listTasksIn('running')).toHaveLength(0)
+    const done = listTasksIn('done')
+    expect(done).toHaveLength(1)
+    expect(done[0]?.sessionParts.session).toBe('session-a')
+    expect(done[0]?.leadSessionId).toBe(expertSessionId)
+    expect(boundTaskId(expertSessionId)).toBeUndefined()
+  })
+
+  it('同一会话自己做完不建 job', async () => {
+    seedRunnableAgent(false, 180000)
+    const svc = createAgentBotService(fakeHost([], idleNow))
+    svc.registerProvider({ id: 'demo', label: '示例通道' })
+    await svc.ask(askReq('t-same', 'alice'))
+    const { listTasksIn } = await import('../model/teamwork/task-board.js')
+    expect(listTasksIn('running')).toHaveLength(0)
+    expect(listTasksIn('done')).toHaveLength(0)
   })
 })

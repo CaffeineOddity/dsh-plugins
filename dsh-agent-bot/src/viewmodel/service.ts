@@ -21,8 +21,9 @@ import { createAgentRuntime, type HostServices } from '../model/runtime.js'
 import type { AgentConfig } from '../model/config.js'
 import { registerBoardTools } from '../model/teamwork/board-tools.js'
 import { createPatrol } from '../model/teamwork/patrol.js'
-import { describeTasks, listTasksIn, filterByConversation, readTask as readTaskModel, writeTask as writeTaskModel, type GroupMember } from '../model/teamwork/task-board.js'
-import { bindSession, boundTaskId } from '../model/teamwork/binding.js'
+import { describeTasks, listTasksIn, filterByConversation, moveTask, readTask as readTaskModel, writeTask as writeTaskModel, type GroupMember } from '../model/teamwork/task-board.js'
+import { boundTaskId, unbindSession } from '../model/teamwork/binding.js'
+import { ensureHandoffJob, isCrossSessionHandoff, isHandoffTask } from '../model/teamwork/handoff-task.js'
 import { taskSlotKey } from '../model/teamwork/relay.js'
 import { rememberInbound } from '../model/teamwork/inbound.js'
 import { conversationKeyOf } from '../types.js'
@@ -179,17 +180,38 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
       const bound = boundTaskId(sessionId)
       const task = bound === undefined ? undefined : readTaskModel('running', bound)
       if (task !== undefined && task.assignees.length > 0) return // 派了活：交给收口
+      if (task !== undefined && task.pendingHuman !== undefined) return // 问了人：留给巡检
       const text = summarizeOwnedInterval(agent.session.snapshotEvents(), firstSeq)
-      if (text === '') return
-      const deliver = providerDeliver(req.meta.providerId)
-      if (deliver === undefined) return
-      await deliver({
-        sessionParts: { provider_id: req.meta.providerId, ...req.meta.sessionParts },
-        messages: toMarkdownMessages(text).map((m) => ({ ...m, atUserIds: req.meta.sender === '' ? [] : [req.meta.sender] })),
-      })
+      if (text !== '') {
+        const deliver = providerDeliver(req.meta.providerId)
+        if (deliver === undefined) return
+        await deliver({
+          sessionParts: { provider_id: req.meta.providerId, ...req.meta.sessionParts },
+          messages: toMarkdownMessages(text).map((m) => ({ ...m, atUserIds: req.meta.sender === '' ? [] : [req.meta.sender] })),
+        })
+      }
+      finishSelfDoneHandoff(sessionId)
     } catch (err) {
       appendLog('deliver', `异步推回失败: ${err instanceof Error ? err.message : String(err)}`)
     }
+  }
+
+  /** 跨会话任务自己做完（没派、没问人）→ 移 done/ 并解绑。派了或问了人则不动。 */
+  function finishSelfDoneHandoff(sessionId: string): void {
+    const taskId = boundTaskId(sessionId)
+    if (taskId === undefined) return
+    const task = readTaskModel('running', taskId)
+    if (task === undefined || !isHandoffTask(task, sessionId)) return
+    if (task.assignees.length > 0 || task.pendingHuman !== undefined) return
+    if (boundTaskId(sessionId) === task.taskId) unbindSession(sessionId)
+    if (readTaskModel('running', task.taskId) !== undefined) moveTask('running', 'done', task.taskId)
+  }
+
+  /** 调用方是另一条 DSH 会话（GUI `session-` 或仍活着的 agent），不是配置站 chat key。 */
+  function callerIsAgentSession(caller: string): boolean {
+    if (caller === '' || caller === 'local') return false
+    if (caller.startsWith('session-')) return true
+    return host.agents()?.get(caller) !== undefined
   }
 
   /** 这一轮结束后清掉"已回填"的待决：askedAt 未变才清（换了新问题就保留）。 */
@@ -418,6 +440,21 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         const promptText = promptTextFor(live.id, live.prompt, live.skill_groups, live.prompt_append_skills)
         const values = variableValues(req, sessionKey)
         if (placement.targetWorkspace !== '') values.target_workspace = placement.targetWorkspace
+        // 会话 A 把活交给专家会话 B：followup 前建 job 并绑定 B。同一会话自己做完不建。
+        const caller = (req.meta.sessionParts.session ?? '').trim()
+        if (isCrossSessionHandoff(caller, decision.sessionId, callerIsAgentSession(caller))) {
+          ensureHandoffJob({
+            expertId: live.id,
+            expertName: live.name,
+            expertSessionId: decision.sessionId,
+            sender: req.meta.sender,
+            providerId: req.meta.providerId,
+            sessionParts: req.meta.sessionParts,
+            originContext: req.context,
+            target: placement.targetWorkspace,
+            groupSnapshot: groupSnapshotFor(req.meta.providerId, req.meta.sessionParts, live.id),
+          })
+        }
         // 入站包装（specs/12 §入站怎么绑任务）：附本群 running 短摘要，让 LLM 认捡起/新建。
         const boardCtx = boardContextFor(live, req.meta.providerId, req.meta.sessionParts)
         // 人的回填：入站前记下"这一轮归属的任务"与待决时间；结束后若待决没被换掉就清掉。
@@ -484,6 +521,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         )
         // 人 @ 了 lead 并说完这一轮 → 旧问卷视为已回填（同一 askedAt 才清；换了新问题就保留）
         clearAnsweredPending(boundBefore, pendingBefore)
+        finishSelfDoneHandoff(decision.sessionId)
         // 交互兜底：只要还有人跟这单互动，漏掉的事件就能在这一刻补上（不再有周期巡检）
         service_notifyIdle(decision.sessionId)
         return result
