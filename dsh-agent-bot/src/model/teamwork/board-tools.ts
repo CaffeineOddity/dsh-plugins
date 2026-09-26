@@ -102,15 +102,23 @@ export function buildExpertCards(members: Array<{ agentId: string; name: string;
 }
 
 /** 解析运行中的 session 归属哪个 agent（channel 槽 or 协作槽），供 running_experts。 */
-function runningExpertIds(snapshotMembers: Array<{ agentId: string; name: string; description: string }>): string[] {
+export function runningExpertIds(
+  snapshotMembers: Array<{ agentId: string; name: string; description: string }>,
+  agents: (() => { get(sessionId: string): unknown } | undefined),
+): string[] {
   const configs = new Map(listAgentConfigs().map((a) => [a.id, a]))
   const running = new Set<string>()
   for (const m of snapshotMembers) {
     const cfg = configs.get(m.agentId)
     if (cfg === undefined) continue
     for (const slot of Object.values(cfg.sessions)) {
-      // 通道槽 / 协作槽都算：会话活着（agents.get）即未 idle
-      if (slot.sessionId !== '' ) running.add(m.agentId)
+      if (slot.sessionId === '') continue
+      const live = agents()?.get(slot.sessionId) as { status?: 'idle' | 'running' } | undefined
+      // 只有槽、没有 live 会话不算「运行中」（历史槽会永远残留在 agents.json 里）
+      if (live !== undefined && live.status === 'running') {
+        running.add(m.agentId)
+        break
+      }
     }
   }
   return [...running]
@@ -288,7 +296,7 @@ export function registerBoardTools(ctx: {
           // 两种来源都不含调用方自己（派活给自己无意义）
           members = members.filter((m) => m.agentId !== who.agentId)
           const cards = buildExpertCards(members)
-          const runningIds = runningExpertIds(members)
+          const runningIds = runningExpertIds(members, deps.agents)
           const lines: string[] = []
           for (const c of cards) {
             const parts = [`- ${c.name} (${c.agentId})`]

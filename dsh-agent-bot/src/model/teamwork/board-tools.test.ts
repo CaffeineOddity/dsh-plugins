@@ -7,8 +7,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { resetConfigCache } from '../config.js'
-import { createAgent as createAgentConfig, saveAgent, type AgentWrite } from '../agents.js'
-import { buildExpertCards, hubMembers, resolveTargetWorkspace, type ExpertCard } from './board-tools.js'
+import { createAgent as createAgentConfig, saveAgent, touchSession, type AgentWrite } from '../agents.js'
+import { buildExpertCards, hubMembers, resolveTargetWorkspace, runningExpertIds, type ExpertCard } from './board-tools.js'
 import { resetWriteFence, taskSlotKey } from './relay.js'
 import { registerBoardTools } from './board-tools.js'
 import { writeTask, type TaskBoard } from './task-board.js'
@@ -146,6 +146,22 @@ describe('hubMembers（路线 b：中枢全集来源）', () => {
     // 与群快照无关：全集里也有 Bob（即使没人把它放进群）
     const cards = buildExpertCards(hub)
     expect(cards.find((c) => c.agentId === bobId)?.skills?.[0].name).toBe('design.md')
+  })
+})
+
+describe('runningExpertIds（运行中标记按 live 会话判，不按历史槽）', () => {
+  it('只有历史槽、没有 live 会话 → 不算运行中', () => {
+    touchSession(bobId, 'demo_b1_g1', 'sess-bob', 1, '')
+    const agents = () => ({ get: () => undefined })
+    expect(runningExpertIds([{ agentId: bobId, name: 'Bob', description: '' }], agents)).toEqual([])
+  })
+  it('会话 live 且 running → 算运行中；idle 不算', () => {
+    touchSession(bobId, 'demo_b1_g1', 'sess-bob', 1, '')
+    const members = [{ agentId: bobId, name: 'Bob', description: '' }]
+    const running = () => ({ get: (id: string) => (id === 'sess-bob' ? { status: 'running' } : undefined) })
+    const idle = () => ({ get: (id: string) => (id === 'sess-bob' ? { status: 'idle' } : undefined) })
+    expect(runningExpertIds(members, running)).toEqual([bobId])
+    expect(runningExpertIds(members, idle)).toEqual([])
   })
 })
 

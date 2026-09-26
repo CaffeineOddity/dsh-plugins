@@ -500,8 +500,10 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     if (cfg === undefined) return false
     const sessionId = wakeSessionIdFor(task, agentId)
     if (sessionId === undefined) return false // 定位不到会话：跳过，等下一轮/下次 @
-    if (host.agents()?.get(sessionId) === undefined) return false // 不在线：等活性探针拉起
-    await followup(cfg, sessionId, text)
+    // 会话不在线也能叫醒：followup 内部 ensureAgent 会重建。lead 不在 assignees 里，
+    // 没有活性探针兜底，这里若因「不在线」就 return，重启恢复 / lead 被回收后通知就永远丢了。
+    const ok = await followup(cfg, sessionId, text)
+    if (!ok) return false
     notified.set(key, fingerprint)
     return true
   }
@@ -665,10 +667,6 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     const cfg = getAgentConfig(task.taskLead)
     const sessionId = wakeSessionIdFor(task, task.taskLead)
     if (cfg === undefined || sessionId === undefined) return
-    const live = host.agents()?.get(sessionId) as
-      | (AgentLike & { session: { seq: number; snapshotEvents(): Array<{ seq: number; type: string; data?: unknown }> } })
-      | undefined
-    if (live === undefined) return
     const key = task.taskId
     try {
       let st = collecting.get(key)
@@ -677,6 +675,10 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
         await retryDeliver(task, st.text)
         return
       }
+      // lead 会话不在线（进程重启 / 被回收）→ 先重建，否则「叫醒 lead 综合」直接断掉
+      let live = host.agents()?.get(sessionId) as AgentLike | undefined
+      if (live === undefined) live = await ensureLive(cfg, sessionId)
+      if (live === undefined) return
       if (st === undefined) {
         // 第一次：叫醒 lead，并记下这一轮的起点（后续重试仍用这个起点取产出）
         st = { firstSeq: live.session.seq }
@@ -890,6 +892,9 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   async function probeTask(task: TaskBoard): Promise<void> {
     // 同一轮里前面可能已把这份任务收口移走（done/ 或人手工挪走）→ 别再用旧快照写回去复活它
     if (readTask('running', task.taskId) === undefined) return
+    // 本轮探针是否把某路转成了终态（idle/failed）：是则要补一趟 patrolTask 立即上报。
+    // 事件驱动下没有下一轮循环来兜底，不补就得到墙钟（默认 2h）或下次互动才通知 lead。
+    let terminalChanged = false
     for (const a of task.assignees) {
       if (isTerminal(a)) continue
       const cfg = getAgentConfig(a.expertId)
@@ -940,6 +945,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
           })
           probeRenew.delete(key)
           await releaseAndAdvance(task, a, cfg)
+          terminalChanged = true
           continue
         }
         await restartExpert(task, cfg, a)
@@ -955,38 +961,18 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
           if (x !== undefined && x.status === 'running') x.status = 'idle'
         })
         await releaseAndAdvance(task, a, cfg) // 这一轮 write 结束 → 让出目标锁，叫醒排队的下一个
+        terminalChanged = true
         continue
       }
       // 还在跑：不阻塞、不计数
       st.renew = 0
     }
+    // 判 idle / failed 都是终态迁移：立刻把上报/综合/交付跑一遍，别等下一个触发点。
+    if (terminalChanged) await patrolTask(task)
   }
 
-  async function restartExpert(task: TaskBoard, cfg: AgentConfig, a: Assignee): Promise<void> {
-    try {
-      await host.ensureAgent({
-        sessionId: a.sessionId,
-        cwd: cfg.workspace,
-        agentId: cfg.id,
-        agentName: cfg.name,
-        promptText: '',
-        variables: {},
-        permissionMode: cfg.permission_mode,
-      })
-      const live = host.agents()?.get(a.sessionId) as AgentLike | undefined
-      if (live === undefined) return
-      live.followup({
-        id: `agent-bot-livenew-${Date.now()}`,
-        role: 'user',
-        content: [{ type: 'text', text: marshalText(task) }],
-        source: { kind: 'user' },
-      })
-    } catch (err) {
-      console.warn(`agent-bot: 重启专家 ${a.expertId} 失败: ${(err as Error).message}`)
-    }
-  }
-
-  async function followup(agent: AgentConfig, sessionId: string, text: string): Promise<void> {
+  /** 拉起（或复用）某 agent 的会话，返回 live；重建失败返回 undefined。 */
+  async function ensureLive(agent: AgentConfig, sessionId: string): Promise<AgentLike | undefined> {
     try {
       await host.ensureAgent({
         sessionId,
@@ -997,17 +983,28 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
         variables: {},
         permissionMode: agent.permission_mode,
       })
-      const live = host.agents()?.get(sessionId) as AgentLike | undefined
-      if (live === undefined) return
-      live.followup({
-        id: `agent-bot-patrol-${Date.now()}`,
-        role: 'user',
-        content: [{ type: 'text', text }],
-        source: { kind: 'user' },
-      })
     } catch (err) {
-      console.warn(`agent-bot: 巡检叫醒 ${agent.id} 失败: ${(err as Error).message}`)
+      console.warn(`agent-bot: 拉起会话 ${sessionId}（agent ${agent.id}）失败: ${(err as Error).message}`)
+      return undefined
     }
+    return host.agents()?.get(sessionId) as AgentLike | undefined
+  }
+
+  /** 叫醒某 agent：确保 live 后 followup。返回是否真的投进去了。 */
+  async function followup(agent: AgentConfig, sessionId: string, text: string): Promise<boolean> {
+    const live = await ensureLive(agent, sessionId)
+    if (live === undefined) return false
+    live.followup({
+      id: `agent-bot-patrol-${Date.now()}`,
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    })
+    return true
+  }
+
+  async function restartExpert(task: TaskBoard, cfg: AgentConfig, a: Assignee): Promise<void> {
+    await followup(cfg, a.sessionId, marshalText(task))
   }
 
 
@@ -1027,11 +1024,19 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   async function handleDisposed(sessionId: string): Promise<void> {
     if (sessionId === '' || stopped) return
     for (const task of listTasksIn('running')) {
-      const a = task.assignees.find((x) => x.sessionId === sessionId && x.status === 'running')
+      const a = task.assignees.find((x) => x.sessionId === sessionId && (x.status === 'running' || x.status === 'need_decision'))
       if (a === undefined) continue
       const cfg = getAgentConfig(a.expertId)
       if (cfg === undefined) continue
       const key = `${task.taskId}\0${a.expertId}`
+      // need_decision（卡在等审批）的会话被回收 = 审批窗口消失、重启也接不回那个审批：直接判 failed 走状态机
+      if (a.status === 'need_decision') {
+        a.status = 'failed'
+        probeRenew.delete(key)
+        if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
+        await patrolTask(task)
+        continue
+      }
       const st = probeRenew.get(key) ?? { renew: 0, sessionId, missingSince: 0 }
       st.renew++
       if (st.renew >= maxRenew()) {

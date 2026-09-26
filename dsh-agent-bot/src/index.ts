@@ -157,10 +157,18 @@ export function apply(ctx: Context, config: AgentBotConfig = {}): void {
   })
 
   // 审批审计事件写在会话日志里：靠 session/event 实时观测，检测「卡在等审批」。
-  // 事件很频（每次 append 都发），所以只认这两个 type，其余立即返回。
+  // 事件很频（每次 append 都发），所以只认这几个 type，其余立即返回。
   const disposeSessionEvent = ctx.on('session/event', (session, event) => {
-    if (event.type !== 'approval/asked' && event.type !== 'approval/decided') return
-    service.notifySessionEvent(String(session.id))
+    if (event.type === 'approval/asked' || event.type === 'approval/decided') {
+      service.notifySessionEvent(String(session.id))
+      return
+    }
+    // 回合里调了 DSH 自带 ask_user_question → 立刻复核，让巡检的「检测挂起 tool/call →
+    // 取消回合改问人」即时启动；否则要等到墙钟（默认 2h）或下次互动才触发，IM 回合卡死。
+    if (event.type === 'tool/call') {
+      const data = event.data as { name?: unknown } | undefined
+      if (data?.name === 'ask_user_question') service.notifySessionEvent(String(session.id))
+    }
   })
 
   const disposeRpc = registerRpcRoute(ctx, {
