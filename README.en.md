@@ -84,6 +84,7 @@ See each plugin's `README.md` for specific usage.
 ## Conventions
 
 - Each plugin is a standalone directory with its own `package.json` / `tsconfig.json` / `cordis.patch.yml`.
+- Page controls share the repo-root [`ui/`](./ui/styles.css) styles. Density: [docs/specs/shared-ui.md](./docs/specs/shared-ui.md).
 - Design specs live in `specs/`, following SDD (the spec is the single source of truth for requirements).
 - The main README covers only feature summary + install/usage; development details link to spec/docs via relative paths.
 - Bilingual: Chinese `README.md` is primary, English `README.en.md` mirrors it, cross-linked at the top.

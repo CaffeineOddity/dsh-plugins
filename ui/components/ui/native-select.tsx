@@ -5,7 +5,7 @@ const NativeSelect = React.forwardRef<HTMLSelectElement, React.ComponentProps<'s
   <select
     ref={ref}
     className={cn(
-      'flex h-11 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
+      'control control-field disabled:cursor-not-allowed disabled:opacity-50',
       className,
     )}
     {...props}

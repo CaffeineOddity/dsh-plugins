@@ -84,6 +84,7 @@ flowchart LR
 ## 约定
 
 - 每个插件独立目录，自含 `package.json` / `tsconfig.json` / `cordis.patch.yml`。
+- 页面控件共用仓库根 [`ui/`](./ui/styles.css)。密度见 [docs/specs/shared-ui.md](./docs/specs/shared-ui.md)。
 - 设计 spec 放 `specs/`，遵循 SDD（spec 是需求单一事实来源）。
 - 主 README 只写功能简介 + 安装使用；开发细节用相对链接指向 spec/docs。
 - 双语：中文 `README.md` 为主，英文 `README.en.md` 同步，顶部互链。

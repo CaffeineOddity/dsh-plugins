@@ -41,7 +41,7 @@ flowchart LR
 
 ## 界面
 
-- 宽于 640px：固定侧边栏 + 主窗口。640px 及以下：主窗口优先，用 Radix Dialog 打开同一组导航。导航点击区至少 44px。
+- 宽于 640px：固定侧边栏 + 主窗口。640px 及以下：主窗口优先，用 Radix Dialog 打开同一组导航。控件密度见 [shared-ui.md](./shared-ui.md)。
 - 默认两页：概览（读 `/<插件名>/api/health`）、设置（Radix Switch + Input，保存在本机 `localStorage`）。
 - 文案用动词，错误写明原因和下一步。跟随系统明暗色，色值只用 `ui/` 的语义 token。
 

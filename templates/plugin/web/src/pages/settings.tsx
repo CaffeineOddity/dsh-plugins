@@ -42,7 +42,7 @@ export function SettingsPage() {
           <Field label="显示名称" htmlFor="display-name" hint="留空保存时会回到插件标题。">
             <Input id="display-name" value={prefs.displayName} onChange={(event) => setPrefs((prev) => ({ ...prev, displayName: event.target.value }))} />
           </Field>
-          <label className="flex min-h-11 items-center gap-3 text-base">
+          <label className="flex min-h-8 items-center gap-2 text-sm">
             <Switch checked={prefs.compact} onCheckedChange={(checked) => setPrefs((prev) => ({ ...prev, compact: checked === true }))} />
             紧凑间距
           </label>

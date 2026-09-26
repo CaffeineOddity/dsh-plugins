@@ -21,7 +21,7 @@ export function pageKey(): string {
 function Brand() {
   return (
     <div className="mb-3 flex items-center gap-2 px-2">
-      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-primary text-base font-semibold text-primary-foreground">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-sm font-semibold text-primary-foreground">
         {PLUGIN_TITLE.slice(0, 1)}
       </span>
       <div className="min-w-0">
@@ -45,7 +45,7 @@ function NavLinks({ current, onNavigate }: { current: string; onNavigate?: () =>
             aria-current={active ? 'page' : undefined}
             onClick={onNavigate}
             className={cn(
-              'flex h-11 items-center gap-2 rounded-md px-3 text-base',
+              'flex h-8 items-center gap-2 rounded-md px-2.5 text-sm',
               active
                 ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'
                 : 'text-sidebar-foreground hover:bg-sidebar-accent',
@@ -78,7 +78,7 @@ export function Shell({ children }: { children: ReactNode }) {
                 打开导航
               </Button>
             </DialogTrigger>
-            <DialogContent className="left-0 top-0 flex h-full max-h-none w-72 max-w-none translate-x-0 translate-y-0 flex-col gap-4 rounded-none p-3 [&>button]:flex [&>button]:h-11 [&>button]:w-11 [&>button]:items-center [&>button]:justify-center">
+            <DialogContent className="left-0 top-0 flex h-full max-h-none w-72 max-w-none translate-x-0 translate-y-0 flex-col gap-3 rounded-none p-3 [&>button]:flex [&>button]:h-8 [&>button]:w-8 [&>button]:items-center [&>button]:justify-center">
               <DialogHeader>
                 <DialogTitle>{PLUGIN_TITLE}</DialogTitle>
                 <DialogDescription>选择要打开的页面。</DialogDescription>
