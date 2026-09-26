@@ -557,6 +557,8 @@ DSH 自带的 `ask_user_question` 会**阻塞**发起它的那一轮，等网页
 
 「还在执行」= `agents.get(id) != undefined`。不用 seq 推进判断。
 
+探针这轮一旦把某路转成终态（`idle` / `failed`）——含「漏掉 `agent/status` / `agent/disposed` 事件后靠探针兜底判出来的」——**立即走一趟状态机**（上报给 `dispatchedBy` / 综合 / 交付）。事件驱动下没有下一轮循环来兜底，不在这里补一手，通知会被推迟到墙钟（默认 2h）或下次有人互动。
+
 ## 超时分层
 
 | 层 | 取值 | 作用 |
@@ -635,19 +637,9 @@ sequenceDiagram
 
 直 @ 且该专家自己就是 taskLead：没有中间层，直接问人（本轮 messages）。
 
-### 拦截 `ask_user_question`
+### `ask_user_question` 的接管
 
-DSH waterfall `user-questions/request`（agent-scoped）。Web GUI 是现成 answerer。agent-bot 在�� agent fiber 上挂自己的 answerer，**排在 Web 前面**：
-
-1. 本 agent 不是该任务 taskLead → 当作 `ask_task_lead`：记入 md，拒绝提问，叫醒 taskLead。禁止假答案。
-2. 本 agent 是 taskLead → 拒绝提问，问卷按「谁发起这一轮」发出（入站 messages / 内部 deliver）。
-3. 未绑任务的直 @ → 与现网单 agent 问人相同：本轮 messages，停车在通道槽；有待决再 @ 该专家则 followup 自己认，idle 后消费。若本轮同时 `open_task` 了，待决改挂到文件上。
-
-权限审批不拦截。非 `danger-full-access` 仍可能卡网页（与 [03](03-ask-and-session.md) 一致）。
-
-禁止：answerer 自己等下一条 IM。禁止：从正文猜「请问…」当待决。
-
-问卷文案：单条 markdown，题干 + 选项（有选项才编号，只印给人 / 模型看）。@ sender；通道不吃 AT 则正文 `@name`。附 md 里的摘要。**写明：请 @任务 lead 或本题相关专家回复；其它 bot 可能认不成同一单。**
+见上文「内置 `ask_user_question` 的接管」：不挂 answerer 拦 waterfall，而是检测挂起的 `tool/call` + 取消回合 + 非阻塞问人。IM 里只接管**被派专家**（assignee）的提问；local/Web 不接管；lead 自己问人应走 `ask_human` 工具。
 
 ## 验收标准
 
