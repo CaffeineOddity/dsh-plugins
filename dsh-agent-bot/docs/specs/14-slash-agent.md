@@ -14,7 +14,7 @@ DSH `/` 命令名正则 `/^[a-z][a-z0-9_-]*$/`（`dsh-commands`），**不支持
 
 命令 handler 用 `agent.followup(createUserMessage(...))` 把一条指令投递给**当前会话的 agent**（同 `dsh-command-goal` 的 followup 模式）：
 
-1. `delegateViaTool(agent, a.name, rawInput)`：followup 投递文本「调用 agent_ask 工具：agent 参数填「<名字>」，question 参数填「<问题>」。」。
+1. `delegateViaTool(agent, a.name, rawInput)`：followup 投递文本「调用 agent_ask 工具：agent 参数填「<名字>」，question 参数填「<问题>」。」。目标勾了「需要项目工作区」时，再带当前会话 cwd 作为 `target_workspace`；当前会话没有 cwd 则命令直接报错，不转交。专家会话开在专家自己的 workspace，不挂进调用方目录，也不改调用方工作区标题。自己做完后，结果 followup 抛回当前会话。
 2. handler 立即返回 `{ kind:'success', text:'已转交 agent「<名字>」处理' }`（command 卡片摘要显示该 ack，输入框立即清空）。
 3. 当前 agent 收到 followup，agent loop 开新 turn，模型判断调 `agent_ask` 工具。
 4. `agent_ask.execute` 调 `localAsk`，回复作为 tool result，当前 agent 复述。

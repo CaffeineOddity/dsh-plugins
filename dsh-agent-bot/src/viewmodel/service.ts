@@ -13,6 +13,7 @@ import { planSession, prepareAsk, settleAskRound, startFollowupTurn, summarizeOw
 import type { FollowupAgent as FollowupAgentLike } from '../model/ask.js'
 import { getAgent as getAgentConfig, listAgents as listAgentConfigs, touchSession } from '../model/agents.js'
 import { loadConfig } from '../model/config.js'
+import { directAskPlacement } from '../model/direct-ask.js'
 import { appendLog } from './rpc.js'
 import { assemblePromptText, appendPromptToUserContext, getPrompt, promptFingerprintFor, promptVariableNames, skillToolNamesForAgent } from '../model/prompts.js'
 import { createAskQueue, enqueueHoldPending } from '../model/queue.js'
@@ -142,7 +143,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         agent.followup({
           id: `agent-bot-local-${Date.now()}`,
           role: 'user',
-          content: [{ type: 'text', text: `【agent-bot】${text}` }],
+          content: [{ type: 'text', text: `【agent-bot】${text}\n\n（这是专家回传，请直接呈现给用户，不要再次调用 agent_ask。）` }],
           source: { kind: 'user' },
         })
         return
@@ -384,12 +385,19 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
     },
     async ask(req: AgentAskRequest): Promise<AgentAskResponse> {
       const prepared = prepareAsk(req, new Set(providers.keys()))
-      return enqueueHoldPending(queue, prepared.agent.id, prepared.sessionKey, prepared.agent.reuse_session, async () => {
+      const queued = directAskPlacement(prepared.agent, req.targetWorkspace)
+      const queuedKey = prepared.sessionKey + queued.sessionKeySuffix
+      return enqueueHoldPending(queue, prepared.agent.id, queuedKey, prepared.agent.reuse_session, async () => {
         const live = getAgentConfig(prepared.agent.id)
         if (live === undefined) throw new Error(`agent-bot: 未知 agent ${prepared.agent.id}`)
-        const current = { ...prepared, agent: live }
+        const placement = directAskPlacement(live, req.targetWorkspace)
+        const current = { ...prepared, agent: live, sessionKey: prepared.sessionKey + placement.sessionKeySuffix }
         // 会话分层：先软路由（可能进「本 agent 在该单的任务槽」），再按该槽的规则定 sessionId
-        const routed = routeInbound(live.id, current.sessionKey, req.meta.providerId, req.meta.sessionParts, req.meta.sender)
+        // 直连带目标目录时不进旧任务槽：那些槽可能指着 cwd=目标项目的旧会话。
+        // 本轮会话开在专家 workspace，按目标分槽；产出靠 target_workspace，不靠 cwd。
+        const routed = placement.targetWorkspace !== ''
+          ? { sessionKey: current.sessionKey }
+          : routeInbound(live.id, current.sessionKey, req.meta.providerId, req.meta.sessionParts, req.meta.sender)
         let sessionKey = routed.sessionKey
         let decision: { sessionId: string }
         if (routed.taskId !== undefined) {
@@ -409,6 +417,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         // 否则路由判偏后 LLM 想改认另一单会被「本会话已绑定 X，不能同时绑 Y」挡住。
         const promptText = promptTextFor(live.id, live.prompt, live.skill_groups, live.prompt_append_skills)
         const values = variableValues(req, sessionKey)
+        if (placement.targetWorkspace !== '') values.target_workspace = placement.targetWorkspace
         // 入站包装（specs/12 §入站怎么绑任务）：附本群 running 短摘要，让 LLM 认捡起/新建。
         const boardCtx = boardContextFor(live, req.meta.providerId, req.meta.sessionParts)
         // 人的回填：入站前记下"这一轮归属的任务"与待决时间；结束后若待决没被换掉就清掉。
@@ -429,7 +438,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         const promptTextForAgent = live.prompt_placement === 'user' ? '' : promptText
         const agent = await runtime.ensureAgent({
           sessionId: decision.sessionId,
-          cwd: live.workspace,
+          cwd: placement.cwd,
           agentId: live.id,
           agentName: live.name,
           promptText: promptTextForAgent,
@@ -441,13 +450,14 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
             ? appendPromptToUserContext(req.context, promptText, values)
             : req.context
         const contextWithBoard = boardCtx.text === '' ? followupContext : `${followupContext}\n\n${boardCtx.text}`
+        const contextForAgent = placement.notice === '' ? contextWithBoard : `${contextWithBoard}\n\n${placement.notice}`
         // 出站模式按**通道能力**分档（specs/12 §入站出站）：
         //   通道有 deliver → 异步：立刻回一条回执，这一轮的产出等回合结束经 deliver 推回去
         //                    （通道再也不会因为等 agent 而超时；本轮 W 不参与）
         //   通道没 deliver → 同步：等这一轮（最多 W），拿文本当回复（退化路径）
         const canPush = providers.get(req.meta.providerId)?.deliver !== undefined
         if (canPush) {
-          const firstSeq = await startFollowupTurn(agent, contextWithBoard)
+          const firstSeq = await startFollowupTurn(agent, contextForAgent)
           // 回合结束后的两件事（清人的回填待决 + 交互兜底）必须放进后台任务：
           // 异步分支在回合跑完**之前**就返回了，不能在返回路径上做。
           void pushRoundResult(agent, req, decision.sessionId, firstSeq, boundBefore, pendingBefore)
@@ -463,7 +473,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
             pending: null,
           }
         }
-        const result = await settleAskRound(agent, contextWithBoard, loadConfig().agent_wait_timeout_ms)
+        const result = await settleAskRound(agent, contextForAgent, loadConfig().agent_wait_timeout_ms)
         // 落的是**实际用的那条槽**（软路由可能把它放进了任务槽）
         touchSession(
           live.id,
@@ -479,7 +489,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         return result
       })
     },
-    async localAsk(rawInput: string, sessionKey = 'local'): Promise<{ messages: AgentOutboundMessage[]; error?: string }> {
+    async localAsk(rawInput: string, sessionKey = 'local', targetWorkspace?: string): Promise<{ messages: AgentOutboundMessage[]; error?: string }> {
       // rawInput 第一 token = agent 标识（id 精确 / name 精确 / name 大小写不敏感），剩余 = 问题
       const trimmed = rawInput.trim()
       const sp = trimmed.indexOf(' ')
@@ -497,6 +507,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         const result = await this.ask({
           agentId: match.id,
           context: '用户[local]: ' + question,
+          targetWorkspace,
           meta: {
             traceId: randomUUID(),
             providerId: 'local',

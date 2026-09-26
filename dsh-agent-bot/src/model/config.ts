@@ -119,7 +119,7 @@ export interface AgentConfig {
   session_timeout_minutes: number
   /** 磁盘并发：serial 该专家所有来源同一 FIFO；concurrent 不同 target 的 write 可并行。 */
   concurrency: Concurrency
-  /** true：被 dispatch_expert / 直 @ 时必须带已存在的绝对路径 target_workspace。 */
+  /** true：被 dispatch_expert / 直连 / 直 @ 时必须带已存在的绝对路径 target_workspace。会话 cwd 仍是 workspace。 */
   needs_target_workspace: boolean
   /** per-agent 覆盖单次 waitIdle；缺字段用全局；0 fallback 全局。 */
   agent_wait_timeout_ms?: number

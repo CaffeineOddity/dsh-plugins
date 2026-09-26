@@ -91,6 +91,11 @@ export interface AgentAskRequest {
   /** 用户可见文本。唯一格式 `用户[<fromuserid>]: <纯文本>`；不含 webhook / toid / prompt / 档案。 */
   context: string
   meta: AgentAskMeta
+  /**
+   * 直连入口（`/agent`、`agent_ask`）传入的调用方项目目录。
+   * 仅当目标 `needs_target_workspace` 时作为产出目录注入，不改专家 cwd。
+   */
+  targetWorkspace?: string
 }
 
 /**
@@ -198,7 +203,7 @@ export interface AgentBotService {
   registerProvider(reg: AgentChannelProviderRegistration): () => void
   ask(req: AgentAskRequest): Promise<AgentAskResponse>
   /** /agent 命令与 rpc 共用：解析 rawInput 调本地 ask，展平 pending，返回所有条。 */
-  localAsk(rawInput: string, sessionKey?: string): Promise<{ messages: AgentOutboundMessage[]; error?: string }>
+  localAsk(rawInput: string, sessionKey?: string, targetWorkspace?: string): Promise<{ messages: AgentOutboundMessage[]; error?: string }>
   /** 按 providerId 查已登记通道的收口能力。 */
   providerDeliver(providerId: string): ((req: AgentDeliverRequest) => Promise<void>) | undefined
   /**

@@ -92,7 +92,7 @@
 | `agents[].session_by_sender` | 默认 `false`（按群）。`true` 则 sessionKey 并入 sender（按人）。协作群建议打开，避免 Alice / Bob 共用任务 lead 的对话记忆导致捡单串台 |
 | `agents[].session_timeout_minutes` | 仅 `reuse_session: true` 时生效；默认 30；`0` 不因空闲拆会话 |
 | `agents[].concurrency` | 默认 `serial`。cwd 安全阀：`serial` 即使不同 target 的 `write` 也 FIFO；`concurrent` 不同 target 的 `write` 可并行。同 target 的 `write` 一律 FIFO；`read` 一律可并行。见 [12](./12-leader-experts-teamwork.md) |
-| `agents[].needs_target_workspace` | 默认 `false`。`true`：`dispatch_expert` / 直 @ 时必须带已存在的绝对路径 `target_workspace`；自己的 `workspace` 仍是技能仓，不改 cwd。见 [12](./12-leader-experts-teamwork.md) |
+| `agents[].needs_target_workspace` | 默认 `false`。`true`：`dispatch_expert` / 直连 / 直 @ 时必须带已存在的绝对路径 `target_workspace`；自己的 `workspace` 仍是技能仓，会话 cwd 不改。直连自己做完把结果抛回调用方会话。见 [12](./12-leader-experts-teamwork.md) |
 | `agents[].agent_wait_timeout_ms` | 可选。缺字段用全局。专家配 `0` 时巡检探针 fallback 全局。任务 lead 派发 turn 用全局窗口；任务墙钟看 `task_round_timeout_ms`，不用本字段表示永不超时 |
 | `expert_liveness_max_renew` | `config.json`。巡检器对专家活性探针续期/重启上限，默认 `3`，整数 ≥ 1 |
 | `task_round_timeout_ms` | `config.json`。任务墙钟，默认 `7200000`（2h），从 md `createdAt` 起算；问卷发出时改成发出时刻 + 该值。到点 `deliver`「处理超时」@owner。入站 ask 的 pending 管不到巡检 |

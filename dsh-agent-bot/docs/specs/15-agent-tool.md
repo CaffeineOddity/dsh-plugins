@@ -17,8 +17,8 @@ spec 14 的 `/agent` 斜杠命令有两个无法绕过的固有问题：
 
 agent-bot host 半体注册一个全局工具 `agent_ask`：
 
-- `parameters`：`{ agent: string, question: string }`。`agent` 是目标 agent 的名字或 id（中文名可用），`question` 是问题。
-- `execute(args, exec)`：调 `service.localAsk(`${agent} ${question}`)`，返回 `{ reply: string }`（回复文本；无内容/出错时 `reply` 为错误文案）。
+- `parameters`：`{ agent: string, question: string, target_workspace?: string }`。`agent` 是目标 agent 的名字或 id（中文名可用），`question` 是问题。`target_workspace` 可选；缺省用调用方会话 cwd。
+- `execute(args, exec)`：调 `service.localAsk(...)`，返回 `{ reply: string }`（回复文本；无内容/出错时 `reply` 为错误文案）。目标勾了「需要项目工作区」时，专家会话 cwd 仍是专家 workspace，`target_workspace` 只标记产出目录；目录缺失则 `reply` 为错误，不静默回落。local 有 deliver：工具先拿到「已接」回执，专家自己做完后运行时把本轮产出 followup 抛回调用方会话。
 - `output.schema`：`{ reply: string }`；`output.render` 把 `reply` 投影成 `[{ type:'text', text: reply }]`（模型可见 + tool/result 展示）。
 - `presentCall` / `presentResult`：可选，回退到 generic 卡片（标题 = 工具名，参数/结果原样展示）即可，先不自定义。
 

@@ -19,7 +19,8 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "build": "tsup",
+    "build:web": "vite build --config web/vite.config.ts && node web/copy-html.mjs",
+    "build": "pnpm build:web && tsup",
     "dev": "tsup --watch",
     "test": "vitest run"
   },
@@ -55,12 +56,16 @@
     "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.1.2-rc.1",
     "@deepseek-ai/schemastery": "^3.18.2",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^22.0.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "tailwindcss": "^4.3.3",
     "tsup": "^8.0.0",
     "typescript": "^5.5.0",
+    "vite": "^8.3.1",
+    "vite-plugin-singlefile": "^2.3.3",
     "vitest": "^2.0.0"
   },
-  "dependencies": {},
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
       "optional": true

@@ -912,3 +912,97 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
     expect(snap.map((m) => m.agentId)).toEqual(['a2'])
   })
 })
+
+describe('直连 needs_target_workspace：会话开在专家工作区，做完抛回调用方', () => {
+  it('cwd 是专家 workspace，产出目录只注入；自己做完 followup 回 session_a', async () => {
+    const designerWs = join(configDir, 'designer')
+    const project = join(configDir, 'workspace_a')
+    mkdirSync(designerWs, { recursive: true })
+    mkdirSync(project, { recursive: true })
+    saveConfig({
+      skill_roots: [],
+      skill_groups: {},
+      prompts: {},
+      agents: [
+        {
+          id: 'designer',
+          name: '设计师',
+          description: '',
+          workspace: designerWs,
+          prompt: '',
+          prompt_placement: 'system',
+          skill_groups: [],
+          prompt_append_skills: true,
+          reuse_session: true,
+          session_by_sender: false,
+          permission_mode: 'danger-full-access',
+          session_timeout_minutes: 30,
+          concurrency: 'serial',
+          needs_target_workspace: true,
+          sessions: {},
+        },
+      ],
+      skill_apply: {},
+      agent_wait_timeout_ms: 180000,
+      expert_liveness_max_renew: 3,
+      task_round_timeout_ms: 7200000,
+      use_hub_experts: true,
+    })
+    const events = [
+      { seq: 1, type: 'turn/start' },
+      { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '首页稿在 workspace_a' }] } } },
+    ]
+    const created: string[] = []
+    const attached: string[] = []
+    const pushed: string[] = []
+    const live = new Map<string, AgentLike>()
+    live.set('session-a', {
+      session: { seq: 0, snapshotEvents: () => [], append() { return } },
+      followup(input) { pushed.push(JSON.stringify(input)) },
+      whenIdle: idleNow,
+    })
+    const agents: AgentsService = {
+      get(id) { return live.get(id) },
+      async create(options) {
+        const meta = options.meta as { cwd?: string } | undefined
+        created.push(meta?.cwd ?? '')
+        const agent: AgentLike = {
+          session: { seq: 0, snapshotEvents: () => events, append() { return } },
+          followup() { return },
+          whenIdle: idleNow,
+        }
+        live.set(String(options.sessionId), agent)
+        return { agent, async dispose() { return } }
+      },
+      async resume() { throw new Error('test: unexpected resume') },
+    }
+    const host = {
+      ...emptyHostServices(),
+      agents: () => agents,
+      agentDefaultModel: () => ({ currentSelection: () => ({ provider: 'p', model: 'm' }) }),
+      agentPresets: () => ({ async mount() { return } }),
+      sessionPersistence: () => ({ async list() { return [] } }),
+      workspaceRegistry: () => ({
+        archivedSessionIds: [],
+        async create(path: string, title?: string) {
+          return {
+            title,
+            async attachSession() { attached.push(path) },
+            async setTitle() { return },
+          }
+        },
+      }),
+    } as HostServices
+    const svc = createAgentBotService(host)
+    const r = await svc.localAsk('设计师 设计首页', 'session-a', project)
+    expect(r.error).toBeUndefined()
+    expect(r.messages.map((m) => m.text).join('')).toContain('已接')
+    expect(created).toEqual([designerWs])
+    expect(attached).toEqual([designerWs])
+    const slotKey = Object.keys(getAgent('designer')?.sessions ?? {}).find((k) => k.includes('session-a'))
+    expect(slotKey).toMatch(/__ag_[0-9a-f]{12}$/)
+    await new Promise((res) => setTimeout(res, 30))
+    expect(pushed.join('')).toContain('首页稿在 workspace_a')
+    expect(pushed.join('')).toContain('不要再次调用 agent_ask')
+  })
+})

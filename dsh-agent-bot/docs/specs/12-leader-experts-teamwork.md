@@ -50,7 +50,7 @@ Alice 的任务与 Bob 的任务各一份 md（`sender` 不同），互不取消
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `concurrency` | `serial` | cwd 安全阀。`serial`：即使不同 target 的 `write` 也 FIFO；`concurrent`：不同 target 的 `write` 可并行。同 target 的 `write` 一律 FIFO；`read` 一律可并行 |
-| `needs_target_workspace` | `false` | `true`：被 `dispatch_expert` / 直 @ 时必须带目标项目目录（产出写到那里）。自己的 `workspace` 仍是技能仓，**不改 cwd** |
+| `needs_target_workspace` | `false` | `true`：被 `dispatch_expert` / 直连 / 直 @ 时必须带目标项目目录（产出写到那里）。自己的 `workspace` 仍是技能仓，**不改 cwd**。直连自己做完把结果抛回调用方会话 |
 | `agent_wait_timeout_ms` | 缺字段 = 用全局 | per-agent 覆盖单次 waitIdle；专家 `0` fallback 全局。任务墙钟看全局 `task_round_timeout_ms`，不用本字段表示永不超时 |
 
 不设 `is_lead` / `delegate_reuse_session`。`session_by_sender` **不强制**：通道会话仍按该 agent 自己的开关。任务隔离靠 md 的 `sender`，不靠专职 lead。协作群建议打开按人隔离，避免 Alice / Bob 共用任务 lead 的对话记忆导致捡单串台。
@@ -311,7 +311,8 @@ B 可 `open_task(task_x)` 捡起（复用**同一份 md**，接着做 / `update_
 - `target_workspace` 必填，绝对路径（`~` 先展开），目录必须已存在。
 - 缺省 / 相对 / 不存在 → 工具报错，**不**回落到专家 `workspace`。
 - 注入 `{{target_workspace}}`；包装加一句：产出写到该目录，不要写到自己的 cwd。
-- 直 @：context 没带绝对路径则 `ask_user_question` 问原发送者（该专家此时是 taskLead）。
+- 直连（`/agent_<slug>`、`agent_ask`）：调用方会话 cwd 就是目标项目，注入 `target_workspace`。专家会话仍开在自己的 workspace（侧边栏 `agent_<name>`），按目标目录分槽（后缀 `__ag_`，不续接 cwd 曾是目标目录的旧 `__tw_` 槽）。缺 cwd / 目录不存在则报错，不回落把 cwd 改成目标项目。自己做完（没派活）后，本轮产出经 local `deliver` followup 抛回调用方会话。见 [14](./14-slash-agent.md)、[15](./15-agent-tool.md)。
+- 直 @（IM，没走上面的直连）：context 没带绝对路径则 `ask_user_question` 问原发送者（该专家此时是 taskLead）。`dispatch_expert` 仍不改专家 cwd。
 
 ### 执行时机（专家侧）
 
@@ -654,7 +655,7 @@ sequenceDiagram
 - 同一目标 `write` 执行 FIFO；`read` 并行。占着仍可派。
 - 派发 turn `pending=null`，出站运行时模板「已接」，不采用助手长文本。缺 `deliver` 只打日志。
 - 协作槽 `task:{taskId}:{expertId}`，与通道槽隔离。回填用当时 sessionId。
-- `needs_target_workspace=true` 缺合法路径：工具报错；不改 cwd。
+- `needs_target_workspace=true` 缺合法路径：工具报错；不改 cwd。直连同样不改 cwd：会话挂在专家 workspace，产出目录是调用方项目；自己做完抛回调用方会话。
 - 被派专家问人先到 taskLead；人 @taskLead 或 @已派专家均可，LLM 认同一份 md。不抠码。
 - 进程重启：按 `running/` 文件恢复 live / 补叫醒 / 重试 deliver。
 

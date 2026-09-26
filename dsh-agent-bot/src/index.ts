@@ -74,6 +74,10 @@ function registerAgentAskTool(tools: ToolRuntime, service: AgentBotService): () 
         required: true,
         description: '要转交给该 agent 的问题或任务描述。',
       },
+      target_workspace: {
+        type: 'string',
+        description: '目标项目绝对路径。目标勾了「需要项目工作区」时使用；缺省为当前会话 cwd。',
+      },
     },
     output: {
       schema: {
@@ -91,7 +95,9 @@ function registerAgentAskTool(tools: ToolRuntime, service: AgentBotService): () 
       // 调用方那条 DSH 会话 = 这一单的「对话」：patrol 之后的异步消息（问卷/进度/提醒）
       // 会往这条会话推（specs/12 §会话分层），所以这里必须把 sessionId 传下去。
       const callerSessionId = exec.agent?.id === undefined ? '' : String(exec.agent.id)
-      const r = await service.localAsk(`${args.agent} ${args.question}`, callerSessionId)
+      const explicit = typeof args.target_workspace === 'string' ? args.target_workspace.trim() : ''
+      const targetWorkspace = explicit !== '' ? explicit : sessionCwd(exec.agent)
+      const r = await service.localAsk(`${args.agent} ${args.question}`, callerSessionId, targetWorkspace)
       const elapsed = Date.now() - started
       const text = r.messages.map((m) => m.text).filter((t) => t !== '').join('\n\n')
       if (r.error) {
@@ -118,12 +124,20 @@ function registerAgentAskTool(tools: ToolRuntime, service: AgentBotService): () 
  * user/message -> tool/call(agent_ask) -> tool/result -> assistant/message 的
  * 对话流顺序（同 dsh-command-goal 的 followup 模式）。
  */
+function sessionCwd(agent: unknown): string {
+  if (typeof agent !== 'object' || agent === null) return ''
+  const cwd = (agent as { session?: { header?: { cwd?: unknown } } }).session?.header?.cwd
+  return typeof cwd === 'string' ? cwd.trim() : ''
+}
+
 function delegateViaTool(
   agent: { followup(input: unknown): void },
   targetName: string,
   question: string,
+  targetWorkspace?: string,
 ): void {
-  const text = `请立即调用 agent_ask 工具（直接调用，不要输出任何解释或复述）。参数：agent="${targetName.trim()}"，question="${question.trim()}"。`
+  const target = targetWorkspace !== undefined && targetWorkspace !== '' ? `，target_workspace="${targetWorkspace}"` : ''
+  const text = `请立即调用 agent_ask 工具（直接调用，不要输出任何解释或复述）。参数：agent="${targetName.trim()}"，question="${question.trim()}"${target}。`
   appendLog('ask', `delegateViaTool 投递 followup: ${text.slice(0, 80)}`)
   agent.followup(createUserMessage({
     content: [{ type: 'text', text }],
@@ -211,8 +225,12 @@ function registerSlugCommands(commands: CommandRuntime, _service: AgentBotServic
       async handler({ agent, rawInput }) {
         const question = rawInput.trim()
         if (question === '') return { kind: 'error', text: `请输入问题：/agent_${a.slug} <问题>` }
+        const cwd = sessionCwd(agent)
+        if (a.needs_target_workspace && cwd === '') {
+          return { kind: 'error', text: `agent「${a.name}」需要目标项目目录，但当前会话没有工作区` }
+        }
         // 投递给当前 agent，引导它调 agent_ask 工具（对话流顺序）。
-        delegateViaTool(agent, a.name, question)
+        delegateViaTool(agent, a.name, question, a.needs_target_workspace ? cwd : undefined)
         return { kind: 'success', text: `已转交 agent「${a.name}」处理` }
       },
     }),

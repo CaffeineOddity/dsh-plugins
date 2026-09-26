@@ -1,6 +1,6 @@
 # 11. MVVM 源码布局
 
-Host 业务源码按 MVVM 分目录。HTML / CSS / 页内脚本**内容不改成框架**；agent-bot 新建静态页放在 View 下。
+Host 业务源码按 MVVM 分目录。配置站 View 用 React + shadcn/ui（`web/` 源码，构建成单文件 HTML 放到 `assets/`）。不在 View 里读配置或跑 Model。
 
 `src/index.ts` 只做组合根（provide / 路由 / effect）。`src/types.ts` 仍是通道 duck-type 的公开契约，留在 `src/` 根，不进 model。
 
@@ -34,7 +34,8 @@ src/
   view/
     config-site/
       serve.ts
-      assets/              # HTML/CSS/页内 JS；不拆成组件
+      assets/              # 构建产物：各路由同内容的单文件 HTML
+  web/                     # 配置站 React + shadcn/ui 源码
 ```
 
 ## 约束
@@ -45,5 +46,5 @@ src/
 
 ## 不做项
 
-- 不上 Vue/React 配置站、不做 SPA。
+- 配置站是 shadcn/ui 页面，但仍是「每个 URL 一份 HTML」：服务端白名单不变，不做独立前端部署。
 - 不把 `types.ts` 拆进 model（通道要稳定路径）。

@@ -1,6 +1,6 @@
 # 8. 配置站
 
-独立页 `GET /agent-bot`（host webServer 前缀），设置页「智能体中枢」只做入口按钮。静态页与 RPC 按 [11. MVVM](./11-mvvm-layout.md) 放在 `src/view/` / `src/viewmodel/`；HTML 不拆框架。
+独立页 `GET /agent-bot`（host webServer 前缀），设置页「智能体中枢」只做入口按钮。页面按 [11. MVVM](./11-mvvm-layout.md) 放在 `web/`（React + shadcn/ui），构建后仍由 `src/view/config-site/serve.ts` 按白名单吐 HTML。RPC 仍在 `src/viewmodel/`。
 
 ## 信息架构
 

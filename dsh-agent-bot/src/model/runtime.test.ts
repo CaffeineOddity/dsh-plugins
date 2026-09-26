@@ -515,6 +515,15 @@ describe('attachSessionToWorkspace', () => {
       'agent_联运助手',
     )
     expect(skipped).toEqual([])
+    const kept: Array<{ cwd: string; from: string; to: string }> = []
+    await attachSessionToWorkspace(
+      hostOf({ attached: [], titles: kept, existingTitle: 'test' }),
+      'sid-1',
+      '/tmp/ws',
+      'agent_联运助手',
+      { rename: false },
+    )
+    expect(kept).toEqual([])
     await expect(
       attachSessionToWorkspace(
         hostOf({ attached: [], existingTitle: '旧名', renameError: 'name-conflict' }),

@@ -78,6 +78,11 @@ export interface EnsureAgentInput {
   promptText: string
   variables: Record<string, string>
   permissionMode: PermissionMode
+  /**
+   * 挂进 cwd 对应工作区后是否改标题。缺省改成 `agent_<名>`。
+   * 仅当 cwd 不是该 agent 的 workspace、不能改别人的工作区标题时才关。直连不再走这条。
+   */
+  renameWorkspace?: boolean
 }
 
 /**
@@ -115,6 +120,7 @@ export async function attachSessionToWorkspace(
   sessionId: string,
   cwd: string,
   title: string,
+  options?: { rename?: boolean },
 ): Promise<void> {
   const registry = host.workspaceRegistry()
   if (registry === undefined || typeof registry.create !== 'function') return
@@ -133,6 +139,7 @@ export async function attachSessionToWorkspace(
       `agent-bot: 无法把会话 ${sessionId} 挂到 workspace ${cwd}: ${(err as Error).message}`,
     )
   }
+  if (options?.rename === false) return
   if (workspace.title === title) return
   if (typeof workspace.setTitle !== 'function') return
   try {
@@ -281,6 +288,7 @@ export function createAgentRuntime(host: HostServices): AgentRuntime {
           input.sessionId,
           input.cwd,
           workspaceDisplayTitle(input.agentName),
+          { rename: input.renameWorkspace !== false },
         )
         _identities.set(input.sessionId, { agentId: input.agentId, agentName: input.agentName })
         return agent

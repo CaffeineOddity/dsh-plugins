@@ -64,7 +64,7 @@ DSH **会**加载 `{workspace}/.dsh/skills`（验证结论见 [5. Skills Tab](./
   - 只读（`read-only`）：不能写盘，审批 `ask`。
 - 作为 Lead（`is_lead`）：**已废弃**。新方案无专职 lead，谁被 @ 谁就是这一单的任务 lead。所有 agent setup 都注册看板工具（`open_task` / `update_task` / `dispatch_expert` / `list_group_experts` / `list_tasks` / `ask_task_lead`），见 [12](./12-leader-experts-teamwork.md)。旧字段保存时忽略。
 - 磁盘并发（`concurrency`）：默认「串行」。这是 **cwd 安全阀**：串行 = 即使两路 `write` 的 `target` 不同，该专家所有来源仍进同一 FIFO；并发 = 不同 target 的 `write` 可并行（适合改目标工程、不改自己 workspace 的设计类）。同 target 的 `write` 一律 FIFO；`read` 一律可并行新会话。见 [12](./12-leader-experts-teamwork.md)。与「续接/按人」无关。
-- 需要目标项目目录（`needs_target_workspace`）：默认关。开 = 被 `dispatch_expert` 或直 @ 时必须带 `target_workspace`（产出写到那个已存在的目录）；自己的 workspace 只放技能。关 = 不传、传入也忽略。设计师类打开；数据/答疑类关掉。
+- 需要目标项目目录（`needs_target_workspace`）：默认关。开 = 产出必须进一个已存在的项目目录，自己的 workspace 只放技能，**会话 cwd 始终是该 workspace**（侧边栏 `agent_<name>`）。`dispatch_expert` / `/agent_<slug>` / `agent_ask` 都必须带目标目录（直连用调用方会话 cwd），只注入 `target_workspace`，不把 cwd 改成目标项目。专家自己做完，直连把本轮结果抛回调用方会话。关 = 不传、传入也忽略。设计师类打开；数据/答疑类关掉。
 - 本轮等待（毫秒）（`agent_wait_timeout_ms`）：可空 = 用全局。专家填 `0` 时巡检探针 fallback 全局。任务 lead 派发 turn 用全局窗口；任务墙钟是全局 `task_round_timeout_ms`（默认 2h），不要把本字段当「永不超时」。
 
 ## sessions
