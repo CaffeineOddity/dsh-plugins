@@ -1,4 +1,5 @@
 node_modules/
+.pnpm-store/
 .omc/
 # run.sh 按需生成的 corepack pnpm 包装器（每次运行自动重建，不入库）
 .bin/
