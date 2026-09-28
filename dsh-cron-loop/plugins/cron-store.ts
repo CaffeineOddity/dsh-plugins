@@ -32,6 +32,8 @@ export interface CronJobRecord {
   newSessionPerRun?: boolean
   /** 成功后立即激活的另一个任务 id（进入 running，不等其 cron 到期）。缺省不激活。 */
   activateOnSuccess?: string
+  /** 本任务固定的模型（provider + model）；配了绕过模型池直接用它，缺省走模型池/DSH 默认。 */
+  model?: JobModel
   /** 保留字段：v1 固定本地时区。 */
   timezone: string
   /** 绑定的会话 id（首次执行时生成，之后固定复用）。 */
@@ -88,6 +90,7 @@ const jobSchema = z.object({
   continuous: z.boolean().optional(),
   newSessionPerRun: z.boolean().optional(),
   activateOnSuccess: z.string().optional(),
+  model: z.object({ provider: z.string().min(1), model: z.string().min(1) }).optional(),
   sessionId: z.string().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
@@ -118,6 +121,24 @@ export function normalizeCwd(cwd: string): string {
   if (cwd.startsWith('~/')) return join(homedir(), cwd.slice(2))
   if (cwd === '~') return homedir()
   return cwd
+}
+
+/** 每任务固定模型：DSH 的 provider 路由 + 模型 id。 */
+export interface JobModel {
+  provider: string
+  model: string
+}
+
+/**
+ * 校验并规整「每任务固定模型」入参。provider / model 任一为空视为未配置（返回 undefined）。
+ * 用于工具 / 命令 / Web 三处入口统一收窄，避免落盘半截模型。
+ */
+export function normalizeModel(model: { provider?: string; model?: string } | undefined): JobModel | undefined {
+  if (model === undefined) return undefined
+  const provider = (model.provider ?? '').trim()
+  const name = (model.model ?? '').trim()
+  if (provider === '' || name === '') return undefined
+  return { provider, model: name }
 }
 
 /**

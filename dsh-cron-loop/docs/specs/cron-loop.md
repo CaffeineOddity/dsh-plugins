@@ -33,7 +33,8 @@ DSH 内置的 automation/automation 工具是「全局/会话级」定时任务�
   `permissionMode?`（`read-only`/`workspace-write`/`danger-full-access`，缺省 `danger-full-access`）,
   `continuous?`（缺省 `false`：执行完等下次 cron 触发；`true`：成功后立即续跑下一轮）,
   `timezone`, `sessionId?`, `createdAt`, `updatedAt`, `lastRunAt?`, `lastStatus?`, `nextRunAt?`,
-  `activateOnSuccess?`（成功后立即激活的另一个任务 id，缺省不激活）
+  `activateOnSuccess?`（成功后立即激活的另一个任务 id，缺省不激活）,
+  `model?`（`{provider, model}`，本任务固定模型，配了绕过模型池，缺省走模型池/DSH 默认）
 - `CronRunRecord`：`id`, `jobId`, `jobName`, `startedAt`, `finishedAt?`,
   `status`, `sessionId?`, `summary?`, `error?`
 - 每 job 保留最近 50 条 run（写入新 run 时裁剪旧 run）。
@@ -188,29 +189,35 @@ add/update 的 `activateOnSuccess` 缺省不填（成功后立即激活的另一
 
 ### 选模型（每轮任务开始前）
 
-1. 读 model-pool.json。
-2. 恢复检查：`exhausted=true` 且重置周期已到 -> 恢复 `exhausted=false`。
-3. 按 priority 升序取第一个 `exhausted=false` 的模型。
-4. 无可用模型 -> 暂停任务（job `enabled=false`，lastStatus='error'，error='all models exhausted'）。
-5. `enabled=false`（开关关）时，跳过模型池，用 `agentDefaultModel.currentSelection()`。
+三级优先级：**任务固定模型 > 模型池 > DSH 默认**。
+
+1. 任务配了 `model`（`{provider, model}`）：直接用它，绕过模型池；失败不回落模型池，记 `error`。
+2. 没配 `model` 且模型池 `enabled=true`：读 model-pool.json，恢复检查（`exhausted=true` 且重置周期到 -> 恢复），
+   按 priority 升序取第一个 `exhausted=false`；无可用模型 -> 暂停任务（`enabled=false`, `lastStatus='error'`, `error='all models exhausted'`）。
+3. 都没配：用 `agentDefaultModel.currentSelection()`。
+
+**live 会话换模型**：`ensureAgent` 的 live 分支用 `installModelSelection`（`@deepseek-ai/dsh-agent`）
+把目标模型挂成可变选择，下一次 step 生效；`agent.options` 是 create/resume 时固定的，不能直接改。
+这样即使会话已在内存里（live），固定模型/模型池的切换也生效——否则已在内存的会话会一直沿用旧模型。
 
 ### 检测机制（执行后扫描，非订阅）
 
 `runJob` 执行 agent 回合后，扫描 `session.snapshotEvents(firstSeq)` 的 `turn/end` 事件：
 - `reason.kind === 'error'` -> 提取 `LlmFailure`（含 `code`/`status`/`providerRetryAfterMs`）。
-- DSH `LlmFailure.code` 稳定值：`QUOTA`（额度耗尽）/ `RATE_LIMIT`（瞬时限流）/ `EMPTY_RESPONSE` / `INVALID_CREDENTIAL` / `CONTEXT_WINDOW_EXCEEDED`。
+- DSH `LlmFailure.code` 稳定值：`QUOTA`（额度耗尽）/ `RATE_LIMIT`（瞬时限流）/ `EMPTY_RESPONSE` / `INVALID_CREDENTIAL` / `AUTH`（鉴权失效，如 OAuth2 token 过期）/ `CONTEXT_WINDOW_EXCEEDED`。
 
 ### 失败分类与处理
 
 | code | 处理 |
 |------|------|
-| `QUOTA` | 标记模型 exhausted，切换下一个可用模型，新建会话重试本轮 |
+| `QUOTA` | 标记模型 exhausted（可恢复），切换下一个可用模型，重试本轮 |
+| `AUTH` | 标记模型 exhausted（可恢复），切换下一个可用模型，重试本轮（token 刷新后可复用） |
 | `INVALID_CREDENTIAL` | 标记模型 exhausted（不可恢复），切换下一个 |
 | `RATE_LIMIT` / `EMPTY_RESPONSE` / `TIMEOUT` | DSH step 级 retry-policy 已处理；cron 层不额外重试 |
 | `CONTEXT_WINDOW_EXCEEDED` | 不重试，标记 error |
 | 超时（安全阀） | 不切换模型，标记 error |
 
-切换重试上限 = 可用模型数量（每个模型试一轮）。
+切换重试上限 = 可用模型数量（每个模型试一轮）。仅模型池选出的模型才切换重试；任务固定模型失败不回落模型池。
 
 ### 额度恢复（tick 顺带检查）
 

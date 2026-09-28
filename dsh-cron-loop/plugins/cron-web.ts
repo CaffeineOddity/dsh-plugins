@@ -16,7 +16,7 @@ import type { ModelPoolFile } from './lib/model-pool.ts'
 import { createJob } from './cron-scheduler.ts'
 import type { CronLoopScheduler } from './cron-scheduler.ts'
 import type { CronJobRecord } from './cron-store.ts'
-import { normalizeCwd } from './cron-store.ts'
+import { normalizeCwd, normalizeModel } from './cron-store.ts'
 
 /** 插件名。 */
 export const name = 'cron-web'
@@ -100,6 +100,7 @@ export function apply(ctx: Context): void {
               continuous?: boolean
               newSessionPerRun?: boolean
               activateOnSuccess?: string
+              model?: { provider?: string; model?: string }
             }
             if (body.cwd === undefined || body.cwd === '') throw new Error('cwd is required')
             if (body.prompt === undefined || body.prompt === '') throw new Error('prompt is required')
@@ -113,6 +114,7 @@ export function apply(ctx: Context): void {
               continuous: body.continuous,
               newSessionPerRun: body.newSessionPerRun,
               activateOnSuccess: body.activateOnSuccess,
+              model: body.model,
             })
             json(res, 200, { ok: true, job: jobView(job) })
           } catch (error: unknown) {
@@ -167,6 +169,7 @@ export function apply(ctx: Context): void {
               continuous?: boolean
               newSessionPerRun?: boolean
               activateOnSuccess?: string
+              model?: { provider?: string; model?: string }
             }
             if (body.cron !== undefined) parseCron(body.cron)
             const next: CronJobRecord = {
@@ -179,6 +182,7 @@ export function apply(ctx: Context): void {
               continuous: body.continuous ?? job.continuous,
               newSessionPerRun: body.newSessionPerRun ?? job.newSessionPerRun,
               activateOnSuccess: body.activateOnSuccess !== undefined ? (body.activateOnSuccess === '' ? undefined : body.activateOnSuccess) : job.activateOnSuccess,
+              model: body.model === undefined ? job.model : normalizeModel(body.model),
               updatedAt: Date.now(),
             }
             await store().putJob(next)

@@ -25,6 +25,7 @@ type Job = {
   continuous?: boolean
   newSessionPerRun?: boolean
   activateOnSuccess?: string
+  model?: { provider: string; model: string }
   lastStatus?: string
   lastRunAt?: number
   nextRunAtView?: string | null
@@ -277,6 +278,11 @@ function JobDialog({ job, jobs, cwd, onClose, onSaved }: { job: Job | null | und
   const [continuous, setContinuous] = useState(false)
   const [fresh, setFresh] = useState(false)
   const [activate, setActivate] = useState('')
+  const [model, setModel] = useState('')
+  const [catalog, setCatalog] = useState<Catalog>({})
+  useEffect(() => {
+    void api<Catalog>('/cron/api/models').then(setCatalog).catch(() => setCatalog({}))
+  }, [])
   useEffect(() => {
     if (job === undefined) return
     setName(job?.name || '')
@@ -287,8 +293,13 @@ function JobDialog({ job, jobs, cwd, onClose, onSaved }: { job: Job | null | und
     setContinuous(!!job?.continuous)
     setFresh(!!job?.newSessionPerRun)
     setActivate(job?.activateOnSuccess || '')
+    setModel(job?.model ? job.model.provider + '/' + job.model.model : '')
   }, [job, cwd])
   async function save() {
+    const trimmed = model.trim()
+    const modelPart = trimmed.includes('/')
+      ? { provider: trimmed.slice(0, trimmed.indexOf('/')).trim(), model: trimmed.slice(trimmed.indexOf('/') + 1).trim() }
+      : undefined
     const body = {
       name: name.trim() || undefined,
       cwd: dir.trim(),
@@ -298,6 +309,7 @@ function JobDialog({ job, jobs, cwd, onClose, onSaved }: { job: Job | null | und
       continuous,
       newSessionPerRun: fresh,
       activateOnSuccess: activate.trim() || undefined,
+      model: trimmed === '' || modelPart === undefined || modelPart.provider === '' || modelPart.model === '' ? undefined : modelPart,
     }
     try {
       if (job) await api('/cron/api/jobs/' + job.id, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -327,6 +339,14 @@ function JobDialog({ job, jobs, cwd, onClose, onSaved }: { job: Job | null | und
           <NativeSelect value={activate} onChange={(e) => setActivate(e.target.value)}>
             <option value="">不激活其它任务</option>
             {jobs.filter((j) => j.id !== job?.id).map((j) => <option key={j.id} value={j.id}>{j.name || j.id}（{j.id}）</option>)}
+          </NativeSelect>
+        </Field>
+        <Field label="固定模型（可选，配了绕过模型池）">
+          <NativeSelect value={model} onChange={(e) => setModel(e.target.value)}>
+            <option value="">默认（走模型池 / DSH 默认）</option>
+            {(catalog.providers ?? []).flatMap((p) => p.models.map((m) => (
+              <option key={p.id + '/' + m.id} value={p.id + '/' + m.id}>{m.name || m.id}（{p.id}）</option>
+            )))}
           </NativeSelect>
         </Field>
         <DialogFooter>
