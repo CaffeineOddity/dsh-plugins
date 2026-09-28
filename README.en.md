@@ -9,6 +9,7 @@ A collection of native plugins for [DeepSeek Harness (DSH)](https://github.com/D
 | Plugin | Feature | Docs |
 |--------|---------|------|
 | [dsh-cron-loop](./dsh-cron-loop) | Project-level cron scheduled tasks: `/cron` command + `cron_job` tool + `http://127.0.0.1:3080/cron` task center | [README](./dsh-cron-loop/README.en.md) |
+| [dsh-remote-access](./dsh-remote-access) | Bind and switch DSH machines over a Cloudflare Tunnel; control plane listens on loopback only | [README](./dsh-remote-access/README.en.md) |
 
 > When adding a plugin, append a row here and place a `README.md` inside the plugin directory.
 

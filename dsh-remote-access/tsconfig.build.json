@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "plugins",
+    "outDir": "dist"
+  },
+  "exclude": ["plugins/**/*.spec.ts"]
+}

@@ -9,6 +9,7 @@
 | 插件 | 功能 | 文档 |
 |------|------|------|
 | [dsh-cron-loop](./dsh-cron-loop) | 项目级 cron 定时任务：`/cron` 命令 + `cron_job` 工具 + `http://127.0.0.1:3080/cron` 任务中心 | [README](./dsh-cron-loop/README.md) |
+| [dsh-remote-access](./dsh-remote-access) | 经 Cloudflare Tunnel 绑定并切换多台 DSH，控制面只听本机端口 | [README](./dsh-remote-access/README.md) |
 
 > 新增插件时在此表格追加一行，并在插件目录内放置 `README.md`。
 
