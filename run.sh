@@ -50,9 +50,23 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-log()  { echo -e "${GREEN}[run.sh]${NC} $*"; }
-warn() { echo -e "${YELLOW}[run.sh]${NC} $*"; }
-err()  { echo -e "${RED}[run.sh]${NC} $*" >&2; }
+log()  { printf '%b[run.sh]%b %s\n' "$GREEN" "$NC" "$*"; }
+warn() { printf '%b[run.sh]%b %s\n' "$YELLOW" "$NC" "$*"; }
+err()  { printf '%b[run.sh]%b %s\n' "$RED" "$NC" "$*" >&2; }
+
+# 第一次安装时 profile 里没有这个依赖，pnpm remove 会失败并打到 stdout。
+plugin_present() {
+  local name="$1"
+  [[ -f "$PROFILE_DIR/package.json" ]] || return 1
+  python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in (p.get("dependencies") or {}) else 1)' "$PROFILE_DIR/package.json" "$name"
+}
+
+remove_plugin_if_present() {
+  local dsh_bin="$1" name="$2"
+  if plugin_present "$name"; then
+    "$dsh_bin" plugin --profile web remove "$name" >/dev/null 2>&1 || true
+  fi
+}
 
 # 统一脚本执行：pm_run <script> -- npm 需要 `run <script>`，pnpm 不需要
 pm_run() {
@@ -326,7 +340,7 @@ do_dev() {
   # npm_config_loglevel=error：抑制 pnpm 的 missing-peer WARN（宿主包由 dsh 运行时注入，
   # 不在 profile node_modules，pnpm 静态看不到必然告警；只留真错误）
   # 先移除旧依赖（可能是 tarball），再加 link
-  "$dsh_bin" plugin --profile web remove "$name" 2>/dev/null || true
+  remove_plugin_if_present "$dsh_bin" "$name"
   npm_config_loglevel=error "$dsh_bin" plugin --profile web add "link:$PLUGIN_DIR"
   log "已链接源码: $name v${version} (源码)"
 }
@@ -345,9 +359,9 @@ do_install() {
   tarball="$(find_tarball)"
   log "安装 tarball: $tarball"
 
-  # 先移除旧依赖（可能是 link 或旧 tarball），再装新 tarball
+  # 已安装才移除。第一次安装没有旧依赖，直接 add。
   # npm_config_loglevel=error：抑制 pnpm 的 missing-peer WARN（同 do_dev 注释）
-  "$dsh_bin" plugin --profile web remove "$name" 2>/dev/null || true
+  remove_plugin_if_present "$dsh_bin" "$name"
   npm_config_loglevel=error "$dsh_bin" plugin --profile web add "$tarball"
   log "安装完成: $name v${version} (tarball)"
 }
@@ -366,9 +380,9 @@ do_upgrade() {
   tarball="$(find_tarball)"
   log "升级到 tarball: $tarball"
 
-  # 移除旧依赖（可能是 link 或旧 tarball），再装新 tarball
+  # 已安装才移除。第一次安装没有旧依赖，直接 add。
   # npm_config_loglevel=error：抑制 pnpm 的 missing-peer WARN（同 do_dev 注释）
-  "$dsh_bin" plugin --profile web remove "$name" 2>/dev/null || true
+  remove_plugin_if_present "$dsh_bin" "$name"
   npm_config_loglevel=error "$dsh_bin" plugin --profile web add "$tarball"
   log "升级完成: $name v${version} (tarball)"
 }
