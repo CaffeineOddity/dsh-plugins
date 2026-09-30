@@ -90,6 +90,8 @@ export async function handleHttp(req: IncomingMessage, res: ServerResponse, deps
       host: req.headers.host ?? '',
       remoteAddress: req.socket.remoteAddress ?? '',
       authorization: typeof req.headers.authorization === 'string' ? req.headers.authorization : '',
+      cookie: typeof req.headers.cookie === 'string' ? req.headers.cookie : '',
+      search: url.search,
       body,
       now: Date.now(),
     }, deps)

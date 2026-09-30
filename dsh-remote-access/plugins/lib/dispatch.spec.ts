@@ -171,4 +171,15 @@ describe('dispatch 安全边界', () => {
     expect(routed.status).toBe(200)
     expect((routed.body as { sessions: Array<{ id: string }> }).sessions[0]?.id).toBe('session-bbbbbbbb')
   })
+
+  it('公网登录后才能列这台电脑的目录，相对路径被拒绝', async () => {
+    const bag = deps({ hubPassHash: hashPassphrase('correct-horse') })
+    expect((await dispatch(pub('/api/hub/directories'), bag)).status).toBe(401)
+    const login = await dispatch({ ...pub('/api/hub/login'), method: 'POST', body: { passphrase: 'correct-horse' } }, bag)
+    const token = (login.body as { token: string }).token
+    const denied = await dispatch({ ...pub('/api/hub/directories'), authorization: `Bearer ${token}`, search: '?path=relative' }, bag)
+    expect(denied.status).toBe(400)
+    const viaCookie = await dispatch({ ...pub('/api/hub/directories'), cookie: `dsh_remote_hub=${token}`, search: '?path=relative' }, bag)
+    expect(viaCookie.status).toBe(400)
+  })
 })

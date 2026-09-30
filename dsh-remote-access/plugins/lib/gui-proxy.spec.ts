@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { isControlApi, isPlainDocument, launchToken, upstreamRequestHeaders } from './gui-proxy.ts'
+import { injectDirectoryPicker } from './directory-picker.ts'
 import { injectMobileSidebar } from './mobile-sidebar.ts'
 
 describe('完整界面代理', () => {
@@ -28,6 +29,15 @@ describe('完整界面代理', () => {
     expect(isPlainDocument('GET', '/')).toBe(true)
     expect(isPlainDocument('GET', '/assets/app.js')).toBe(false)
     expect(isPlainDocument('GET', '/api/sessions')).toBe(false)
+  })
+
+  it('公网页面拦截系统选目录，改列这台电脑的目录', () => {
+    const page = '<html><head></head><body></body></html>'
+    const once = injectDirectoryPicker(page)
+    expect(once.indexOf('directoryPicker/pick')).toBeLessThan(once.indexOf('</head>'))
+    expect(once).toContain('data-dsh-remote-dir')
+    expect(injectDirectoryPicker(once)).toBe(once)
+    expect(injectDirectoryPicker('{"ok":true}')).toBe('{"ok":true}')
   })
 
   it('只在 HTML 里插入一次悬浮按钮', () => {

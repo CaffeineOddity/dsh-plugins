@@ -1,5 +1,6 @@
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
+import { injectDirectoryPicker } from './directory-picker.ts'
 import { injectMobileSidebar } from './mobile-sidebar.ts'
 
 const UPSTREAM_HOST = '127.0.0.1'
@@ -147,7 +148,7 @@ export async function proxyGui(req: IncomingMessage, res: ServerResponse, launch
       void readUpstream(up).then((body) => {
         delete headers['content-length']
         res.writeHead(up.statusCode ?? 502, headers)
-        res.end(injectMobileSidebar(body.toString('utf8')))
+        res.end(injectMobileSidebar(injectDirectoryPicker(body.toString('utf8'))))
         resolve()
       }).catch(reject)
     })

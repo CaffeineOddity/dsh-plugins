@@ -5,6 +5,7 @@ import { assertPrompt, assertSessionId, type ControlApi, type SessionView } from
 import { pairDevice, requestDevice, type LookupFn } from './remote.ts'
 import { RelayHub } from './relay.ts'
 import { tryRelay, type RelayCtx } from './relay-dispatch.ts'
+import { listHostDirectory } from './directories.ts'
 import { beginTunnelSetup, startTunnel, stopTunnel, tunnelStatus } from './tunnel.ts'
 
 const PAIR_TTL_MS = 5 * 60 * 1000
@@ -18,6 +19,8 @@ export interface DispatchInput {
   host: string
   remoteAddress: string
   authorization: string
+  cookie?: string
+  search?: string
   body: unknown
   now: number
 }
@@ -83,8 +86,8 @@ export function hasHubSession(state: RemoteState, authorization: string, cookieH
   return state.hubSessions.some((s) => hashEquals(token, s.hash))
 }
 
-function hubAuthed(state: RemoteState, header: string, now: number): boolean {
-  return hasHubSession(state, header, '', now)
+function hubAuthed(state: RemoteState, header: string, cookie: string, now: number): boolean {
+  return hasHubSession(state, header, cookie, now)
 }
 
 function objectBody(body: unknown): Record<string, unknown> | undefined {
@@ -140,7 +143,7 @@ export async function dispatch(input: DispatchInput, deps: DispatchDeps): Promis
   if (admission === 'reject') return { status: 404, body: { error: 'not found' } }
   const path = input.path.replace(/\/+$/, '') || '/'
   const local = admission === 'local'
-  const hub = local || hubAuthed(deps.state, input.authorization, input.now)
+  const hub = local || hubAuthed(deps.state, input.authorization, input.cookie ?? '', input.now)
 
   if (input.method === 'POST' && path === '/api/pair') {
     if (!gate(deps.pairAttempts, input.now)) return { status: 429, body: { error: '配对尝试过多，请稍后再试' } }
@@ -270,6 +273,15 @@ export async function dispatch(input: DispatchInput, deps: DispatchDeps): Promis
   }
 
   if (!hub) return { status: 401, body: { error: '需要先登录控制台' } }
+
+  if (input.method === 'GET' && path === '/api/hub/directories') {
+    const requested = new URL(`http://127.0.0.1${input.search ?? ''}`).searchParams.get('path') ?? undefined
+    try {
+      return { status: 200, body: await listHostDirectory(requested) }
+    } catch (error) {
+      return { status: 400, body: { error: error instanceof Error ? error.message : String(error) } }
+    }
+  }
 
   if (input.method === 'GET' && path === '/api/hub/bootstrap') {
     return {

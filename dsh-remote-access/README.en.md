@@ -15,6 +15,6 @@ Open `http://127.0.0.1:3080/dsh-remote-access` on the machine. That page shows w
 ## Use
 
 1. On each machine, add its own subdomain and passphrase on the channel page.
-2. Save, then install and connect. Opening that subdomain after login is that machine's DSH.
+2. Save, then install and connect. Opening that subdomain after login is that machine's DSH. Choosing a directory lists folders on that computer, not on the phone.
 
 See [docs/specs/remote-access.md](./docs/specs/remote-access.md).
