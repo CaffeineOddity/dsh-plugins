@@ -10,8 +10,8 @@ import { resetConfigCache } from '../config.js'
 import { getAgent as getAgentConfig, saveAgent, touchSession } from '../agents.js'
 import { readTask, writeTask, type TaskBoard, type Assignee } from './task-board.js'
 import { bindSession, boundTaskId, resetBindingsCache } from './binding.js'
-import { assigneeOf, createPatrol, hasPendingDownstream, shouldDeliver, wakeSessionIdFor, wakeText } from './patrol.js'
-import { resetWriteFence, taskSlotKey } from './relay.js'
+import { createPatrol } from './patrol.js'
+import { resetWriteFence } from './relay.js'
 import type { AgentLike } from '../runtime.js'
 
 let dir: string
@@ -151,130 +151,6 @@ afterEach(() => {
   if (prevEnv === undefined) delete process.env.AGENT_BOT_CONFIG_DIR
   else process.env.AGENT_BOT_CONFIG_DIR = prevEnv
   rmSync(dir, { recursive: true, force: true })
-})
-
-describe('wakeSessionIdFor', () => {
-  it('被派专家 → 用协作槽会话 id（不是槽 key）', () => {
-    const id = mkAgent('B', [{ key: 'task:t1:b', sessionId: 'sess-collab-b' }])
-    const t = task({ assignees: [assignee({ expertId: id, sessionId: 'sess-collab-b' })] })
-    expect(wakeSessionIdFor(t, id)).toBe('sess-collab-b')
-  })
-
-  it('纯被派、没有通道槽的中间层也叫得醒', () => {
-    const id = mkAgent('B', [{ key: 'task:t1:b', sessionId: 'sess-collab-b' }])
-    const t = task({ assignees: [assignee({ expertId: id, sessionId: 'sess-collab-b' })] })
-    expect(loadAgent(id).sessions['task:t1:b']?.sessionId).toBe('sess-collab-b')
-    expect(wakeSessionIdFor(t, id)).toBe('sess-collab-b')
-  })
-
-  it('taskLead → 按任务的 providerId/sessionParts 反推通道槽，取 sessionId', () => {
-    // encodeSessionKey = <providerId>_<按 key 字母序的值>：demo + b1,g1 -> 'demo_b1_g1'
-    const id = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-chan-a' }])
-    const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })
-    expect(wakeSessionIdFor(t, id)).toBe('sess-chan-a')
-  })
-
-  it('session_by_sender=true 时带上 sender 再定位', () => {
-    const id = mkAgent('A', [{ key: 'demo_b1_g1_alice', sessionId: 'sess-chan-alice' }], true)
-    const t = task({ taskLead: id, sender: 'alice', sessionParts: { bot_id: 'b1', group_id: 'g1' } })
-    expect(wakeSessionIdFor(t, id)).toBe('sess-chan-alice')
-  })
-
-  it('多群时不乱挑：只认任务那条群', () => {
-    const id = mkAgent('A', [
-      { key: 'demo_b_g_other', sessionId: 'sess-other-group' },
-      { key: 'demo_b1_g1', sessionId: 'sess-right-group' },
-    ])
-    const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })
-    expect(wakeSessionIdFor(t, id)).toBe('sess-right-group')
-  })
-
-  it('有任务槽 → 优先用任务槽（入站软路由把它放进来的那条）', () => {
-    const id = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-chan' }])
-    touchSession(id, taskSlotKey('task_t1', id), 'sess-task', 1, '')
-    const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })
-    expect(wakeSessionIdFor(t, id)).toBe('sess-task')
-  })
-
-  it('任务槽丢了 → 用 md 里的 leadSessionId 兜底（否则这单会僵在 running/）', () => {
-    const id = mkAgent('A', []) // 没有任何槽（清过槽 / 换过 key 格式 / agent 重建）
-    const t = task({ taskLead: id, leadSessionId: 'sess-from-md', sessionParts: { bot_id: 'b1', group_id: 'g1' } })
-    expect(wakeSessionIdFor(t, id)).toBe('sess-from-md')
-  })
-
-  it('任务槽在时优先于 md 兜底', () => {
-    const id = mkAgent('A', [{ key: 'demo_b1_g1', sessionId: 'sess-chan' }])
-    touchSession(id, taskSlotKey('task_t1', id), 'sess-slot', 1, '')
-    const t = task({ taskLead: id, leadSessionId: 'sess-from-md', sessionParts: { bot_id: 'b1', group_id: 'g1' } })
-    expect(wakeSessionIdFor(t, id)).toBe('sess-slot')
-  })
-
-  it('md 兜底只对 taskLead 生效（不会把专家叫到 lead 的会话）', () => {
-    const lead = mkAgent('Lead2', [])
-    const other = mkAgent('Other', [])
-    const t = task({ taskLead: lead, leadSessionId: 'sess-from-md' })
-    expect(wakeSessionIdFor(t, other)).toBeUndefined()
-  })
-
-  it('没有对应槽 → undefined（调用方跳过）', () => {
-    const id = mkAgent('A', [{ key: 'demo_b_other', sessionId: 'sess-x' }])
-    const t = task({ taskLead: id, sessionParts: { bot_id: 'b1', group_id: 'g1' } })
-    expect(wakeSessionIdFor(t, id)).toBeUndefined()
-  })
-})
-
-describe('hasPendingDownstream', () => {
-  it('有下游还在跑 → true（B 不算做完）', () => {
-    const t = task({
-      assignees: [
-        assignee({ expertId: 'B', status: 'idle' }),
-        assignee({ expertId: 'C', dispatchedBy: 'B', status: 'running' }),
-      ],
-    })
-    expect(hasPendingDownstream(t, 'B')).toBe(true)
-  })
-  it('下游终态但上报还没消费（wake=true）→ 仍算没上报完', () => {
-    const t = task({
-      assignees: [
-        assignee({ expertId: 'B', status: 'idle' }),
-        assignee({ expertId: 'C', dispatchedBy: 'B', status: 'idle', wake: true }),
-      ],
-    })
-    expect(hasPendingDownstream(t, 'B')).toBe(true)
-  })
-  it('下游全终态且上报已消费 → false', () => {
-    const t = task({
-      assignees: [
-        assignee({ expertId: 'B', status: 'idle' }),
-        assignee({ expertId: 'C', dispatchedBy: 'B', status: 'idle', wake: false }),
-      ],
-    })
-    expect(hasPendingDownstream(t, 'B')).toBe(false)
-  })
-})
-
-describe('wakeText', () => {
-  it('点名谁做完了', () => {
-    const t = task({ assignees: [assignee({ expertId: 'C', expertName: '设计师', status: 'idle' })] })
-    expect(wakeText(t, [t.assignees[0]!])).toContain('设计师 已完成')
-  })
-  it('失败也说清楚', () => {
-    const t = task({ assignees: [assignee({ expertId: 'C', expertName: '设计师', status: 'failed' })] })
-    expect(wakeText(t, [t.assignees[0]!])).toContain('设计师 失败')
-  })
-})
-
-describe('assigneeOf / shouldDeliver', () => {
-  it('assignee 命中 / 未命中', () => {
-    const t = task({ assignees: [assignee({ expertId: 'e1' })] })
-    expect(assigneeOf(t, 'e1')?.status).toBe('running')
-    expect(assigneeOf(t, 'ghost')).toBeUndefined()
-  })
-  it('shouldDeliver：无专家无待决 false；有专家 true；有待决 true', () => {
-    expect(shouldDeliver(task())).toBe(false)
-    expect(shouldDeliver(task({ assignees: [assignee({ dispatchedBy: '', wake: false })] }))).toBe(true)
-    expect(shouldDeliver(task({ pendingHuman: { questions: ['q'], askedBy: 'e', askedAt: 1 } }))).toBe(true)
-  })
 })
 
 describe('tickOnce 叫醒链（A→B→C）', () => {

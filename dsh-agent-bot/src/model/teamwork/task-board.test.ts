@@ -293,3 +293,46 @@ describe('YAML 往返：纯数字字符串字段不被写成 number', () => {
     expect(back?.sessionParts).toEqual({ a: 'true', b: 'null', c: 'x y' })
   })
 })
+
+describe('落盘字段往返（续期计数 / 收口进度，specs/16）', () => {
+  it('assignee 续期计数往返', () => {
+    const t = sampleTask('task_renew')
+    t.assignees[0].renew = 3
+    t.assignees[0].missingSince = 12345
+    writeTask('running', t)
+    const back = readTask('running', 'task_renew')
+    expect(back?.assignees[0]?.renew).toBe(3)
+    expect(back?.assignees[0]?.missingSince).toBe(12345)
+  })
+
+  it('task 收口进度字段往返', () => {
+    const t = sampleTask('task_deliver')
+    t.deliverText = '最终答复'
+    t.deliverAttempts = 2
+    writeTask('running', t)
+    const back = readTask('running', 'task_deliver')
+    expect(back?.deliverText).toBe('最终答复')
+    expect(back?.deliverAttempts).toBe(2)
+  })
+
+  it('旧文件缺字段 → 读回 undefined / 不抛错（在跑任务仍可读）', () => {
+    writeTask('running', sampleTask('task_legacy'))
+    const back = readTask('running', 'task_legacy')
+    expect(back?.assignees[0]?.renew).toBeUndefined()
+    expect(back?.assignees[0]?.missingSince).toBeUndefined()
+    expect(back?.deliverText).toBeUndefined()
+    expect(back?.deliverAttempts).toBeUndefined()
+  })
+
+  it('缺省值（0）不写进 frontmatter，读回为 undefined', () => {
+    const t = sampleTask('task_default')
+    t.assignees[0].renew = 0
+    t.assignees[0].missingSince = 0
+    t.deliverAttempts = 0
+    writeTask('running', t)
+    const raw = marshalTaskYaml(t, t.body)
+    expect(raw).not.toContain('renew:')
+    expect(raw).not.toContain('missingSince:')
+    expect(raw).not.toContain('deliverAttempts:')
+  })
+})

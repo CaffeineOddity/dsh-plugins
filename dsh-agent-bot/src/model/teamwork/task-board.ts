@@ -39,6 +39,10 @@ export interface Assignee {
   wake: boolean
   /** 派发时那句指令（write 排队后轮到时要拿它重启；frontmatter 里单行 JSON 存）。 */
   instruction?: string
+  /** 活性续期计数（缺省 0）。巡检跨轮累积，进程重启后不丢。 */
+  renew?: number
+  /** 首次发现会话不在线的时间戳（0=在线；挂够一个窗口才算一次续期）。 */
+  missingSince?: number
 }
 
 /** 待决问题（抛给人或任务 lead）。 */
@@ -74,6 +78,10 @@ export interface TaskBoard {
   assignees: Assignee[]
   pendingHuman?: PendingHuman
   body: string
+  /** lead 综合已产出、尚未投出去的文本（进程重启后不丢）。 */
+  deliverText?: string
+  /** 收口投递重试次数（缺省 0，配合 deliverText）。 */
+  deliverAttempts?: number
 }
 
 /** 解析结果：字段错误显式抛，不静默吞。 */
@@ -130,6 +138,8 @@ function parseAssignee(raw: unknown, where: string): Assignee {
   const status: AssigneeStatus = ['running', 'idle', 'failed', 'waiting', 'need_decision'].includes(statusRaw)
     ? (statusRaw as AssigneeStatus)
     : 'idle'
+  const renewRaw = typeof rec.renew === 'number' && Number.isFinite(rec.renew) ? rec.renew : 0
+  const missingSinceRaw = typeof rec.missingSince === 'number' && Number.isFinite(rec.missingSince) ? rec.missingSince : 0
   return {
     expertId,
     expertName: typeof rec.expertName === 'string' ? rec.expertName : '',
@@ -141,6 +151,8 @@ function parseAssignee(raw: unknown, where: string): Assignee {
     status,
     wake: rec.wake === true,
     instruction: typeof rec.instruction === 'string' && rec.instruction !== '' ? decodeText(rec.instruction) : undefined,
+    renew: renewRaw > 0 ? renewRaw : undefined,
+    missingSince: missingSinceRaw > 0 ? missingSinceRaw : undefined,
   }
 }
 
@@ -194,6 +206,10 @@ interface SerializeTask {
   groupSnapshot: GroupMember[]
   assignees: Assignee[]
   pendingHuman?: PendingHuman
+  /** 有则写进 frontmatter。 */
+  deliverText?: string
+  /** 有则写进 frontmatter。 */
+  deliverAttempts?: number
 }
 
 /** 把任务字段序列化成 frontmatter YAML（本插件手写子集；键字母序，注释标记运行时维护）。 */
@@ -237,6 +253,8 @@ export function marshalTaskYaml(task: SerializeTask, body: string): string {
       // 单行存：JSON 把换行转义成 \n，再由 yamlScalar 加引号 → 不会破坏 frontmatter 的行结构
       lines.push(`    instruction: ${yamlScalar(JSON.stringify(a.instruction))}`)
     }
+    if (a.renew !== undefined && a.renew > 0) lines.push(`    renew: ${a.renew}`)
+    if (a.missingSince !== undefined && a.missingSince > 0) lines.push(`    missingSince: ${a.missingSince}`)
   }
   if (task.pendingHuman) {
     lines.push('pendingHuman:')
@@ -246,6 +264,8 @@ export function marshalTaskYaml(task: SerializeTask, body: string): string {
     lines.push(`  askedAt: ${task.pendingHuman.askedAt}`)
     if (task.pendingHuman.toHuman === true) lines.push('  toHuman: true')
   }
+  if (task.deliverText !== undefined && task.deliverText !== '') lines.push(`deliverText: ${yamlScalar(task.deliverText)}`)
+  if (task.deliverAttempts !== undefined && task.deliverAttempts > 0) lines.push(`deliverAttempts: ${task.deliverAttempts}`)
   lines.push('---')
   lines.push('')
   return lines.join('\n') + body + '\n'
@@ -300,6 +320,8 @@ export function unmarshalTask(markdown: string): TaskBoard {
     assignees: parseAssignees(rec.assignees, where),
     pendingHuman: parsePendingHuman(rec.pendingHuman, where),
     body,
+    deliverText: typeof rec.deliverText === 'string' && rec.deliverText !== '' ? rec.deliverText : undefined,
+    deliverAttempts: typeof rec.deliverAttempts === 'number' && Number.isFinite(rec.deliverAttempts) && rec.deliverAttempts > 0 ? rec.deliverAttempts : undefined,
   }
 }
 
