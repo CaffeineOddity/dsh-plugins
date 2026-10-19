@@ -19,8 +19,8 @@ import {
   copySkillApply,
   loadConfig,
   loadSkillsMap,
-  parseAgentWaitTimeoutMs,
-  parseAgentWaitTimeoutOverride,
+  parsePatrolIntervalMinutes,
+  parsePendingQuestionnaireMaxDays,
   parsePermissionMode,
   parsePromptPlacement,
   saveConfig,
@@ -173,7 +173,6 @@ function parseAgentWrite(payload: Record<string, unknown>): AgentWrite {
     session_timeout_minutes: timeout,
     concurrency: payload.concurrency === 'concurrent' ? 'concurrent' : 'serial',
     needs_target_workspace: asBool(payload.needs_target_workspace, false),
-    agent_wait_timeout_ms: parseAgentWaitTimeoutOverride(payload.agent_wait_timeout_ms),
   }
 }
 
@@ -266,9 +265,8 @@ export async function handleRpc(
         return {
           ok: true,
           value: {
-            agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
-            expert_liveness_max_renew: cfg.expert_liveness_max_renew,
-            task_round_timeout_ms: cfg.task_round_timeout_ms,
+            pending_questionnaire_max_days: cfg.pending_questionnaire_max_days,
+            patrol_interval_minutes: cfg.patrol_interval_minutes,
             use_hub_experts: cfg.use_hub_experts,
             configDir: configDirPath(),
             providers: host.listProviders(),
@@ -276,30 +274,21 @@ export async function handleRpc(
         }
       }
       case 'saveSettings': {
-        const ms = parseAgentWaitTimeoutMs(asRecord(payload).agent_wait_timeout_ms)
-        if (ms === null) {
-          return { ok: false, error: 'bad-request: agent_wait_timeout_ms 须为 1000–1800000 的正整数毫秒' }
-        }
+        const p = asRecord(payload)
         const cfg = loadConfig()
-        const renewRaw = asRecord(payload).expert_liveness_max_renew
-        let renew = cfg.expert_liveness_max_renew
-        if (renewRaw !== undefined && renewRaw !== '' && renewRaw !== null) {
-          const n = typeof renewRaw === 'number' ? renewRaw : Number(String(renewRaw).trim())
-          if (!Number.isInteger(n) || n < 1) {
-            return { ok: false, error: 'bad-request: expert_liveness_max_renew 须为正整数' }
-          }
-          renew = n
+        const days = p.pending_questionnaire_max_days === undefined
+          ? cfg.pending_questionnaire_max_days
+          : parsePendingQuestionnaireMaxDays(p.pending_questionnaire_max_days)
+        if (days === null) {
+          return { ok: false, error: 'bad-request: pending_questionnaire_max_days 须为 1–365 的整数' }
         }
-        const roundRaw = asRecord(payload).task_round_timeout_ms
-        let round = cfg.task_round_timeout_ms
-        if (roundRaw !== undefined && roundRaw !== '' && roundRaw !== null) {
-          const n = typeof roundRaw === 'number' ? roundRaw : Number(String(roundRaw).trim())
-          if (!Number.isInteger(n) || n <= 0) {
-            return { ok: false, error: 'bad-request: task_round_timeout_ms 须为正整数毫秒（禁止 0）' }
-          }
-          round = n
+        const patrolMinutes = p.patrol_interval_minutes === undefined
+          ? cfg.patrol_interval_minutes
+          : parsePatrolIntervalMinutes(p.patrol_interval_minutes)
+        if (patrolMinutes === null) {
+          return { ok: false, error: 'bad-request: patrol_interval_minutes 须为 1–60 的整数' }
         }
-        const hubRaw = asRecord(payload).use_hub_experts
+        const hubRaw = p.use_hub_experts
         const hub = hubRaw === undefined ? cfg.use_hub_experts : (hubRaw === true || hubRaw === 'true')
         saveConfig({
           skill_roots: cfg.skill_roots,
@@ -307,12 +296,14 @@ export async function handleRpc(
           prompts: cfg.prompts,
           agents: cfg.agents,
           skill_apply: cfg.skill_apply,
-          agent_wait_timeout_ms: ms,
-          expert_liveness_max_renew: renew,
-          task_round_timeout_ms: round,
+          pending_questionnaire_max_days: days,
+          patrol_interval_minutes: patrolMinutes,
           use_hub_experts: hub,
         })
-        return { ok: true, value: { saved: true, agent_wait_timeout_ms: ms } }
+        return {
+          ok: true,
+          value: { saved: true, pending_questionnaire_max_days: days, patrol_interval_minutes: patrolMinutes },
+        }
       }
       case 'status':
         return { ok: true, value: statusValue(host) }

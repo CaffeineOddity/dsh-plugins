@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { resetConfigCache, loadConfig } from '../config.js'
+import { resetConfigCache } from '../config.js'
 import {
   marshalTaskYaml,
   unmarshalTask,
@@ -147,7 +147,7 @@ describe('isTaskId', () => {
 })
 
 describe('createTask（新建任务落 running/）', () => {
-  it('生成合法 taskId、写 running/、算 deadlineAt、留群快照', () => {
+  it('生成合法 taskId、写 running/、deadlineAt 为 0、留群快照', () => {
     const before = Date.now()
     const t = createTask({
       taskLead: 'a1',
@@ -158,14 +158,13 @@ describe('createTask（新建任务落 running/）', () => {
       access: 'write',
       target: '/tmp/proj',
       groupSnapshot: [{ agentId: 'b1', name: 'B', description: '' }],
-      roundTimeoutMs: 60_000,
     })
     expect(isTaskId(t.taskId)).toBe(true)
     expect(t.taskLead).toBe('a1')
     expect(t.access).toBe('write')
     expect(t.assignees).toEqual([])
     expect(t.groupSnapshot).toEqual([{ agentId: 'b1', name: 'B', description: '' }])
-    expect(t.deadlineAt - t.createdAt).toBe(60_000)
+    expect(t.deadlineAt).toBe(0)
     expect(t.createdAt).toBeGreaterThanOrEqual(before)
     // 真落盘在 running/
     const back = readTask('running', t.taskId)
@@ -182,14 +181,14 @@ describe('createTask（新建任务落 running/）', () => {
     expect(readTask('running', b.taskId)).toBeDefined()
   })
 
-  it('target 空串不写字段；缺 roundTimeoutMs 用全局', () => {
+  it('target 空串不写字段；deadlineAt 固定为 0', () => {
     const t = createTask({
       taskLead: 'a1', sender: 's', providerId: 'p',
       sessionParts: { x: '1' }, originContext: 'c', access: 'read',
       target: '', groupSnapshot: [],
     })
     expect(t.target).toBeUndefined()
-    expect(t.deadlineAt - t.createdAt).toBe(loadConfig().task_round_timeout_ms)
+    expect(t.deadlineAt).toBe(0)
   })
 })
 

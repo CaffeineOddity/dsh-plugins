@@ -41,10 +41,9 @@ beforeEach(() => {
     prompts: {},
     agents: [agent({ id: 'a1', name: '联运', workspace })],
     skill_apply: {},
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
-    agent_wait_timeout_ms: 180000,
   })
 })
 
@@ -110,10 +109,9 @@ describe('prepareAsk 校验', () => {
       prompts: {},
       agents: [agent({ id: 'a2', name: '空', workspace: gone })],
       skill_apply: {},
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
-      agent_wait_timeout_ms: 180000,
     })
     expect(() => prepareAsk(req({ agentId: 'a2' }), providers)).toThrow(/workspace 不存在/)
     const file = join(configDir, 'not-dir')
@@ -124,10 +122,9 @@ describe('prepareAsk 校验', () => {
       prompts: {},
       agents: [agent({ id: 'a3', name: '文件', workspace: file })],
       skill_apply: {},
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
-      agent_wait_timeout_ms: 180000,
     })
     expect(() => prepareAsk(req({ agentId: 'a3' }), providers)).toThrow(/workspace 不是目录/)
   })
@@ -163,10 +160,9 @@ describe('prepareAsk sessionKey', () => {
       prompts: {},
       agents: [agent({ id: 'a1', name: '联运', workspace, session_by_sender: true })],
       skill_apply: {},
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
-      agent_wait_timeout_ms: 180000,
     })
     expect(prepareAsk(req(), providers).sessionKey).toBe('demo_r1_6031348_alice')
     expect(() => prepareAsk(req({ meta: { ...req().meta, sender: '' } }), providers)).toThrow(
@@ -276,10 +272,9 @@ describe('resolveSessionReuse', () => {
         }),
       ],
       skill_apply: {},
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
-      agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({
       action: 'reuse',
@@ -304,10 +299,9 @@ describe('resolveSessionReuse', () => {
         }),
       ],
       skill_apply: {},
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
-      agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({
       action: 'create',
@@ -333,10 +327,9 @@ describe('resolveSessionReuse', () => {
         }),
       ],
       skill_apply: {},
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
-      agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({
       action: 'create',
@@ -362,10 +355,9 @@ describe('resolveSessionReuse', () => {
         }),
       ],
       skill_apply: {},
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
-      agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({
       action: 'create',
@@ -396,10 +388,9 @@ describe('resolveSessionReuse', () => {
         }),
       ],
       skill_apply: {},
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
-      agent_wait_timeout_ms: 180000,
     })
     expect(planSession(prepareAsk(req(), providers), false, now, 'sid-new')).toEqual({
       action: 'create',

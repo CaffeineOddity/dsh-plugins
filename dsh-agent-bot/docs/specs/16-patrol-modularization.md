@@ -78,7 +78,7 @@
 
 ## 已知边界与不做项
 
-- 不改状态机语义、不换 probe/超时策略（不动"非阻塞+续期计数"模型，它优于 hub 的同步等待）。
+- 模块化当时不改状态机。超时策略后来改成 hub 方案：无等待上限、无续期、无任务墙钟；问卷天数 + 巡检间隔。见 [12](./12-leader-experts-teamwork.md)。
 - 不迁移 `relay.writeFence`（进程内写锁，注释已明确体检活性 reap，不落盘）。
 - 不调整 `board-tools.ts` / `handoff-task.ts` / `binding.ts` / `inbound.ts` 的既有接口。
 - 不引入新的依赖或运行时框架。

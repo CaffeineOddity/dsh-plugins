@@ -12,20 +12,23 @@ import type { FSWatcher } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
-/** agent 等待超时默认值（毫秒）。 */
-export const DEFAULT_AGENT_WAIT_TIMEOUT_MS = 180_000
+/** 待决问卷最长等待默认值（天）。 */
+export const DEFAULT_PENDING_QUESTIONNAIRE_MAX_DAYS = 7
 
-/** agent 等待超时下限（毫秒）。 */
-export const MIN_AGENT_WAIT_TIMEOUT_MS = 1_000
+/** 待决问卷最长等待下限（天）。 */
+export const MIN_PENDING_QUESTIONNAIRE_MAX_DAYS = 1
 
-/** agent 等待超时上限（毫秒）。 */
-export const MAX_AGENT_WAIT_TIMEOUT_MS = 1_800_000
+/** 待决问卷最长等待上限（天）。 */
+export const MAX_PENDING_QUESTIONNAIRE_MAX_DAYS = 365
 
-/** 专家活性探针续期上限默认值。 */
-export const DEFAULT_EXPERT_LIVENESS_MAX_RENEW = 3
+/** 一天的毫秒数。 */
+export const DAY_MS = 86_400_000
 
-/** 任务墙钟默认值（毫秒，2h）。 */
-export const DEFAULT_TASK_ROUND_TIMEOUT_MS = 7_200_000
+/** 巡检兜底间隔默认分钟。 */
+export const DEFAULT_PATROL_INTERVAL_MINUTES = 3
+
+/** 巡检兜底间隔上限分钟。 */
+export const MAX_PATROL_INTERVAL_MINUTES = 60
 
 /** 专家清单来源默认值：true=中枢全集（路线 b），false=群快照（Provider 投影）。 */
 export const DEFAULT_USE_HUB_EXPERTS = true
@@ -121,8 +124,6 @@ export interface AgentConfig {
   concurrency: Concurrency
   /** true：被 dispatch_expert / 直连 / 直 @ 时必须带已存在的绝对路径 target_workspace。会话 cwd 仍是 workspace。 */
   needs_target_workspace: boolean
-  /** per-agent 覆盖单次 waitIdle；缺字段用全局；0 fallback 全局。 */
-  agent_wait_timeout_ms?: number
   sessions: Record<string, SessionSlot>
 }
 
@@ -133,9 +134,10 @@ export interface AgentBotFileConfig {
   prompts: Record<string, PromptConfig>
   agents: AgentConfig[]
   skill_apply: SkillApplyConfig
-  agent_wait_timeout_ms: number
-  expert_liveness_max_renew: number
-  task_round_timeout_ms: number
+  /** 待决问卷最长等待（天）。默认 7，范围 1–365。 */
+  pending_questionnaire_max_days: number
+  /** 巡检兜底间隔（分钟）。默认 3，范围 1–60。专家做完不等这一拍。 */
+  patrol_interval_minutes: number
   /** 专家清单来源：true=中枢全集（路线 b）；false=群快照（Provider listGroupAgents）。 */
   use_hub_experts: boolean
 }
@@ -204,9 +206,8 @@ function defaultConfig(): AgentBotFileConfig {
     prompts: {},
     agents: [],
     skill_apply: defaultSkillApply(),
-    agent_wait_timeout_ms: DEFAULT_AGENT_WAIT_TIMEOUT_MS,
-    expert_liveness_max_renew: DEFAULT_EXPERT_LIVENESS_MAX_RENEW,
-    task_round_timeout_ms: DEFAULT_TASK_ROUND_TIMEOUT_MS,
+    pending_questionnaire_max_days: DEFAULT_PENDING_QUESTIONNAIRE_MAX_DAYS,
+    patrol_interval_minutes: DEFAULT_PATROL_INTERVAL_MINUTES,
     use_hub_experts: DEFAULT_USE_HUB_EXPERTS,
   }
 }
@@ -259,9 +260,8 @@ export function loadConfig(): AgentBotFileConfig {
   cache = normalize({
     skill_roots: core.skill_roots,
     skill_apply: core.skill_apply,
-    agent_wait_timeout_ms: core.agent_wait_timeout_ms,
-    expert_liveness_max_renew: core.expert_liveness_max_renew,
-    task_round_timeout_ms: core.task_round_timeout_ms,
+    pending_questionnaire_max_days: core.pending_questionnaire_max_days,
+    patrol_interval_minutes: core.patrol_interval_minutes,
     use_hub_experts: core.use_hub_experts,
     skill_groups: existsSync(groupsPath) ? readJsonFile(groupsPath) : core.skill_groups,
     prompts: existsSync(promptsPath) ? readJsonFile(promptsPath) : core.prompts,
@@ -279,9 +279,8 @@ export function saveConfig(data: AgentBotFileConfig): void {
   writeJsonFile(configFilePath(), {
     skill_roots: normalized.skill_roots,
     skill_apply: normalized.skill_apply,
-    agent_wait_timeout_ms: normalized.agent_wait_timeout_ms,
-    expert_liveness_max_renew: normalized.expert_liveness_max_renew,
-    task_round_timeout_ms: normalized.task_round_timeout_ms,
+    pending_questionnaire_max_days: normalized.pending_questionnaire_max_days,
+    patrol_interval_minutes: normalized.patrol_interval_minutes,
     use_hub_experts: normalized.use_hub_experts,
   })
   writeJsonFile(skillGroupsFilePath(), normalized.skill_groups)
@@ -312,16 +311,33 @@ export function saveSkillsMap(data: SkillsMapFile): void {
 }
 
 /**
- * 解析 agent 等待超时（毫秒）。
- * 接受有限正整数或整数字符串；范围 1000–1800000。非法返回 null。
+ * 解析待决问卷最长等待（天）。
+ * 接受有限正整数或整数字符串；范围 1–365。非法返回 null。
  */
-export function parseAgentWaitTimeoutMs(raw: unknown): number | null {
+export function parsePendingQuestionnaireMaxDays(raw: unknown): number | null {
+  const n = parsePositiveInt(raw)
+  if (n === null || n < MIN_PENDING_QUESTIONNAIRE_MAX_DAYS || n > MAX_PENDING_QUESTIONNAIRE_MAX_DAYS) return null
+  return n
+}
+
+/** 问卷发出时刻 + 配置天数。 */
+export function questionnaireDeadlineAt(askedAt: number, days: number): number {
+  return askedAt + days * DAY_MS
+}
+
+/** 巡检兜底间隔（分钟）：整数 1–60；非法返回 null。 */
+export function parsePatrolIntervalMinutes(raw: unknown): number | null {
+  const n = parsePositiveInt(raw)
+  if (n === null || n < 1 || n > MAX_PATROL_INTERVAL_MINUTES) return null
+  return n
+}
+
+function parsePositiveInt(raw: unknown): number | null {
   let n: number
   if (typeof raw === 'number') n = raw
   else if (typeof raw === 'string' && raw.trim() !== '') n = Number(raw.trim())
   else return null
-  if (!Number.isFinite(n) || !Number.isInteger(n)) return null
-  if (n < MIN_AGENT_WAIT_TIMEOUT_MS || n > MAX_AGENT_WAIT_TIMEOUT_MS) return null
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) return null
   return n
 }
 
@@ -336,37 +352,6 @@ export function expandHomePath(p: string): string {
 export function parseConcurrency(raw: unknown): Concurrency {
   if (raw === 'concurrent') return 'concurrent'
   return DEFAULT_CONCURRENCY
-}
-
-/**
- * agent 级 waitIdle 覆盖：接受有限正整数或整数字符串；`0` 表示 fallback 全局。
- * 缺字段 / 非法返回 undefined（用全局）。
- */
-export function parseAgentWaitTimeoutOverride(raw: unknown): number | undefined {
-  let n: number
-  if (typeof raw === 'number') n = raw
-  else if (typeof raw === 'string' && raw.trim() !== '') n = Number(raw.trim())
-  else return undefined
-  if (!Number.isFinite(n) || !Number.isInteger(n)) return undefined
-  if (n === 0) return 0
-  if (n < MIN_AGENT_WAIT_TIMEOUT_MS || n > MAX_AGENT_WAIT_TIMEOUT_MS) return undefined
-  return n
-}
-
-/** 活性探针续期上限：整数 ≥ 1；非法回退默认。 */
-export function parseExpertLivenessMaxRenew(raw: unknown): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || !Number.isInteger(raw) || raw < 1) {
-    return DEFAULT_EXPERT_LIVENESS_MAX_RENEW
-  }
-  return raw
-}
-
-/** 任务墙钟：正整数毫秒（禁止 0 表示永不超时）；非法回退默认。 */
-export function parseTaskRoundTimeoutMs(raw: unknown): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) {
-    return DEFAULT_TASK_ROUND_TIMEOUT_MS
-  }
-  return raw
 }
 
 /** 专家清单来源：布尔；缺省/非法回退 true（中枢全集）。 */
@@ -386,9 +371,9 @@ export function normalize(raw: unknown): AgentBotFileConfig {
     prompts: normalizePrompts(o.prompts),
     agents: normalizeAgents(o.agents),
     skill_apply: normalizeSkillApply(o.skill_apply),
-    agent_wait_timeout_ms: parseAgentWaitTimeoutMs(o.agent_wait_timeout_ms) ?? d.agent_wait_timeout_ms,
-    expert_liveness_max_renew: parseExpertLivenessMaxRenew(o.expert_liveness_max_renew),
-    task_round_timeout_ms: parseTaskRoundTimeoutMs(o.task_round_timeout_ms),
+    pending_questionnaire_max_days:
+      parsePendingQuestionnaireMaxDays(o.pending_questionnaire_max_days) ?? d.pending_questionnaire_max_days,
+    patrol_interval_minutes: parsePatrolIntervalMinutes(o.patrol_interval_minutes) ?? d.patrol_interval_minutes,
     use_hub_experts: parseUseHubExperts(o.use_hub_experts),
   }
 }
@@ -449,7 +434,6 @@ function normalizeAgents(raw: unknown): AgentConfig[] {
       session_timeout_minutes: parseSessionTimeoutMinutes(o.session_timeout_minutes),
       concurrency: parseConcurrency(o.concurrency),
       needs_target_workspace: o.needs_target_workspace === true,
-      agent_wait_timeout_ms: parseAgentWaitTimeoutOverride(o.agent_wait_timeout_ms),
       sessions: normalizeSessions(o.sessions),
     })
   }

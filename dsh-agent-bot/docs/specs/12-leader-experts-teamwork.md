@@ -51,7 +51,8 @@ Alice 的任务与 Bob 的任务各一份 md（`sender` 不同），互不取消
 |---|---|---|
 | `concurrency` | `serial` | cwd 安全阀。`serial`：即使不同 target 的 `write` 也 FIFO；`concurrent`：不同 target 的 `write` 可并行。同 target 的 `write` 一律 FIFO；`read` 一律可并行 |
 | `needs_target_workspace` | `false` | `true`：被 `dispatch_expert` / 直连 / 直 @ 时必须带目标项目目录（产出写到那里）。自己的 `workspace` 仍是技能仓，**不改 cwd**。直连自己做完把结果抛回调用方会话 |
-| `agent_wait_timeout_ms` | 缺字段 = 用全局 | per-agent 覆盖单次 waitIdle；专家 `0` fallback 全局。任务墙钟看全局 `task_round_timeout_ms`，不用本字段表示永不超时 |
+| `pending_questionnaire_max_days` | `7` | 问卷墙钟。到点先提醒，再一个周期未答则关单 |
+| `patrol_interval_minutes` | `3` | 兜底间隔。只查问卷到期、会话没了、投递失败 |
 
 不设 `is_lead` / `delegate_reuse_session`。`session_by_sender` **不强制**：通道会话仍按该 agent 自己的开关。任务隔离靠 md 的 `sender`，不靠专职 lead。协作群建议打开按人隔离，避免 Alice / Bob 共用任务 lead 的对话记忆导致捡单串台。
 
@@ -424,8 +425,7 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 2. **产出按 seq 区间取，起点是"叫醒之前"的 seq**：这样晚一点读、重试再读都取到同一段，不会丢。
    取到空文本**不投递**（不发明假答案），留着下次再来。
 
-真正的窗口只有两个，都不能去掉：**入站 `ask` 的 `agent_wait_timeout_ms`**（人在等回复，到点要先回「处理中」）
-与**探针判断"会话缺失"的宽限 W**（会话可能正在拉起）。
+没有入站等待上限，也没有专家续期次数。专家还活着就等到 idle；会话没了问人。唯一的到期是问卷天数。
 
 `deliver({ sessionParts, messages })` 与 ask 出站同形；@ sender 写在 `atUserIds`。通道 markdown 若不吃 AT，正文同时写 `@name`。通道：`bot_id` 查 webhook（**按 robot.id**），`group_id` 当 toid。缺 `deliver`：只打日志。
 
@@ -449,24 +449,25 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 
 ### 重启
 
-进程起来 `patrol.start()` 扫一次 `jobs/running/`（并重建墙钟定时器）：
+进程起来 `patrol.start()` 扫一次 `jobs/running/`（并重建问卷定时器、挂上巡检间隔）：
 
 1. 专家还 live → 继续等 idle
 2. 专家已 idle 但未叫醒上游 / 未综合 → 按叫醒链补 followup
 3. 已综合但 `deliver` 未成功 → 只重试 deliver
 4. 多份文件各自恢复，互不取消
 
-### 唤醒路径：纯事件驱动（无周期轮询）
+### 唤醒路径：事件 + 兜底间隔
 
-**没有任何周期扫描循环。** 只在四件事上醒来：
+专家做完不等巡检间隔。间隔只兜问卷到期、会话没了和投递失败。
 
 | 触发 | 来源 | 做什么 |
 |---|---|---|
 | 专家会话变 idle | cordis `agent/status` 事件 | `notifyAgentIdle(sessionId)` → `patrol.reconcile`：转 `idle` → 跑这一单（上报/综合/交付） |
-| 专家会话被销毁 | cordis `agent/disposed` 事件 | `notifyAgentDisposed(sessionId)` → 重启那一路；续期耗尽则判 `failed` 并走状态机 |
-| 任务墙钟到点 | **每份任务一个 `setTimeout(deadlineAt - now)`** | 跑这一单的超时分析（顺延/救活/交回给人/收口）；顺延后重排定时器 |
-| 进程启动 | `patrol.start()` | **一次性**扫 `running/`：补上报（订阅生效前完成的工作）+ 重建墙钟定时器 |
-| 有人入站互动 | `ask` 结束后 | **交互兜底**：顺手 `reconcile(该会话)`，漏掉的事件在这一刻补上 |
+| 专家会话被销毁 | cordis `agent/disposed` 事件 | 还在跑 → 问人（不自动重启）。卡在审批 → 判 `failed` 并走状态机 |
+| 问卷到点 | 每份任务一个 `setTimeout(deadlineAt - now)`，间隔也会再查 | 未提醒 → 提醒并再延一个问卷周期；已提醒 → 关单移 `done/` |
+| 巡检间隔 | `patrol_interval_minutes` | 扫 `running/`：问卷到期、会话没了、投递失败 |
+| 进程启动 | `patrol.start()` | 扫一次 `running/`：补上报 + 重建问卷定时器 + 挂间隔 |
+| 有人入站互动 | `ask` 结束后 | **交互兜底**：顺手 `reconcile(该会话)` |
 
 约束与取舍：
 - 事件是**全进程**的：先按键 `boundTaskId(sessionId)` / 扫 `running/` 里 `assignees[].sessionId` 过滤；
@@ -474,9 +475,8 @@ Host 巡检器盯 `running/` 里各 `assignees` 的 idle（活性探针）。人
 - 事件同步 emit，回调里**不 await 重活**（丢微任务，失败只打日志），免得拖慢派发链。
 - `agent/status` / `agent/disposed` 的事件名与 payload **本地声明**，不 import `@deepseek-ai/dsh-agent`
   （该包在插件运行时不可解析；cordis 的 events 是根级单例，插件级 `ctx.on` 收得到全进程事件）。
-- 墙钟定时器是**内存态**：进程重启会丢，由 `start()` 的补扫重建。
-- 没有任何兜底扫描 ⇒ 漏事件的唯一自愈路径是「启动扫一次」与「入站互动时复核」。
-  这是去掉轮询的代价：若事件丢失且无人再与这单互动，该单会停在原地等下一次互动。
+- 问卷定时器是**内存态**：进程重启会丢，由 `start()` 的补扫和间隔重建。
+- 间隔漏看时，下一次间隔或入站互动仍会补上。专家做完不靠间隔。
 
 ### 内置 `ask_user_question` 的接管（按来源分流）
 
@@ -537,58 +537,42 @@ DSH 自带的 `ask_user_question` 会**阻塞**发起它的那一轮，等网页
       没有 → 若原为 need_decision → 回到 running（批准/拒绝后它自己继续）
 ```
 
-**关键语义**：到点分析里 **`need_decision` 不算「还在跑」**。否则等审批的会话一直 alive，
-会被当成"还在做"→ 墙钟无限顺延 + 反复「还在做」。现在它会落到「交回给人拍板」那一支，
-人知道要批，任务留在 `running/` 等人。
+**关键语义**：等审批（`need_decision`）的会话被回收，判 `failed` 并走状态机。还在跑的会话被回收或探针发现没了，问人，不自动重启。
 
 ### 活性探针（非阻塞）
 
-窗口 `W` = 专家 `agent_wait_timeout_ms`；缺字段用全局；`0` fallback 全局。**不再 await `whenIdle`**：
+不再 await `whenIdle`，也不再按窗口续期：
 
 ```
-在被唤起的时刻（事件 / 启动补扫 / 墙钟）对 status=running 的 assignee:
+在被唤起的时刻（事件 / 启动补扫 / 间隔）对 status=running 的 assignee:
   live = agents.get(sessionId)
-  live == undefined:
-      首次发现 → 记 missingSince，先等
-      已挂 >= W → 算一次续期 renew++；renew >= expert_liveness_max_renew(默认3) → failed
-                  否则 ensureAgent + followup(重发 md) 重启
-      （「挂够一个窗口才算一次续期」：轮询变快后不会几秒内把专家误判死）
-  live != undefined:
-      live.status === 'idle' → 转 status=idle（漏事件的兜底），renew 清零
-      否则什么都不做（还在跑；做完有事件通知）
+  live == undefined → 问人（interrupt 问卷 + 问卷墙钟），不判 failed
+  live.status === 'idle' → 转 status=idle（漏事件的兜底）
+  否则什么都不做（还在跑；做完有事件通知）
 ```
 
 「还在执行」= `agents.get(id) != undefined`。不用 seq 推进判断。
 
-探针这轮一旦把某路转成终态（`idle` / `failed`）——含「漏掉 `agent/status` / `agent/disposed` 事件后靠探针兜底判出来的」——**立即走一趟状态机**（上报给 `dispatchedBy` / 综合 / 交付）。事件驱动下没有下一轮循环来兜底，不在这里补一手，通知会被推迟到墙钟（默认 2h）或下次有人互动。
+探针把某路转成终态（`idle` / `failed`）后**立即走一趟状态机**。会话没了不是终态，只问人。
 
-## 超时分层
+## 超时
 
 | 层 | 取值 | 作用 |
 |---|---|---|
-| 入站 `ask` | 全局 `agent_wait_timeout_ms` 默认 30min | **只覆盖派发 / 自己答这一轮** |
-| 专家窗口 W | 同上；可覆盖；`0` fallback 全局 | 巡检器单次 waitIdle |
-| 专家续期 | `expert_liveness_max_renew` 默认 3 | 还在跑则再等 W；挂了则重启再跑 |
-| 任务墙钟 | `task_round_timeout_ms` 默认 **2h** | 初值 `deadlineAt = createdAt + 该值`。**禁止** `0` 表示永不超时 |
+| 入站 `ask` | 无上限 | 没有 `deliver` 就等到 idle；有 `deliver` 立刻回执 |
+| 专家活性 | 无续期 | 还在跑就等事件；会话没了问人 |
+| 问卷墙钟 | `pending_questionnaire_max_days` 默认 7 天 | 发出时 `deadlineAt = 发出时刻 + 天数`。到点先提醒，再一个周期未答则关单 |
+| 巡检间隔 | `patrol_interval_minutes` 默认 3 分钟 | 只兜问卷到期、会话没了、投递失败 |
 
-问卷发出时（`deliver` 给人）把 **该文件** 的 `deadlineAt` 改成「发出时刻 + `task_round_timeout_ms`」——人还没答，不该算任务超时。
-`ask_task_lead` 只叫醒 taskLead、人还没被问：**不**改 `deadlineAt`。回填后回到 running：不再改回 createdAt。
-（实现见 `patrol.sendQuestionnaire`：`deliver` + 顺延 + 重排墙钟定时器。）
+建任务 `deadlineAt = 0`。没有任务墙钟，专家还在跑不会被判超时。
+`ask_task_lead` 只叫醒 taskLead、人还没被问：**不**改 `deadlineAt`。
 
-到点**不一律判死**：先分析这单各专家的会话状态，再决定顺延、继续、综合还是交回给人。
+问卷到点：
 
-| 分析结果（按序判定） | 动作 |
+| 状态 | 动作 |
 |---|---|
-| ① 全部 assignee 终态、无 `pendingHuman` | **顺延墙钟**并走综合：叫醒 taskLead 综合 → 交付 → `done/`（即正常收口，不是超时） |
-| ② 还有专家会话**在跑**（`agents.get(assignee.sessionId) != undefined`，或状态仍 `running`/`waiting`） | **顺延墙钟**（`deadlineAt = now + task_round_timeout_ms`），继续等。同时给人/lead 一次**进度反馈**（「还在做：{name}」）。不判超时、不移文件 |
-| ③ 没人在跑、也没终态（卡住了） | 先**尝试救活**：能重启/重发的继续做（超时、网络一类）→ 回到 ②；救不动 → 走 ④ |
-| ④ 救不动，或原因属**权限 / 审批 / 需人拍板** | **交回给人**：`deliver` 一条「需要你确认」（带 md 摘要 + 卡在哪），任务**留在 `running/`** 等人（人可答、可挪 `cancel/`）；不判 failed |
-| ⑤ 有 `pendingHuman` 且还有人在跑 | 只作废待决（正文记「问卷超时未答」），继续等，**不**整单超时 |
-| ⑥ 有 `pendingHuman` 且没人在跑 | 交回给人（同 ④） |
-
-- 「顺延」= 把 `deadlineAt` 往后推一个 `task_round_timeout_ms`，并**记一次进度**，避免「活得好好地被判超时」。
-- 到点只动 **这一份文件**。已在综合、或 wake 已在 FIFO：做完这次内部 followup，不截杀。
-- 进度反馈的频次由「顺延一次只发一条」保证（同 `deadlineAt` 指纹去重），不刷屏。
+| `pendingHuman.reminded` 不是 true | 提醒「任务问卷还没人回。过期仍未答会关单。」，`deadlineAt` 再延一个周期，留在 `running/` |
+| 已提醒且又到点 | `deliver`「任务问卷超时未答，已关闭。」并移 `done/` |
 
 ## 数据流
 

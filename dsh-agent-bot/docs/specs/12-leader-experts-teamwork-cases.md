@@ -212,17 +212,17 @@ flowchart TD
 ```mermaid
 flowchart TD
   Run["dispatch D 在跑"] --> Live{D live?}
-  Live -->|模型空转 F1| Renew["续期最多 3×窗口 W"]
-  Renew --> Done{idle?}
-  Done -->|是| Text[timeout 文本给派它的人<br/>L 仍可综合<br/>不永久冻]
-  Done -->|否直到上限| Text
-  Live -->|agent 从 registry 消失 F2| Ensure["ensureAgent + 上次未完成再 followup<br/>计入续期次数"]
-  Run --> Wall{"md.createdAt 起<br/>超过 task_round_timeout_ms F3<br/>默认 2h 问卷从发出起算"}
-  Wall -->|到点| Timeout[deliver 处理超时 @owner]
+  Live -->|模型空转 F1| WaitIdle["一直等到 idle<br/>不设等待上限"]
+  WaitIdle --> Done{idle?}
+  Done -->|是| Text[结果报给派它的人<br/>L 仍可综合]
+  Live -->|agent 从 registry 消失 F2| AskHuman["问人继续 / 重开 / 取消<br/>不自动重启"]
+  Run --> Wall{"只有问卷到期<br/>pending_questionnaire_max_days"}
+  Wall -->|第一次| Remind[提醒并再延一个周期]
+  Wall -->|已提醒再到期| Timeout[deliver 问卷超时未答，已关闭]
   Run --> Serial{D=serial<br/>Alice 正在直 @D 画图<br/>L 同时 dispatch D?}
-  Serial -->|是 F4| WaitFifo[FIFO<br/>任务 A 可能拖到墙钟<br/>Bob 的任务不堵]
-  Run --> IdleW{专家层 W 内 idle F5}
-  IdleW -->|是| Close[正常收口<br/>不续期]
+  Serial -->|是 F4| WaitFifo[FIFO<br/>同专家的 write 排队<br/>Bob 的任务不堵]
+  Run --> IdleW{专家 idle F5}
+  IdleW -->|是| Close[正常收口<br/>不等巡检间隔]
 ```
 
 | # | 场景 | 期望 |

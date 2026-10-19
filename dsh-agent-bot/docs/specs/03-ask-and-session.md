@@ -30,7 +30,7 @@
 1. `providerId` 必须已 `registerProvider`；`agentId` 必须存在且可运行（有 workspace）；`sessionParts` 至少一对非空键值。
 2. `parts = sessionPartsForEncode(sessionParts, sender, agent.session_by_sender)`，再 `sessionKey = encodeSessionKey(parts)`。按该 agent 配置决定续或建（见「续接策略」）。
 3. 创建会话时：`cwd = agent.workspace`；挂宿主 `standard` preset；`prompt_placement=system` 时把该 agent 的 prompt 注入 systemPrompt，`user` 时不写 section、每轮接到用户 `context` 后；workspace 内已按 skill 组做好软链（见 [5. Skills Tab](./05-skills.md)）。create 之后必须 `workspaceRegistry.create(cwd, title)` + `attachSession(sessionId)`，否则 GUI 侧边栏落在「未分组」（DSH 引导只发生一次，之后会话只能通过 `attachSession` 入组）。`title` 固定为 `agent_<agent.name>`（name 去首尾空白）。已有同路径记录时 `create` 不改标题，再 `setTitle` 对齐；已是该名则跳过。resume / live 同样 attach 并对齐标题。无 `workspaceRegistry` 时跳过。attach / 改标题失败显式抛错。
-4. `followup(context)` → 等 idle 或全局 `agent_wait_timeout_ms`（从 **followup 实际开始** 起算，排队不消耗本轮超时）。
+4. `followup(context)` → 一直等到 idle（不设等待上限）。排队不消耗本轮。
 5. 返回 `{ messages, pending }`：`messages` 是此刻可发的条；`pending === null` 表示本轮已 `whenIdle` 收口，通道不必再等。仅超时未 idle 时 `pending` 非空，settle 后给剩余条。**空回复**：`messages=[]` 且 `pending=null`，通道发「本轮没有生成内容」（与 pending resolve 空数组同一文案）。v1 出站条固定为**单条 `markdown`**（本轮最后一条助手文本）；多条与 image 为 v2（见「出站条」）。
 6. 同一 `(agentId, sessionKey)` 且 `reuse_session: true` 时走串行队列：FIFO 逐轮执行、不设上限；本轮出站条在 idle 时**同步截取**事件区间（`firstSeq` → 当前），截取完成（或安全阀触发）后才放行下一轮 followup——补发绝不吃到下一轮事件。并行不靠队列，靠配置开关：`session_by_sender: true`（每人一路）或 `reuse_session: false`（每轮新会话），代价见「续接策略」。
 7. **待决决策停车**（见 [12](./12-leader-experts-teamwork.md)）：被派专家缺信息 → `ask_task_lead` 上抛给任务 lead（拒绝 `ask_user_question`，记入任务 md）；任务 lead 能定就改 md 再叫醒提问者，不能定再问人（入站则本轮 messages，内部则 `deliver` 问卷 @owner）。不占原 `ask` 的 pending。**不做**运行时硬匹配，不印问卷码。人 @任务 lead 或 @任一已派专家：谁被 @ 谁读同一份 md 的待决，LLM 自己认。直 @（该专家就是任务 lead）：停车键 `(agentId, sessionKey)`；有待决则本轮 followup 该专家自己认，等 idle 后消费。真答案只进下一次 followup。任务 lead 入站 `ask` 只覆盖派发 turn；巡检综合与入站共用 `(taskLead, sessionKey)` FIFO，不走这次返回值。
@@ -88,9 +88,8 @@ sortedKeys(parts).map(k => parts[k]).join('_')
 
 ## 超时
 
-- 全局 `agent_wait_timeout_ms`：单次 waitIdle 窗口。默认 1800000（30min）；专家 per-agent 可覆盖；专家配 `0` 时 fallback 全局。从 followup 实际开始起算。
-- 任务 lead 派发 turn：仍用全局 `agent_wait_timeout_ms`。任务墙钟见 [12](./12-leader-experts-teamwork.md)。入站 ask 的 pending 安全阀管不到已放行的任务巡检。
-- pending 安全阀：超时后第二段等待仍受墙钟约束；到点仍未 idle 则 settle 本轮。**例外**（见 [12](./12-leader-experts-teamwork.md)）：本轮已落盘任务 md → 出站「已接，正在做」，任务继续；否则通道发「处理超时」。不存在永不 settle 的 pending。
+- 没有 `deliver` 的通道同步等到 idle，不设安全阀，也没有第二段 pending 超时。有 `deliver` 时立刻回执。
+- 问卷寿命与巡检间隔见 [12](./12-leader-experts-teamwork.md)。建任务 `deadlineAt = 0`，不设任务墙钟。
 - 每 agent `session_timeout_minutes`：见上表。默认 30。
 
 ## 出站条

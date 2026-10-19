@@ -9,11 +9,13 @@ import {
   configDirPath,
   agentsFilePath,
   configFilePath,
-  DEFAULT_AGENT_WAIT_TIMEOUT_MS,
+  DEFAULT_PATROL_INTERVAL_MINUTES,
+  DEFAULT_PENDING_QUESTIONNAIRE_MAX_DAYS,
   loadConfig,
   loadSkillsMap,
   normalize,
-  parseAgentWaitTimeoutMs,
+  parsePatrolIntervalMinutes,
+  parsePendingQuestionnaireMaxDays,
   parseUseHubExperts,
   promptsFilePath,
   resetConfigCache,
@@ -56,16 +58,23 @@ describe('configDirPath', () => {
   })
 })
 
-describe('parseAgentWaitTimeoutMs', () => {
-  it('只接受 1000–1800000 的正整数', () => {
-    expect(parseAgentWaitTimeoutMs(180000)).toBe(180000)
-    expect(parseAgentWaitTimeoutMs('60000')).toBe(60000)
-    expect(parseAgentWaitTimeoutMs(0)).toBe(null)
-    expect(parseAgentWaitTimeoutMs(-1)).toBe(null)
-    expect(parseAgentWaitTimeoutMs(999)).toBe(null)
-    expect(parseAgentWaitTimeoutMs(1800001)).toBe(null)
-    expect(parseAgentWaitTimeoutMs(1.5)).toBe(null)
-    expect(parseAgentWaitTimeoutMs('abc')).toBe(null)
+describe('parsePendingQuestionnaireMaxDays', () => {
+  it('只接受 1–365 的整数', () => {
+    expect(parsePendingQuestionnaireMaxDays(7)).toBe(7)
+    expect(parsePendingQuestionnaireMaxDays('14')).toBe(14)
+    expect(parsePendingQuestionnaireMaxDays(0)).toBe(null)
+    expect(parsePendingQuestionnaireMaxDays(366)).toBe(null)
+    expect(parsePendingQuestionnaireMaxDays(1.5)).toBe(null)
+    expect(parsePendingQuestionnaireMaxDays('abc')).toBe(null)
+  })
+})
+
+describe('parsePatrolIntervalMinutes', () => {
+  it('只接受 1–60 的整数', () => {
+    expect(parsePatrolIntervalMinutes(3)).toBe(3)
+    expect(parsePatrolIntervalMinutes('5')).toBe(5)
+    expect(parsePatrolIntervalMinutes(0)).toBe(null)
+    expect(parsePatrolIntervalMinutes(61)).toBe(null)
   })
 })
 
@@ -80,12 +89,14 @@ describe('parseUseHubExperts', () => {
 })
 
 describe('normalize', () => {
-  it('缺字段给默认值；非法超时回退 180000', () => {
+  it('缺字段给默认值；非法问卷天数回退 7', () => {
     const cfg = normalize({
-      agent_wait_timeout_ms: 500,
+      pending_questionnaire_max_days: 0,
+      patrol_interval_minutes: 99,
       agents: [{ id: 'a1', name: '联运' }],
     })
-    expect(cfg.agent_wait_timeout_ms).toBe(DEFAULT_AGENT_WAIT_TIMEOUT_MS)
+    expect(cfg.pending_questionnaire_max_days).toBe(DEFAULT_PENDING_QUESTIONNAIRE_MAX_DAYS)
+    expect(cfg.patrol_interval_minutes).toBe(DEFAULT_PATROL_INTERVAL_MINUTES)
     expect(cfg.skill_roots).toEqual([])
     expect(cfg.skill_groups).toEqual({})
     expect(cfg.prompts).toEqual({})
@@ -106,7 +117,6 @@ describe('normalize', () => {
       session_timeout_minutes: 30,
       concurrency: 'serial',
       needs_target_workspace: false,
-      agent_wait_timeout_ms: undefined,
       sessions: {},
     })
     expect(cfg.skill_apply).toEqual({
@@ -175,12 +185,12 @@ describe('normalize', () => {
     expect(custom.skill_apply).toEqual({ dsh: { workspace: '{workspace}/skills' } })
   })
 
-  it('合法超时保留；agent 无 id 丢弃', () => {
+  it('合法问卷天数保留；agent 无 id 丢弃', () => {
     const cfg = normalize({
-      agent_wait_timeout_ms: 120000,
+      pending_questionnaire_max_days: 14,
       agents: [{ name: '无 id' }, { id: 'ok', name: '有' }],
     })
-    expect(cfg.agent_wait_timeout_ms).toBe(120000)
+    expect(cfg.pending_questionnaire_max_days).toBe(14)
     expect(cfg.agents.map((a) => a.id)).toEqual(['ok'])
   })
 })
@@ -189,7 +199,8 @@ describe('loadConfig / saveConfig', () => {
   it('缺文件给默认值且不落盘', () => {
     const cfg = loadConfig()
     expect(cfg.agents).toEqual([])
-    expect(cfg.agent_wait_timeout_ms).toBe(DEFAULT_AGENT_WAIT_TIMEOUT_MS)
+    expect(cfg.pending_questionnaire_max_days).toBe(DEFAULT_PENDING_QUESTIONNAIRE_MAX_DAYS)
+    expect(cfg.patrol_interval_minutes).toBe(DEFAULT_PATROL_INTERVAL_MINUTES)
     expect(existsSync(configFilePath())).toBe(false)
     expect(existsSync(skillGroupsFilePath())).toBe(false)
     expect(existsSync(promptsFilePath())).toBe(false)
@@ -223,9 +234,8 @@ describe('loadConfig / saveConfig', () => {
       skill_apply: {
         dsh: { global: '~/.dsh/skills', workspace: '{workspace}/.dsh/skills' },
       },
-      agent_wait_timeout_ms: 60000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     }
     saveConfig(data)
@@ -238,9 +248,8 @@ describe('loadConfig / saveConfig', () => {
     expect(loaded.skill_groups.rd.skill_ids).toEqual(['git-skill'])
     expect(loaded.prompts.default.system_prompt).toBe('hi')
     const disk = JSON.parse(readFileSync(configFilePath(), 'utf8')) as Record<string, unknown>
-    expect(disk.agent_wait_timeout_ms).toBe(60000)
-    expect(disk.expert_liveness_max_renew).toBe(3)
-    expect(disk.task_round_timeout_ms).toBe(7200000)
+    expect(disk.pending_questionnaire_max_days).toBe(7)
+    expect(disk.patrol_interval_minutes).toBe(3)
     expect(disk.use_hub_experts).toBe(true)
     expect(loaded.use_hub_experts).toBe(true)
     expect(disk.skill_groups).toBeUndefined()
@@ -269,7 +278,6 @@ describe('loadConfig / saveConfig', () => {
         prompts: { default: { system_prompt: '旧', tools: [] } },
         agents: [{ id: 'a1', name: '联运' }],
         skill_apply: { dsh: { global: '~/.dsh/skills' } },
-        agent_wait_timeout_ms: 60000,
       }),
       'utf8',
     )
@@ -324,9 +332,8 @@ describe('skills-map.json', () => {
       prompts: {},
       agents: [],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const disk = JSON.parse(readFileSync(configFilePath(), 'utf8')) as Record<string, unknown>

@@ -4,7 +4,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `config.json` | `skill_roots`、`skill_apply`、`agent_wait_timeout_ms`、`expert_liveness_max_renew`、`task_round_timeout_ms` |
+| `config.json` | `skill_roots`、`skill_apply`、`pending_questionnaire_max_days`、`patrol_interval_minutes`、`use_hub_experts` |
 | `skill-groups.json` | 技能分组（对象，key = 组 id） |
 | `prompts.json` | Prompt 预设（对象，key = 预设名） |
 | `agents.json` | 智能体数组 |
@@ -23,9 +23,9 @@
     "openclaw": { "global": "~/.openclaw/skills", "workspace": "{workspace}/.openclaw/skills" },
     "claudecode": { "global": "~/.claude/skills", "workspace": "{workspace}/.claude/skills" }
   },
-  "agent_wait_timeout_ms": 1800000,
-  "expert_liveness_max_renew": 3,
-  "task_round_timeout_ms": 7200000
+  "pending_questionnaire_max_days": 7,
+  "patrol_interval_minutes": 3,
+  "use_hub_experts": true
 }
 ```
 
@@ -62,7 +62,6 @@
     "session_by_sender": false,
     "permission_mode": "danger-full-access",
     "concurrency": "serial",
-    "agent_wait_timeout_ms": 1800000,
     "sessions": { "r1_6031348": { "sessionId": "uuid", "lastAskAt": 1730000000000, "promptFingerprint": "你是联运助手" } },
     "session_timeout_minutes": 30
   }
@@ -93,9 +92,8 @@
 | `agents[].session_timeout_minutes` | 仅 `reuse_session: true` 时生效；默认 30；`0` 不因空闲拆会话 |
 | `agents[].concurrency` | 默认 `serial`。cwd 安全阀：`serial` 即使不同 target 的 `write` 也 FIFO；`concurrent` 不同 target 的 `write` 可并行。同 target 的 `write` 一律 FIFO；`read` 一律可并行。见 [12](./12-leader-experts-teamwork.md) |
 | `agents[].needs_target_workspace` | 默认 `false`。`true`：`dispatch_expert` / 直连 / 直 @ 时必须带已存在的绝对路径 `target_workspace`；自己的 `workspace` 仍是技能仓，会话 cwd 不改。直连自己做完把结果抛回调用方会话。见 [12](./12-leader-experts-teamwork.md) |
-| `agents[].agent_wait_timeout_ms` | 可选。缺字段用全局。专家配 `0` 时巡检探针 fallback 全局。任务 lead 派发 turn 用全局窗口；任务墙钟看 `task_round_timeout_ms`，不用本字段表示永不超时 |
-| `expert_liveness_max_renew` | `config.json`。巡检器对专家活性探针续期/重启上限，默认 `3`，整数 ≥ 1 |
-| `task_round_timeout_ms` | `config.json`。任务墙钟，默认 `7200000`（2h），从 md `createdAt` 起算；问卷发出时改成发出时刻 + 该值。到点 `deliver`「处理超时」@owner。入站 ask 的 pending 管不到巡检 |
+| `pending_questionnaire_max_days` | `config.json`。待决问卷最长等待，默认 `7`，整数 1–365。发出时 `deadlineAt = 发出时刻 + 天数`。到点先提醒一次，再一个周期仍未答则关单并移 `done/` |
+| `patrol_interval_minutes` | `config.json`。巡检兜底间隔，默认 `3`，整数 1–60。只兜问卷到期、会话没了和投递失败。专家做完走事件，不等这一拍 |
 | `agents[].sessions` | 运行时维护；槽值 `{ sessionId, lastAskAt, promptFingerprint? }`。`lastAskAt` 为本轮收口 epoch 毫秒。`promptFingerprint` 为本轮注入文本；缺字段视为与当前一致（旧槽继续复用）。配置站不展示、不手改 |
 
 `sessions` 的 key 两种，禁止混用、禁止通道或 UI 手填：

@@ -56,7 +56,8 @@ describe('handleRpc', () => {
     const settings = await handleRpc(host, 'settings', {})
     expect(settings.ok).toBe(true)
     expect((settings.value as { configDir: string }).configDir).toBe(configDir)
-    expect((settings.value as { agent_wait_timeout_ms: number }).agent_wait_timeout_ms).toBe(180000)
+    expect((settings.value as { pending_questionnaire_max_days: number }).pending_questionnaire_max_days).toBe(7)
+    expect((settings.value as { patrol_interval_minutes: number }).patrol_interval_minutes).toBe(3)
     const status = await handleRpc(host, 'status', {})
     expect((status.value as { providers: { id: string }[] }).providers[0].id).toBe('demo')
   })
@@ -209,12 +210,12 @@ describe('handleRpc', () => {
   })
 
   it('saveSettings 校验范围', async () => {
-    const bad = await handleRpc(host, 'saveSettings', { agent_wait_timeout_ms: 500 })
+    const bad = await handleRpc(host, 'saveSettings', { pending_questionnaire_max_days: 0 })
     expect(bad.ok).toBe(false)
-    const ok = await handleRpc(host, 'saveSettings', { agent_wait_timeout_ms: '120000' })
+    const ok = await handleRpc(host, 'saveSettings', { pending_questionnaire_max_days: '14', patrol_interval_minutes: '5' })
     expect(ok.ok).toBe(true)
-    expect((ok.value as { agent_wait_timeout_ms: number }).agent_wait_timeout_ms).toBe(120000)
-    expect(loadConfig().agent_wait_timeout_ms).toBe(120000)
+    expect((ok.value as { pending_questionnaire_max_days: number }).pending_questionnaire_max_days).toBe(14)
+    expect(loadConfig().patrol_interval_minutes).toBe(5)
   })
 
   it('ask 端点校验必填并回执', async () => {

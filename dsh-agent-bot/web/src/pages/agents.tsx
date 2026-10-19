@@ -28,7 +28,6 @@ type Agent = {
   permission_mode?: string
   concurrency?: string
   needs_target_workspace?: boolean
-  agent_wait_timeout_ms?: number
 }
 type Prompt = { name: string }
 type Group = { id: string; name: string }
@@ -69,7 +68,7 @@ function workspaceTargets(apply: Apply) {
 const empty = {
   name: '', slug: '', description: '', workspace: '', prompt: '', placement: 'system', groups: [] as string[],
   append: true, reuse: true, bySender: false, timeout: '30', permission: 'danger-full-access',
-  concurrency: 'serial', needsTarget: false, wait: '',
+  concurrency: 'serial', needsTarget: false,
 }
 
 export function AgentsPage() {
@@ -115,7 +114,6 @@ export function AgentsPage() {
       permission: agent.permission_mode || 'danger-full-access',
       concurrency: agent.concurrency === 'concurrent' ? 'concurrent' : 'serial',
       needsTarget: !!agent.needs_target_workspace,
-      wait: typeof agent.agent_wait_timeout_ms === 'number' ? String(agent.agent_wait_timeout_ms) : '',
     } : empty)
     const opts = workspaceTargets(apply)
     setToolKey(opts[0] ? opts[0].tool + '\t' + opts[0].slot : '')
@@ -132,7 +130,6 @@ export function AgentsPage() {
       session_by_sender: form.bySender, permission_mode: form.permission,
       session_timeout_minutes: Number(form.timeout), concurrency: form.concurrency,
       needs_target_workspace: form.needsTarget,
-      agent_wait_timeout_ms: form.wait.trim() === '' ? undefined : Number(form.wait),
     })
     if (!r.ok) { toast.error(r.error || '保存失败'); return }
     const dropped = r.value?.droppedSkillGroupIds || []
@@ -262,9 +259,6 @@ export function AgentsPage() {
               </NativeSelect>
             </Field>
             <label className="flex min-h-8 items-center gap-2 text-sm"><Checkbox checked={form.needsTarget} onCheckedChange={(v) => set('needsTarget', v === true)} />需要目标项目目录</label>
-            <Field label="本轮等待" hint="毫秒，空=用全局，0=回退全局。">
-              <Input className="max-w-xs tabular-nums" type="number" min={0} value={form.wait} onChange={(e) => set('wait', e.target.value)} placeholder="全局" />
-            </Field>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>取消</Button>

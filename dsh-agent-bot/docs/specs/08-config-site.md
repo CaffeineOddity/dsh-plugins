@@ -11,7 +11,7 @@
 | `/agent-bot` 或 `/agent-bot/skills` | [5. Skills](./05-skills.md)：页内 Tab「技能仓 / skills组」；技能仓添加目录、每行扫描/删除（桌面原生弹窗，移动端列表） |
 | `/agent-bot/prompts` | [6. Prompts](./06-prompts.md) CRUD |
 | `/agent-bot/agents` | [7. Agents](./07-agent-tab.md) CRUD；workspace 同技能仓选目录 |
-| `/agent-bot/settings` | 全局 `agent_wait_timeout_ms`、`task_round_timeout_ms`、配置目录只读、在线 Provider 列表 |
+| `/agent-bot/settings` | 全局 `pending_questionnaire_max_days`、`patrol_interval_minutes`、专家清单开关、配置目录只读、在线 Provider 列表 |
 | `/agent-bot/log` | 启动/ask/扫描日志尾 |
 
 Host RPC：`POST /agent-bot-rpc`，信封 `{ endpoint, payload }`（避免该 dsh 版本 `connection.rpc.handle` 的 webServer inject 问题）。

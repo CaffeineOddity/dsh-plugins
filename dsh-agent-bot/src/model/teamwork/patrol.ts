@@ -14,12 +14,12 @@ import { buildRelay, resolveFenceDir, taskSlotKey, type RelayHost } from './rela
 import { marshalText } from './board-tools.js'
 import { encodeSessionKey, sessionPartsForEncode, type AgentOutboundMessage } from '../../types.js'
 import { summarizeOwnedInterval, toMarkdownMessages, waitIdleOrTimeout } from '../ask.js'
-import { loadConfig, type AgentConfig } from '../config.js'
+import { loadConfig, questionnaireDeadlineAt } from '../config.js'
 import { hasPendingDownstream, isTerminal, terminalFingerprint, wakeFingerprint, wakeSessionIdFor, wakeText } from './wake.js'
 import { ASK_TOOL_NAME, openAskCalls, openApprovals, parseAskQuestions } from './intercept.js'
 import { advanceWriteQueue, isWaitingForLock, releaseAndAdvance, resumeWaiting } from './fence.js'
-import { agentAlive, ensureLive, followup, restartExpert, reviveDead } from './liveness.js'
-import { deliverToSender, hasEventsAfter, notifyApprovalWait, notifyProgress } from './deliver.js'
+import { ensureLive, followup } from './liveness.js'
+import { deliverToSender, hasEventsAfter, notifyApprovalWait } from './deliver.js'
 
 export interface PatrolHost extends RelayHost {
   /** 路由到对应通道 provider 的 deliver（无则打日志）。 */
@@ -33,12 +33,6 @@ const DEFAULT_ASK_HANDOFF_GRACE_MS = 10_000
 const RECONCILE_MS = 5_000
 
 export interface PatrolOptions {
-  /** 活性探针每轮等待窗口（缺省用专家 agent_wait_timeout_ms，0 fallback 全局）。 */
-  windowMs?: number
-  /** 专家续期上限（缺省用全局 expert_liveness_max_renew）。 */
-  maxRenew?: number
-  /** 任务墙钟（缺省用全局 task_round_timeout_ms）。 */
-  roundTimeoutMs?: number
   /** ask_user_question 转交人的宽限期（ms）。缺省 10s。 */
   askHandoffGraceMs?: number
   /** 收口投递最多重试几次（缺省 5）；超了就把文本落进 md 正文并停止重投。 */
@@ -89,6 +83,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   const lastScheduledDeadline = new Map<string, number>() // taskId -> 已排的 deadlineAt（避免重复排）
   let lastReconcileAt = 0
   let stopped = false
+  let intervalTimer: ReturnType<typeof setTimeout> | undefined
 
   /**
    * 收口清理：任务文件被人挪走（进了 done/ 或手工 cancel/）后，把还指向它的会话解绑，
@@ -140,6 +135,23 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     stopped = false
     await tickOnce()
     for (const task of listTasksIn('running')) scheduleDeadline(task)
+    armInterval()
+  }
+
+  /** 兜底间隔：只查问卷到期、会话没了、投递失败。专家做完走事件，不等这一拍。 */
+  function armInterval(): void {
+    if (stopped) return
+    const ms = loadConfig().patrol_interval_minutes * 60_000
+    intervalTimer = setTimeout(() => {
+      void tickOnce()
+        .catch((err: unknown) => {
+          console.warn(`agent-bot: 巡检间隔失败: ${err instanceof Error ? err.message : String(err)}`)
+        })
+        .finally(() => {
+          if (!stopped) armInterval()
+        })
+    }, ms)
+    intervalTimer.unref?.()
   }
 
   /** 墙钟定时器：每份任务一个，到点触发一次（不再靠轮询比较 deadlineAt）。 */
@@ -192,27 +204,15 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
 
   function stop(): void {
     stopped = true
+    if (intervalTimer !== undefined) clearTimeout(intervalTimer)
+    intervalTimer = undefined
     for (const taskId of [...deadlineTimers.keys()]) clearDeadline(taskId)
     for (const t of askTimers.values()) clearTimeout(t)
     askTimers.clear()
   }
 
-  function windowFor(agent: AgentConfig): number {
-    if (options.windowMs !== undefined && options.windowMs > 0) return options.windowMs
-    // 专家 agent_wait_timeout_ms；`0` fallback 全局
-    const a = agent.agent_wait_timeout_ms
-    if (a === undefined) return loadConfig().agent_wait_timeout_ms
-    if (a === 0) return loadConfig().agent_wait_timeout_ms
-    return a
-  }
-
-  function maxRenew(): number {
-    return options.maxRenew ?? loadConfig().expert_liveness_max_renew
-  }
-
-  /** 任务墙钟。 */
-  function roundTimeoutMs(): number {
-    return options.roundTimeoutMs ?? loadConfig().task_round_timeout_ms
+  function questionnaireDays(): number {
+    return loadConfig().pending_questionnaire_max_days
   }
 
   /** 检测到挂起的 ask_user_question → 宽限期后转交给人（IM 任务才接管）。 */
@@ -278,13 +278,6 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     writeTask('running', fresh)
   }
 
-  /** 顺延墙钟：deadlineAt 推到「现在 + 一个墙钟」。 */
-  function deferDeadline(task: TaskBoard): void {
-    task.deadlineAt = Date.now() + roundTimeoutMs()
-    writeTask('running', task)
-    scheduleDeadline(task)
-  }
-
   /**
    * 去重叫醒：同一「完成情况指纹」只叫一次。返回是否真的叫到了。
    * 巡检每轮都扫同一份文件，没有这层就会对同一个人反复灌 followup。
@@ -310,39 +303,22 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     const allDone = task.assignees.length > 0 && task.assignees.every(isTerminal)
     const hadAssignees = task.assignees.length > 0
 
-    // 墙钟到点：不一律判死，先分析各专家会话状态（specs/12 §超时分层）
-    if (task.deadlineAt > 0 && now >= task.deadlineAt) {
-      const pending = task.pendingHuman !== undefined
-      const unfinished = task.assignees.filter((a) => !isTerminal(a))
-      // need_decision = 卡在等人批准：不算「还在跑」，否则会被无限顺延
-      const someoneAlive = unfinished.some((a) => a.status !== 'need_decision' && agentAlive(a, host))
-
-      if (allDone && !pending) {
-        // ① 都做完了没综合 → 就走下面的正常收口（不是超时）
-      } else if (someoneAlive) {
-        // ② 还有人活着在做 → 顺延，只给进度反馈（同一 deadlineAt 指纹去重，不刷屏）
-        await notifyProgress(task, unfinished, host, notified)
-        deferDeadline(task)
-        return
-      } else if (pending) {
-        // ⑥ 有问卷但没人在跑 → 交回给人拍板，留在 running/ 等人
-        await askHumanToDecide(task, '还有问题等你确认')
-        deferDeadline(task)
-        return
-      } else if (unfinished.length > 0) {
-        // ③ 没人在跑也没终态：先尝试救活（超时/网络一类）
-        const revived = await reviveDead(task, unfinished, host)
-        if (revived) {
-          await notifyProgress(task, unfinished, host, notified)
-          deferDeadline(task)
-          return
-        }
-        // ④ 救不动（含权限/审批/需拍板）→ 交回给人，留在 running/
-        await askHumanToDecide(task, '有专家卡住、需要你确认后才能继续')
-        deferDeadline(task)
+    // 问卷到期才看 deadlineAt。建任务时 deadlineAt=0，专家还在跑不靠墙钟收口。
+    if (task.pendingHuman !== undefined && task.deadlineAt > 0 && now >= task.deadlineAt) {
+      if (task.pendingHuman.reminded !== true) {
+        const next = questionnaireDeadlineAt(now, questionnaireDays())
+        patchTask(task.taskId, (t) => {
+          if (t.pendingHuman !== undefined) t.pendingHuman.reminded = true
+          t.deadlineAt = next
+        })
+        await deliverToSender(task, '任务问卷还没人回。过期仍未答会关单。', host)
+        scheduleDeadline({ ...task, deadlineAt: next })
         return
       }
-      // ⑤ 无 assignee 也无待决：无事可做，继续走收口判定
+      await deliverToSender(task, '任务问卷超时未答，已关闭。', host)
+      if (readTask('running', task.taskId) !== undefined) moveTask('running', 'done', task.taskId)
+      clearDeadline(task.taskId)
+      return
     }
 
     // 待决：给人发的问卷 → deliver 问卷 + 顺延墙钟；上抛给 lead 的 → 叫醒 taskLead 拍板
@@ -566,8 +542,8 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
     const ok = await deliverToSender(task, `${body}${tail}\n\n（回一句 @${task.leadName} 即可；不想做了可把任务文件挪到 jobs/cancel/）`, host)
     if (!ok) return false
     notified.set(key, fingerprint)
-    // 问卷发出 → 墙钟顺延（spec：发出时刻 + task_round_timeout_ms）
-    const nextDeadline = Date.now() + roundTimeoutMs()
+    // 问卷发出 → 墙钟改成「发出时刻 + pending_questionnaire_max_days」
+    const nextDeadline = questionnaireDeadlineAt(Date.now(), questionnaireDays())
     patchTask(task.taskId, (t) => { t.deadlineAt = nextDeadline })
     scheduleDeadline({ ...task, deadlineAt: nextDeadline })
     return true
@@ -579,14 +555,42 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   }
 
   /**
-   * 活性探针：对 running/waiting 的 assignee 做一轮 waitIdleOrTimeout(W)。
-   * 一轮一次 wait，避免 run() 循环被单份卡死；续期计数在内存里跨轮累积。
-   * ——写进 md（status/收口文本）这一层交回普通巡逻（下轮 scan 收敛），本函数只管「该不该重启」。
+   * 会话没了：不自动重启、不按次数判死。问人怎么处理，并挂上问卷墙钟。
+   * 同一专家已在等这份打断问卷时不重复问。
    */
+  async function interruptMissing(task: TaskBoard, a: Assignee): Promise<void> {
+    const fresh = readTask('running', task.taskId)
+    if (fresh === undefined) return
+    const row = fresh.assignees.find((x) => x.expertId === a.expertId)
+    if (row === undefined || row.status !== 'running') return
+    if (fresh.pendingHuman?.kind === 'interrupt' && fresh.pendingHuman.interruptedExpertId === a.expertId) return
+    const now = Date.now()
+    const questions = ['专家会话没了，怎么处理这一路？继续 / 重开 / 取消']
+    patchTask(task.taskId, (t) => {
+      const x = t.assignees.find((y) => y.expertId === a.expertId)
+      if (x !== undefined && x.status === 'running') x.status = 'need_decision'
+      t.pendingHuman = {
+        questions,
+        askedBy: t.taskLead,
+        askedAt: now,
+        toHuman: true,
+        reminded: false,
+        kind: 'interrupt',
+        interruptedExpertId: a.expertId,
+      }
+      t.deadlineAt = questionnaireDeadlineAt(now, questionnaireDays())
+      t.body = `${t.body}\n\n专家 ${a.expertId} 会话没了，等人拍板。`.trim()
+    })
+    const after = readTask('running', task.taskId)
+    if (after === undefined) return
+    await sendQuestionnaire(after, questions, '专家会话没了，需要你确认')
+    syncDeadline(after.taskId)
+  }
+
   /**
    * 活性探针（非阻塞）：不再 await whenIdle。
-   *  - 会话已 idle（读到 agent.status，或事件已转态）→ 转 status=idle，交给上报链
-   *  - 会话没了 → 续期计数；耗尽判 failed，否则重启重发
+   *  - 会话已 idle → 转 status=idle，交给上报链
+   *  - 会话没了 → 问人，不续期、不自动重启
    *  - 还在跑 → 什么都不做（做完会有 agent/status 事件通知）
    */
   async function probeTask(task: TaskBoard): Promise<void> {
@@ -622,42 +626,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
       if (a.status !== 'running') continue
       const live = host.agents()?.get(a.sessionId) as AgentLike | undefined
       if (live === undefined) {
-        // 非阻塞版：挂够一个窗口（W）才算一次续期，避免轮询变快后几秒内就把专家判死
-        const nowMs = Date.now()
-        const missingSince = a.missingSince ?? 0
-        if (missingSince === 0) {
-          // 首次发现缺失：记时间戳（落盘，进程重启后仍按此窗口判）
-          patchTask(task.taskId, (t) => {
-            const x = t.assignees.find((y) => y.expertId === a.expertId)
-            if (x !== undefined) x.missingSince = nowMs
-          })
-          continue
-        }
-        if (nowMs - missingSince < windowFor(cfg)) continue
-        const renew = (a.renew ?? 0) + 1
-        if (renew >= maxRenew()) {
-          a.status = 'failed'
-          patchTask(task.taskId, (t) => {
-            const x = t.assignees.find((y) => y.expertId === a.expertId)
-            if (x !== undefined) {
-              x.status = 'failed'
-              x.renew = undefined
-              x.missingSince = undefined
-            }
-          })
-          await releaseAndAdvance(task, a, cfg, relay)
-          terminalChanged = true
-          continue
-        }
-        // 续期计数 + 时间戳落盘（进程重启后仍按此续期，不重置）
-        patchTask(task.taskId, (t) => {
-          const x = t.assignees.find((y) => y.expertId === a.expertId)
-          if (x !== undefined) {
-            x.renew = renew
-            x.missingSince = nowMs
-          }
-        })
-        await restartExpert(task, cfg, a, host)
+        await interruptMissing(task, a)
         continue
       }
       // 会话在：清掉续期计数（若有残留），避免重启后误判
@@ -696,18 +665,17 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
   }
 
   /**
-   * 事件入口：某会话被销毁（`agent/disposed`）→ 它那一路要么重启、要么判死。
-   * 替代原来轮询里的「会话缺失」分支。
+   * 事件入口：某会话被销毁（`agent/disposed`）。
+   * 还在跑 → 问人，不自动重启。卡在审批 → 审批窗口没了，判 failed。
    */
   async function handleDisposed(sessionId: string): Promise<void> {
     if (sessionId === '' || stopped) return
     for (const task of listTasksIn('running')) {
       const a = task.assignees.find((x) => x.sessionId === sessionId && (x.status === 'running' || x.status === 'need_decision'))
       if (a === undefined) continue
-      const cfg = getAgentConfig(a.expertId)
-      if (cfg === undefined) continue
-      // need_decision（卡在等审批）的会话被回收 = 审批窗口消失、重启也接不回那个审批：直接判 failed 走状态机
       if (a.status === 'need_decision') {
+        // 已经在问「会话没了」：再来一次 disposed 不是审批窗口消失。
+        if (task.pendingHuman?.kind === 'interrupt' && task.pendingHuman.interruptedExpertId === a.expertId) continue
         a.status = 'failed'
         a.renew = undefined
         a.missingSince = undefined
@@ -715,19 +683,7 @@ export function createPatrol(host: PatrolHost, options: PatrolOptions = {}): Pat
         await patrolTask(task)
         continue
       }
-      const renew = (a.renew ?? 0) + 1
-      if (renew >= maxRenew()) {
-        a.status = 'failed'
-        a.renew = undefined
-        a.missingSince = undefined
-      } else {
-        a.renew = renew
-        if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
-        await restartExpert(task, cfg, a, host)
-        continue
-      }
-      if (readTask('running', task.taskId) !== undefined) writeTask('running', task)
-      await patrolTask(task)
+      await interruptMissing(task, a)
     }
   }
 

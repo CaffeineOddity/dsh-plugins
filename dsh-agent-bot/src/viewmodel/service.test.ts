@@ -75,17 +75,7 @@ function idleNow(): Promise<void> {
   return Promise.resolve()
 }
 
-/** 上一轮立刻闲；本轮与 pending 二次竞速永不 idle。 */
-function hangAfterFirstIdle(): () => Promise<void> {
-  let calls = 0
-  return () => {
-    calls += 1
-    if (calls === 1) return Promise.resolve()
-    return new Promise(() => undefined)
-  }
-}
-
-function seedRunnableAgent(sessionBySender: boolean, timeoutMs: number): void {
+function seedRunnableAgent(sessionBySender: boolean): void {
   mkdirSync(join(configDir, 'ws'), { recursive: true })
   saveConfig({
     skill_roots: [],
@@ -111,9 +101,8 @@ function seedRunnableAgent(sessionBySender: boolean, timeoutMs: number): void {
       },
     ],
     skill_apply: {},
-    agent_wait_timeout_ms: timeoutMs,
-    expert_liveness_max_renew: 3,
-    task_round_timeout_ms: 7200000,
+    pending_questionnaire_max_days: 7,
+    patrol_interval_minutes: 3,
     use_hub_experts: true,
   })
 }
@@ -182,9 +171,8 @@ describe('listAgents / getAgent', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const svc = createAgentBotService(emptyHostServices())
@@ -275,9 +263,8 @@ describe('ask 校验先于回合', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const svc = createAgentBotService(fakeHost([], idleNow))
@@ -315,9 +302,8 @@ describe('ask 校验先于回合', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const svc = createAgentBotService(
@@ -377,9 +363,8 @@ describe('ask 校验先于回合', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const svc = createAgentBotService(fakeHost([], idleNow))
@@ -421,9 +406,8 @@ describe('ask 校验先于回合', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const svc = createAgentBotService(fakeHost([], idleNow))
@@ -441,9 +425,8 @@ describe('ask 校验先于回合', () => {
       prompts: { default: { system_prompt: '新文', tools: [] } },
       agents: [cfg],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     await svc.ask({ ...req, meta: { ...req.meta, traceId: 't2' } })
@@ -478,9 +461,8 @@ describe('ask 校验先于回合', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const followups: unknown[] = []
@@ -518,9 +500,8 @@ describe('ask 校验先于回合', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const followups: unknown[] = []
@@ -558,9 +539,8 @@ describe('ask 校验先于回合', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const followups: unknown[] = []
@@ -598,9 +578,8 @@ describe('ask 校验先于回合', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const svc = createAgentBotService(emptyHostServices())
@@ -645,9 +624,8 @@ describe('ask 校验先于回合', () => {
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     let disposed = 0
@@ -692,7 +670,7 @@ describe('ask 校验先于回合', () => {
   })
 
   it('session_by_sender 按人编 key 并写槽', async () => {
-    seedRunnableAgent(true, 180000)
+    seedRunnableAgent(true)
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     await svc.ask(askReq('t1', 'alice'))
@@ -702,27 +680,23 @@ describe('ask 校验先于回合', () => {
   })
 
   it('空回复：idle 且无助手文本 → messages=[] pending=null', async () => {
-    seedRunnableAgent(false, 180000)
+    seedRunnableAgent(false)
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     await expect(svc.ask(askReq('t1', 'alice'))).resolves.toEqual({ messages: [], pending: null })
   })
 
-  it('pending 安全阀到点 reject，不把超时文案塞进 messages', async () => {
-    seedRunnableAgent(false, 1000)
-    const svc = createAgentBotService(fakeHost([], hangAfterFirstIdle()))
+  it('没有 deliver 时等到 idle，不设安全阀', async () => {
+    seedRunnableAgent(false)
+    const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
-    const result = await svc.ask(askReq('t1', 'alice'))
-    expect(result.messages).toEqual([])
-    expect(result.pending).not.toBeNull()
-    expect(JSON.stringify(result.pending)).toBe('{}')
-    await expect(result.pending).rejects.toThrow(/pending 安全阀超时/)
+    await expect(svc.ask(askReq('t1', 'alice'))).resolves.toEqual({ messages: [], pending: null })
   })
 })
 
 describe('出站按通道能力分档（specs/12 §入站出站）', () => {
   it('通道有 deliver → 立刻回执；这一轮产出异步推回', async () => {
-    seedRunnableAgent(false, 180000)
+    seedRunnableAgent(false)
     const events = [
       { seq: 1, type: 'turn/start' },
       { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '答案在此' }] } } },
@@ -742,7 +716,7 @@ describe('出站按通道能力分档（specs/12 §入站出站）', () => {
   })
 
   it('异步模式（有 deliver）：人回话后同样自动清待决（回合结束后在后台做）', async () => {
-    seedRunnableAgent(false, 180000)
+    seedRunnableAgent(false)
     const { createTask, readTask, writeTask } = await import('../model/teamwork/task-board.js')
     const t = createTask({
       taskLead: 'a1', sender: 'alice', providerId: 'demo',
@@ -762,7 +736,7 @@ describe('出站按通道能力分档（specs/12 §入站出站）', () => {
   })
 
   it('通道没有 deliver → 保持同步：直接回这一轮的文本（退化路径）', async () => {
-    seedRunnableAgent(false, 180000)
+    seedRunnableAgent(false)
     const events = [
       { seq: 1, type: 'turn/start' },
       { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '同步答案' }] } } },
@@ -803,9 +777,8 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
         { ...base, id: 'a2', name: '设计师' },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: useHubExperts,
     })
   }
@@ -843,7 +816,7 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
   })
 
   it('人 @lead 说完这一轮 → 旧问卷待决自动清掉', async () => {
-    seedRunnableAgent(false, 180000)
+    seedRunnableAgent(false)
     const { createTask, readTask, writeTask } = await import('../model/teamwork/task-board.js')
     const t = createTask({
       taskLead: 'a1', sender: 'alice', providerId: 'demo',
@@ -861,7 +834,7 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
   })
 
   it('local 的 deliver：回给发起那一单的 DSH 会话（活着就推进去）', async () => {
-    seedRunnableAgent(false, 180000)
+    seedRunnableAgent(false)
     const pushed: string[] = []
     // 假 host：把发起会话 id 当成一条活会话
     const host = {
@@ -884,7 +857,7 @@ describe('入站登记入站上下文（specs/12 §入站怎么绑任务）', ()
   })
 
   it('local 的 deliver：会话不在线 → 落收件箱兜底，可被取走', async () => {
-    seedRunnableAgent(false, 180000)
+    seedRunnableAgent(false)
     const svc = createAgentBotService(fakeHost([], idleNow))
     const deliver = svc.providerDeliver('local')!
     await deliver({ sessionParts: { provider_id: 'local', session: 'gone' }, messages: [{ kind: 'markdown', text: '还在做：B', url: '', atUserIds: [], atAll: false }] })
@@ -946,9 +919,8 @@ describe('直连 needs_target_workspace：会话开在专家工作区，做完�
         },
       ],
       skill_apply: {},
-      agent_wait_timeout_ms: 180000,
-      expert_liveness_max_renew: 3,
-      task_round_timeout_ms: 7200000,
+      pending_questionnaire_max_days: 7,
+      patrol_interval_minutes: 3,
       use_hub_experts: true,
     })
     const events = [
@@ -1019,7 +991,7 @@ describe('直连 needs_target_workspace：会话开在专家工作区，做完�
   })
 
   it('同一会话自己做完不建 job', async () => {
-    seedRunnableAgent(false, 180000)
+    seedRunnableAgent(false)
     const svc = createAgentBotService(fakeHost([], idleNow))
     svc.registerProvider({ id: 'demo', label: '示例通道' })
     await svc.ask(askReq('t-same', 'alice'))

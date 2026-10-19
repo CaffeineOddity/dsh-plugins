@@ -70,9 +70,9 @@ race(whenIdle(), timeout)     // idle = 本轮 DSH loop 结束；从 followup �
 return { messages, pending }
 ```
 
-「一轮结束」= 这次 `followup` 对应的 agent loop 回到 idle（或安全阀超时）。
+「一轮结束」= 这次 `followup` 对应的 agent loop 回到 idle。没有等待上限，也不再有第二段 pending 超时。
 
-超时且还没正文：`messages` 可空，`pending = 第二次 race(whenIdle(), agent_wait_timeout_ms)`——第二段等待同样用 `agent_wait_timeout_ms`，到点 reject（总上限 2× 配置值），不存在永不 settle 的 pending。同一 `(agentId, sessionKey)` 且 `reuse_session: true` 时走 **串行队列**（FIFO、不设上限、超时只计自己那轮）；并行靠 `session_by_sender` / `reuse_session: false` 配置开关。本轮收口时把 `lastAskAt` 写回 `sessions[key]` 并落盘。
+同一 `(agentId, sessionKey)` 且 `reuse_session: true` 时走 **串行队列**（FIFO、不设上限）；并行靠 `session_by_sender` / `reuse_session: false` 配置开关。本轮收口时把 `lastAskAt` 写回 `sessions[key]` 并落盘。
 
 ## `messages` 不是一直 pending
 
@@ -87,10 +87,9 @@ return { messages, pending }
 
 对应 DSH：
 
-1. `whenIdle` 在超时前到：本轮 loop 结束 → `messages` = 本轮条，`pending = null`。`messages` 非空则发完即结束；**空则发「本轮没有生成内容」**。不必再问大脑。
-2. 先超时、`whenIdle` 还没到：`messages` 里若已有字就先发；`pending = 第二次 race(whenIdle(), agent_wait_timeout_ms)`。idle 之后 `pending` resolve，通道再发剩余条——**这时才算结束**。
-3. `pending` reject（安全阀到点）：通道发「处理超时」，本轮也结束。
-4. `pending` resolve 空（正常收尾但无输出）：通道发「本轮没有生成内容」。
+1. `whenIdle` 到了：本轮 loop 结束 → `messages` = 本轮条，`pending = null`。`messages` 非空则发完即结束；**空则发「本轮没有生成内容」**。不必再问大脑。
+2. 没有等待上限。通道没有 `deliver` 时一直等到 idle，不再有第二段 pending 超时。
+3. `pending` resolve 空（正常收尾但无输出）：通道发「本轮没有生成内容」。
 
 常见路径是 1：大多数回合 `pending` 直接是 `null`，并不是每条消息都挂着 pending。
 
@@ -104,7 +103,7 @@ const { messages, pending } = await bot.ask(...)
 if (messages.length > 0) await sendAll(messages)
 else if (pending === null) await sendText('本轮没有生成内容')
 if (pending !== null) {
-  const rest = await pending   // 第二次 race(whenIdle(), agent_wait_timeout_ms)
+  const rest = await pending   // 没有 deliver 时这里不应再出现；有 deliver 的通道走异步回执
   if (rest.length === 0) await sendText('本轮没有生成内容')
   else await sendAll(rest)
 }

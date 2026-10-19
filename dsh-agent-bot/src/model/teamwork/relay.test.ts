@@ -32,7 +32,6 @@ function persistAgent(): AgentConfig {
     session_timeout_minutes: 30,
     concurrency: 'serial',
     needs_target_workspace: false,
-    agent_wait_timeout_ms: 0,
   } satisfies AgentWrite)
   bobId = wrote.agent.id
   return wrote.agent

@@ -222,9 +222,8 @@ export function saveSkillRoots(skillRoots: string[]): void {
     prompts: cfg.prompts,
     agents: cfg.agents,
     skill_apply: cfg.skill_apply,
-    agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
-    expert_liveness_max_renew: cfg.expert_liveness_max_renew,
-    task_round_timeout_ms: cfg.task_round_timeout_ms,
+    pending_questionnaire_max_days: cfg.pending_questionnaire_max_days,
+    patrol_interval_minutes: cfg.patrol_interval_minutes,
     use_hub_experts: cfg.use_hub_experts,
   })
 }
@@ -417,9 +416,8 @@ function persistGroups(groups: Record<string, SkillGroupConfig>): void {
     prompts: cfg.prompts,
     agents,
     skill_apply: cfg.skill_apply,
-    agent_wait_timeout_ms: cfg.agent_wait_timeout_ms,
-    expert_liveness_max_renew: cfg.expert_liveness_max_renew,
-    task_round_timeout_ms: cfg.task_round_timeout_ms,
+    pending_questionnaire_max_days: cfg.pending_questionnaire_max_days,
+    patrol_interval_minutes: cfg.patrol_interval_minutes,
     use_hub_experts: cfg.use_hub_experts,
   }
   saveConfig(next)

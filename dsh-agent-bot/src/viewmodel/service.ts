@@ -490,8 +490,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
         const contextForAgent = placement.notice === '' ? contextWithBoard : `${contextWithBoard}\n\n${placement.notice}`
         // 出站模式按**通道能力**分档（specs/12 §入站出站）：
         //   通道有 deliver → 异步：立刻回一条回执，这一轮的产出等回合结束经 deliver 推回去
-        //                    （通道再也不会因为等 agent 而超时；本轮 W 不参与）
-        //   通道没 deliver → 同步：等这一轮（最多 W），拿文本当回复（退化路径）
+        //   通道没 deliver → 同步：一直等到这一轮 idle，不设等待上限
         const canPush = providers.get(req.meta.providerId)?.deliver !== undefined
         if (canPush) {
           const firstSeq = await startFollowupTurn(agent, contextForAgent)
@@ -510,7 +509,7 @@ export function createAgentBotService(host: HostServices): AgentBotHostService {
             pending: null,
           }
         }
-        const result = await settleAskRound(agent, contextForAgent, loadConfig().agent_wait_timeout_ms)
+        const result = await settleAskRound(agent, contextForAgent, 0)
         // 落的是**实际用的那条槽**（软路由可能把它放进了任务槽）
         touchSession(
           live.id,

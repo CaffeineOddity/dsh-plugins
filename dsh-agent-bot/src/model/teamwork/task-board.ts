@@ -6,7 +6,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { jobsRootPath, loadConfig } from '../config.js'
+import { jobsRootPath } from '../config.js'
 
 /** 任务目录状态。todo=建好未开工；running=至少一路在做；done=已交付收口；cancel=人手工取消。 */
 export type TaskStatus = 'todo' | 'running' | 'done' | 'cancel'
@@ -50,8 +50,13 @@ export interface PendingHuman {
   questions: string[]
   askedBy: string
   askedAt: number
-  /** true=这是给**人**的问卷（要 deliver @sender 并把墙钟顺延）；缺省=只上抛给 taskLead。 */
+  /** true=这是给**人**的问卷（要 deliver @sender 并改 deadlineAt）；缺省=只上抛给 taskLead。 */
   toHuman?: boolean
+  /** 问卷到期已提醒过一次。再到期则关单。 */
+  reminded?: boolean
+  /** interrupt=专家会话没了，等人拍板。 */
+  kind?: 'interrupt'
+  interruptedExpertId?: string
 }
 
 /** 一份任务的前台字段（运行时读写）。 */
@@ -184,6 +189,11 @@ function parsePendingHuman(raw: unknown, where: string): PendingHuman | undefine
     askedBy: typeof rec.askedBy === 'string' ? rec.askedBy : '',
     askedAt,
     toHuman: rec.toHuman === true,
+    reminded: rec.reminded === true,
+    kind: rec.kind === 'interrupt' ? 'interrupt' : undefined,
+    interruptedExpertId: typeof rec.interruptedExpertId === 'string' && rec.interruptedExpertId !== ''
+      ? rec.interruptedExpertId
+      : undefined,
   }
 }
 
@@ -263,6 +273,9 @@ export function marshalTaskYaml(task: SerializeTask, body: string): string {
     lines.push(`  askedBy: ${task.pendingHuman.askedBy}`)
     lines.push(`  askedAt: ${task.pendingHuman.askedAt}`)
     if (task.pendingHuman.toHuman === true) lines.push('  toHuman: true')
+    if (task.pendingHuman.reminded === true) lines.push('  reminded: true')
+    if (task.pendingHuman.kind === 'interrupt') lines.push('  kind: interrupt')
+    if (task.pendingHuman.interruptedExpertId) lines.push(`  interruptedExpertId: ${task.pendingHuman.interruptedExpertId}`)
   }
   if (task.deliverText !== undefined && task.deliverText !== '') lines.push(`deliverText: ${yamlScalar(task.deliverText)}`)
   if (task.deliverAttempts !== undefined && task.deliverAttempts > 0) lines.push(`deliverAttempts: ${task.deliverAttempts}`)
@@ -523,8 +536,6 @@ export interface CreateTaskInput {
   access: Access
   target?: string
   groupSnapshot: GroupMember[]
-  /** 任务墙钟毫秒；<=0 用全局 task_round_timeout_ms。 */
-  roundTimeoutMs?: number
   /** 正文初值（缺省空）。 */
   body?: string
   nowMs?: number
@@ -536,9 +547,6 @@ export interface CreateTaskInput {
  */
 export function createTask(input: CreateTaskInput): TaskBoard {
   const now = input.nowMs ?? Date.now()
-  const timeout = input.roundTimeoutMs !== undefined && input.roundTimeoutMs > 0
-    ? input.roundTimeoutMs
-    : loadConfig().task_round_timeout_ms
   ensureJobsDirs()
   const taskId = mintTaskId(now)
   const task: TaskBoard = {
@@ -553,7 +561,7 @@ export function createTask(input: CreateTaskInput): TaskBoard {
     access: input.access,
     target: input.target === undefined || input.target === '' ? undefined : input.target,
     createdAt: now,
-    deadlineAt: now + timeout,
+    deadlineAt: 0,
     groupSnapshot: input.groupSnapshot.map((m) => ({ ...m })),
     assignees: [],
     body: input.body ?? '',
